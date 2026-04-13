@@ -21,9 +21,16 @@ const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 let offset = 0;
 let botUsername = null;
 let botId = null;
+let botFirstName = "Chiikawa";
+
+// Сколько времени бот считает разговор "активным" после обращения к нему
+const ACTIVE_CONVERSATION_MS = 8 * 60 * 1000;
 
 const greetedChats = new Set();
 const userLastSeen = new Map();
+
+// Память активного разговора по чату
+const activeChatUntil = new Map();
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -106,19 +113,62 @@ function normalizeText(text) {
   return String(text || "").trim();
 }
 
-function mentionsBot(text) {
+function cleanLower(text) {
+  return normalizeText(text).toLowerCase();
+}
+
+function mentionsBotUsername(text) {
   if (!botUsername) return false;
-  return text.toLowerCase().includes(`@${botUsername.toLowerCase()}`);
+  return cleanLower(text).includes(`@${botUsername.toLowerCase()}`);
 }
 
 function isReplyToBot(message) {
   return message?.reply_to_message?.from?.id === botId;
 }
 
+function getNameTriggers() {
+  const triggers = [
+    "chiikawa",
+    "chiikawa ai",
+    "chiikawa bot",
+    "чикикава",
+    "чики"
+  ];
+
+  if (botUsername) {
+    triggers.push(botUsername.toLowerCase());
+    triggers.push(botUsername.toLowerCase().replace(/^@/, ""));
+  }
+
+  if (botFirstName) {
+    triggers.push(botFirstName.toLowerCase());
+  }
+
+  return [...new Set(triggers)];
+}
+
+function mentionsBotByName(text) {
+  const lower = cleanLower(text);
+  const triggers = getNameTriggers();
+  return triggers.some(name => lower.includes(name));
+}
+
+function markChatActive(chatId) {
+  activeChatUntil.set(chatId, Date.now() + ACTIVE_CONVERSATION_MS);
+}
+
+function isChatActive(chatId) {
+  const until = activeChatUntil.get(chatId) || 0;
+  return Date.now() < until;
+}
+
 function shouldRespond(message) {
   const text = normalizeText(message.text);
+  const chatId = message.chat?.id;
 
   if (!text) return false;
+
+  // Команды всегда ок
   if (text.startsWith("/start")) return true;
   if (text.startsWith("/help")) return true;
   if (text.startsWith("/ca")) return true;
@@ -126,9 +176,18 @@ function shouldRespond(message) {
   if (text.startsWith("/website")) return true;
   if (text.startsWith("/mission")) return true;
 
+  // В личке отвечаем всегда
   if (isPrivateChat(message)) return true;
-  if (mentionsBot(text)) return true;
+
+  // В группе отвечаем если:
+  // 1) есть @username
+  // 2) есть имя бота
+  // 3) reply на бота
+  // 4) уже идёт активный разговор
+  if (mentionsBotUsername(text)) return true;
+  if (mentionsBotByName(text)) return true;
   if (isReplyToBot(message)) return true;
+  if (chatId && isChatActive(chatId)) return true;
 
   return false;
 }
@@ -150,9 +209,10 @@ function shouldSendSoftCheckIn(userId) {
   return Math.random() < 0.08;
 }
 
-function maybeAddTelegramPrefix(text, user) {
+function maybeAddTelegramPrefix(text, user, message) {
   const name = getDisplayName(user);
-  return `Message from ${name}: ${text}`;
+  const chatType = message.chat?.type || "unknown";
+  return `Telegram message from ${name} in a ${chatType} chat: ${text}`;
 }
 
 async function handleCommand(message) {
@@ -165,6 +225,7 @@ async function handleCommand(message) {
   if (text.startsWith("/start")) {
     const reply = await askChiikawa("Hi", sessionId, "greeting");
     greetedChats.add(chatId);
+    markChatActive(chatId);
     await sendTelegramMessage(chatId, reply, messageId);
     return true;
   }
@@ -182,7 +243,8 @@ Commands:
 /website
 /mission
 
-You can also just talk to me normally 🥺`,
+You can also just talk to me normally 🥺
+You can call me by name too, not only with @mention.`,
       messageId
     );
     return true;
@@ -213,6 +275,7 @@ You can also just talk to me normally 🥺`,
       sessionId,
       "normal"
     );
+    markChatActive(chatId);
     await sendTelegramMessage(chatId, reply, messageId);
     return true;
   }
@@ -228,6 +291,7 @@ async function maybeSendGreeting(message) {
   if (!greetedChats.has(chatId)) {
     const greeting = await askChiikawa("Hi", sessionId, "greeting");
     greetedChats.add(chatId);
+    markChatActive(chatId);
     await sendTelegramMessage(chatId, greeting);
   }
 }
@@ -245,7 +309,15 @@ async function handleRegularMessage(message) {
   await maybeSendGreeting(message);
   await sendTyping(chatId);
 
-  let prompt = maybeAddTelegramPrefix(text, message.from);
+  // Как только бот включился в диалог — держим окно активного разговора
+  markChatActive(chatId);
+
+  let prompt = maybeAddTelegramPrefix(text, message.from, message);
+
+  if (!isPrivateChat(message) && isChatActive(chatId)) {
+    prompt += `
+The group conversation with you is currently active. Even if the user did not mention you with @username this time, you should treat this as a direct continuation of the ongoing dialogue.`;
+  }
 
   if (shouldSendSoftCheckIn(userId)) {
     prompt += `
@@ -304,10 +376,12 @@ async function bootstrap() {
   const me = await tg("getMe");
   botUsername = me.username || null;
   botId = me.id || null;
+  botFirstName = me.first_name || "Chiikawa";
 
   console.log(`Telegram bot started as @${botUsername || "unknown_bot"}`);
   console.log(`Using backend: ${CHIIKAWA_AI_URL}`);
   console.log(`Website: ${getWebsiteUrl()}`);
+  console.log(`Bot first name: ${botFirstName}`);
 }
 
 async function pollLoop() {
