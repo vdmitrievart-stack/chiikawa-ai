@@ -110,7 +110,7 @@ MULTILINGUAL RULES
   - Hindi
   - Indonesian
   - and other widely used languages.
-- Always reply in the same language as the user's message.
+- Always reply in the same language as the user.
 - If the user writes in Japanese, reply in Japanese.
 - If the user writes in Chinese, reply in Chinese.
 - If the user writes in Russian, reply in Russian.
@@ -223,10 +223,10 @@ Please naturally follow your first greeting rule while also responding to the us
         }
       }
 
-      reply = parts.join("\\n").trim();
+      reply = parts.join("\n").trim();
     }
 
-    if (!reply || /^[-–—_\\s.]+$/.test(reply)) {
+    if (!reply || /^[-–—_\s.]+$/.test(reply)) {
       reply = "I'm here with you now ✨ Ask me again and I'll answer properly 🥺";
     }
 
@@ -245,5 +245,5 @@ Please naturally follow your first greeting rule while also responding to the us
 });
 
 app.listen(PORT, () => {
-  console.log(\`Server running on port \${PORT}\`);
+  console.log(`Server running on port ${PORT}`);
 });
