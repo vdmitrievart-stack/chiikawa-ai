@@ -280,6 +280,39 @@ async function sendCAMessage(chatId, replyToMessageId = null) {
   });
 }
 
+function isSimpleGreeting(text) {
+  const lower = cleanLower(text);
+  return [
+    "hi",
+    "hello",
+    "hey",
+    "gm",
+    "gn",
+    "yo",
+    "sup",
+    "привет",
+    "хай",
+    "здравствуй",
+    "здравствуйте",
+    "доброе утро",
+    "добрый вечер"
+  ].includes(lower);
+}
+
+function isThanksMessage(text) {
+  const lower = cleanLower(text);
+  return (
+    lower.includes("thank") ||
+    lower.includes("thanks") ||
+    lower.includes("thx") ||
+    lower.includes("спасибо") ||
+    lower.includes("благодарю") ||
+    lower.includes("good bot") ||
+    lower.includes("nice bot") ||
+    lower.includes("умница")
+  );
+}
+
 function shouldRespond(message) {
   const text = normalizeText(message.text);
 
@@ -404,7 +437,31 @@ async function handleRegularMessage(message) {
     return;
   }
 
+  if (isThanksMessage(text)) {
+    markChatActive(chatId);
+    await sendTelegramMessage(
+      chatId,
+      "Hehe… I’m happy I could help 🥺✨",
+      messageId
+    );
+    return;
+  }
+
+  if (isSimpleGreeting(text)) {
+    markChatActive(chatId);
+    await sendTelegramMessage(
+      chatId,
+      "Hi… I’m here 🥺✨",
+      messageId
+    );
+    return;
+  }
+
   await maybeSendGreeting(message);
+
+  if (Math.random() < 0.15) {
+    await sendTyping(chatId);
+  }
   await sendTyping(chatId);
 
   markChatActive(chatId);
@@ -435,6 +492,10 @@ If it feels natural, you may also end with a tiny community mission:
 
   const reply = await askChiikawa(prompt, sessionId, "normal");
   await sendTelegramMessage(chatId, reply, messageId);
+
+  if (Math.random() < 0.1) {
+    await sendTelegramMessage(chatId, "…🥺✨");
+  }
 }
 
 async function handleMessage(message) {
