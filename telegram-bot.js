@@ -24,6 +24,7 @@ let botId = null;
 let botFirstName = "Chiikawa";
 
 const ACTIVE_CONVERSATION_MS = 8 * 60 * 1000;
+const TOKEN_CA = "2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu";
 
 const greetedChats = new Set();
 const userLastSeen = new Map();
@@ -53,11 +54,12 @@ async function tg(method, body = {}) {
   return data.result;
 }
 
-async function sendTelegramMessage(chatId, text, replyToMessageId = null) {
+async function sendTelegramMessage(chatId, text, replyToMessageId = null, extra = {}) {
   const payload = {
     chat_id: chatId,
     text,
-    allow_sending_without_reply: true
+    allow_sending_without_reply: true,
+    ...extra
   };
 
   if (replyToMessageId) {
@@ -205,6 +207,71 @@ function maybeAddTelegramPrefix(text, user, message) {
   return `Telegram message from ${name} in a ${chatType} chat: ${text}`;
 }
 
+function isCARequest(text) {
+  const lower = cleanLower(text);
+
+  return (
+    lower === "ca" ||
+    lower === "ca?" ||
+    lower === "contract" ||
+    lower === "contract?" ||
+    lower === "token address" ||
+    lower === "address" ||
+    lower === "контракт" ||
+    lower === "контракт?" ||
+    lower === "адрес токена" ||
+    lower === "ca plz" ||
+    lower === "send ca" ||
+    lower.includes("give ca") ||
+    lower.includes("send contract") ||
+    lower.includes("drop ca") ||
+    lower.includes("кинь ca") ||
+    lower.includes("дай ca") ||
+    lower.includes("дай контракт") ||
+    lower.includes("скинь ca") ||
+    lower.includes("скинь контракт")
+  );
+}
+
+function buildCAMessage() {
+  return `CA
+${TOKEN_CA}
+
+Token type: CASHBACK
+
+$Chiikawa belongs to the community.
+
+Website
+${getWebsiteUrl()}`;
+}
+
+function buildCAKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "Copy CA",
+          copy_text: {
+            text: TOKEN_CA
+          }
+        }
+      ],
+      [
+        {
+          text: "Website",
+          url: getWebsiteUrl()
+        }
+      ]
+    ]
+  };
+}
+
+async function sendCAMessage(chatId, replyToMessageId = null) {
+  return sendTelegramMessage(chatId, buildCAMessage(), replyToMessageId, {
+    reply_markup: buildCAKeyboard()
+  });
+}
+
 async function handleCommand(message) {
   const text = normalizeText(message.text);
   const chatId = message.chat.id;
@@ -241,11 +308,7 @@ You can call me by name too, not only with @mention.`,
   }
 
   if (text.startsWith("/ca")) {
-    await sendTelegramMessage(
-      chatId,
-      "CA: 2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu",
-      messageId
-    );
+    await sendCAMessage(chatId, messageId);
     return true;
   }
 
@@ -297,6 +360,12 @@ async function handleRegularMessage(message) {
   if (!shouldRespond(message)) return;
 
   const lower = text.toLowerCase();
+
+  if (isCARequest(text)) {
+    markChatActive(chatId);
+    await sendCAMessage(chatId, messageId);
+    return;
+  }
 
   if (
     lower.includes("website") ||
