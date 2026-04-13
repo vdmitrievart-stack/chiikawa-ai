@@ -161,29 +161,6 @@ function isChatActive(chatId) {
   return Date.now() < until;
 }
 
-function shouldRespond(message) {
-  const text = normalizeText(message.text);
-  const chatId = message.chat?.id;
-
-  if (!text) return false;
-
-  if (text.startsWith("/start")) return true;
-  if (text.startsWith("/help")) return true;
-  if (text.startsWith("/ca")) return true;
-  if (text.startsWith("/mood")) return true;
-  if (text.startsWith("/website")) return true;
-  if (text.startsWith("/mission")) return true;
-
-  if (isPrivateChat(message)) return true;
-
-  if (mentionsBotUsername(text)) return true;
-  if (mentionsBotByName(text)) return true;
-  if (isReplyToBot(message)) return true;
-  if (chatId && isChatActive(chatId)) return true;
-
-  return false;
-}
-
 function getDisplayName(user) {
   if (!user) return "friend";
   return user.first_name || user.username || "friend";
@@ -233,6 +210,37 @@ function isCARequest(text) {
   );
 }
 
+function isWebsiteRequest(text) {
+  const lower = cleanLower(text);
+
+  return (
+    lower === "website" ||
+    lower === "site" ||
+    lower === "link" ||
+    lower === "web" ||
+    lower === "website?" ||
+    lower === "site?" ||
+    lower === "link?" ||
+    lower === "сайт" ||
+    lower === "ссылка" ||
+    lower === "сайт?" ||
+    lower === "ссылка?" ||
+    lower === "вебсайт" ||
+    lower === "web site" ||
+    lower.includes("website") ||
+    lower.includes("site link") ||
+    lower.includes("send website") ||
+    lower.includes("send link") ||
+    lower.includes("drop link") ||
+    lower.includes("дай сайт") ||
+    lower.includes("дай ссылку") ||
+    lower.includes("скинь сайт") ||
+    lower.includes("скинь ссылку") ||
+    lower.includes("ссылка на сайт") ||
+    lower.includes("где сайт")
+  );
+}
+
 function buildCAMessage() {
   return `CA
 ${TOKEN_CA}
@@ -270,6 +278,31 @@ async function sendCAMessage(chatId, replyToMessageId = null) {
   return sendTelegramMessage(chatId, buildCAMessage(), replyToMessageId, {
     reply_markup: buildCAKeyboard()
   });
+}
+
+function shouldRespond(message) {
+  const text = normalizeText(message.text);
+
+  if (!text) return false;
+
+  if (text.startsWith("/start")) return true;
+  if (text.startsWith("/help")) return true;
+  if (text.startsWith("/ca")) return true;
+  if (text.startsWith("/mood")) return true;
+  if (text.startsWith("/website")) return true;
+  if (text.startsWith("/mission")) return true;
+
+  if (isCARequest(text)) return true;
+  if (isWebsiteRequest(text)) return true;
+
+  if (isPrivateChat(message)) return true;
+
+  if (mentionsBotUsername(text)) return true;
+  if (mentionsBotByName(text)) return true;
+  if (isReplyToBot(message)) return true;
+  if (message.chat?.id && isChatActive(message.chat.id)) return true;
+
+  return false;
 }
 
 async function handleCommand(message) {
@@ -359,22 +392,13 @@ async function handleRegularMessage(message) {
   if (!text) return;
   if (!shouldRespond(message)) return;
 
-  const lower = text.toLowerCase();
-
   if (isCARequest(text)) {
     markChatActive(chatId);
     await sendCAMessage(chatId, messageId);
     return;
   }
 
-  if (
-    lower.includes("website") ||
-    lower.includes("site") ||
-    lower.includes("link") ||
-    lower.includes("сайт") ||
-    lower.includes("ссылка") ||
-    lower.includes("web")
-  ) {
+  if (isWebsiteRequest(text)) {
     markChatActive(chatId);
     await sendTelegramMessage(chatId, getWebsiteInvite(), messageId);
     return;
