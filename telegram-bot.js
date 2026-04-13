@@ -1,4 +1,12 @@
 import fetch from "node-fetch";
+import {
+  getWebsiteUrl,
+  getWebsiteInvite,
+  getRandomCommunityNudge,
+  shouldSendCommunityNudge,
+  getRandomMission,
+  shouldSendMission
+} from "./community-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHIIKAWA_AI_URL =
@@ -115,6 +123,8 @@ function shouldRespond(message) {
   if (text.startsWith("/help")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/mood")) return true;
+  if (text.startsWith("/website")) return true;
+  if (text.startsWith("/mission")) return true;
 
   if (isPrivateChat(message)) return true;
   if (mentionsBot(text)) return true;
@@ -162,7 +172,17 @@ async function handleCommand(message) {
   if (text.startsWith("/help")) {
     await sendTelegramMessage(
       chatId,
-      "Hi ✨\nI’m Chiikawa.\n\nYou can just talk to me normally.\nCommands:\n/start\n/help\n/ca\n/mood",
+      `Hi ✨ I’m Chiikawa.
+
+Commands:
+/start
+/help
+/ca
+/mood
+/website
+/mission
+
+You can also just talk to me normally 🥺`,
       messageId
     );
     return true;
@@ -174,6 +194,16 @@ async function handleCommand(message) {
       "CA: 2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu",
       messageId
     );
+    return true;
+  }
+
+  if (text.startsWith("/website")) {
+    await sendTelegramMessage(chatId, getWebsiteInvite(), messageId);
+    return true;
+  }
+
+  if (text.startsWith("/mission")) {
+    await sendTelegramMessage(chatId, getRandomMission(), messageId);
     return true;
   }
 
@@ -222,6 +252,18 @@ async function handleRegularMessage(message) {
 Also, if it feels natural, you may gently continue the conversation with one soft, engaging follow-up question. Keep it warm and not pushy.`;
   }
 
+  if (shouldSendCommunityNudge()) {
+    prompt += `
+You may also naturally include this gentle community reminder if it fits:
+"${getRandomCommunityNudge()}"`;
+  }
+
+  if (shouldSendMission()) {
+    prompt += `
+If it feels natural, you may also end with a tiny community mission:
+"${getRandomMission()}"`;
+  }
+
   const reply = await askChiikawa(prompt, sessionId, "normal");
   await sendTelegramMessage(chatId, reply, messageId);
 }
@@ -265,6 +307,7 @@ async function bootstrap() {
 
   console.log(`Telegram bot started as @${botUsername || "unknown_bot"}`);
   console.log(`Using backend: ${CHIIKAWA_AI_URL}`);
+  console.log(`Website: ${getWebsiteUrl()}`);
 }
 
 async function pollLoop() {
@@ -285,7 +328,6 @@ async function pollLoop() {
       }
     } catch (error) {
       const code = error?.telegram?.error_code;
-      const description = error?.telegram?.description || "";
 
       if (code === 409) {
         console.log("Another bot instance is polling. Waiting 15 seconds...");
@@ -293,7 +335,7 @@ async function pollLoop() {
         continue;
       }
 
-      console.error("Polling error:", error, description);
+      console.error("Polling error:", error);
       await sleep(3000);
     }
   }
