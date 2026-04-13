@@ -1,9 +1,12 @@
 export function getWebsiteUrl() {
-  return "https://chiikawaai.netlify.app";
+  return "https://chiikawasol.com/";
 }
 
 export function getWebsiteInvite() {
-  return `Visit our website too ✨\n${getWebsiteUrl()}\n\nYou can meet Chiikawa there, explore the vibe, and spend more time with our little community 🥺`;
+  return `Visit our website too ✨
+${getWebsiteUrl()}
+
+You can meet Chiikawa there, explore the vibe, and spend more time with our little community 🥺`;
 }
 
 export function getRandomCommunityNudge() {
