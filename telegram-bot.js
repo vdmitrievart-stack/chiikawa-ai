@@ -23,13 +23,10 @@ let botUsername = null;
 let botId = null;
 let botFirstName = "Chiikawa";
 
-// Сколько времени бот считает разговор "активным" после обращения к нему
 const ACTIVE_CONVERSATION_MS = 8 * 60 * 1000;
 
 const greetedChats = new Set();
 const userLastSeen = new Map();
-
-// Память активного разговора по чату
 const activeChatUntil = new Map();
 
 function sleep(ms) {
@@ -168,7 +165,6 @@ function shouldRespond(message) {
 
   if (!text) return false;
 
-  // Команды всегда ок
   if (text.startsWith("/start")) return true;
   if (text.startsWith("/help")) return true;
   if (text.startsWith("/ca")) return true;
@@ -176,14 +172,8 @@ function shouldRespond(message) {
   if (text.startsWith("/website")) return true;
   if (text.startsWith("/mission")) return true;
 
-  // В личке отвечаем всегда
   if (isPrivateChat(message)) return true;
 
-  // В группе отвечаем если:
-  // 1) есть @username
-  // 2) есть имя бота
-  // 3) reply на бота
-  // 4) уже идёт активный разговор
   if (mentionsBotUsername(text)) return true;
   if (mentionsBotByName(text)) return true;
   if (isReplyToBot(message)) return true;
@@ -306,10 +296,24 @@ async function handleRegularMessage(message) {
   if (!text) return;
   if (!shouldRespond(message)) return;
 
+  const lower = text.toLowerCase();
+
+  if (
+    lower.includes("website") ||
+    lower.includes("site") ||
+    lower.includes("link") ||
+    lower.includes("сайт") ||
+    lower.includes("ссылка") ||
+    lower.includes("web")
+  ) {
+    markChatActive(chatId);
+    await sendTelegramMessage(chatId, getWebsiteInvite(), messageId);
+    return;
+  }
+
   await maybeSendGreeting(message);
   await sendTyping(chatId);
 
-  // Как только бот включился в диалог — держим окно активного разговора
   markChatActive(chatId);
 
   let prompt = maybeAddTelegramPrefix(text, message.from, message);
