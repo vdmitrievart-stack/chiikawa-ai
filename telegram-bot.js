@@ -12,6 +12,14 @@ import {
   escalateAction,
   getMuteDurationSeconds
 } from "./moderation-engine.js";
+import {
+  getAvailableMoods,
+  isMoodSupported,
+  getTrackForMood,
+  getRandomDJTrack,
+  getPlaylistMessage,
+  getSpinMessage
+} from "./music-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHIIKAWA_AI_URL =
@@ -359,6 +367,15 @@ function isThanksMessage(text) {
   );
 }
 
+function parseMoodCommand(text) {
+  const lower = cleanLower(text);
+
+  if (!lower.startsWith("/mood")) return null;
+
+  const parts = lower.split(/\s+/);
+  return parts[1] || null;
+}
+
 function shouldRespond(message) {
   const text = normalizeText(message.text);
 
@@ -370,6 +387,9 @@ function shouldRespond(message) {
   if (text.startsWith("/mood")) return true;
   if (text.startsWith("/website")) return true;
   if (text.startsWith("/mission")) return true;
+  if (text.startsWith("/dj")) return true;
+  if (text.startsWith("/playlist")) return true;
+  if (text.startsWith("/spin")) return true;
 
   if (isCARequest(text)) return true;
   if (isWebsiteRequest(text)) return true;
@@ -394,19 +414,20 @@ async function moderateMessageIfNeeded(message) {
     return false;
   }
 
-  // В личке не модерируем
   if (isPrivateChat(message)) {
     return false;
   }
 
-  // Не модерируем служебные команды и полезные команды
   if (
     text.startsWith("/start") ||
     text.startsWith("/help") ||
     text.startsWith("/ca") ||
     text.startsWith("/website") ||
     text.startsWith("/mission") ||
-    text.startsWith("/mood")
+    text.startsWith("/mood") ||
+    text.startsWith("/dj") ||
+    text.startsWith("/playlist") ||
+    text.startsWith("/spin")
   ) {
     return false;
   }
@@ -430,7 +451,8 @@ async function moderateMessageIfNeeded(message) {
       await banTelegramUser(chatId, userId);
       await sendTelegramMessage(
         chatId,
-        `A suspicious spam/scam account was removed.\nReason: ${analysis.reason}`
+        `A suspicious spam/scam account was removed.
+Reason: ${analysis.reason}`
       );
     } catch (err) {
       console.error("Failed to ban user:", err);
@@ -445,7 +467,9 @@ async function moderateMessageIfNeeded(message) {
       await muteTelegramUser(chatId, userId, muteSeconds);
       await sendTelegramMessage(
         chatId,
-        `A suspicious promotional message was removed.\nThe user has been muted temporarily.\nReason: ${analysis.reason}`
+        `A suspicious promotional message was removed.
+The user has been muted temporarily.
+Reason: ${analysis.reason}`
       );
     } catch (err) {
       console.error("Failed to mute user:", err);
@@ -472,6 +496,8 @@ async function handleCommand(message) {
   }
 
   if (text.startsWith("/help")) {
+    const moods = getAvailableMoods().join(", ");
+
     await sendTelegramMessage(
       chatId,
       `Hi ✨ I’m Chiikawa.
@@ -480,9 +506,12 @@ Commands:
 /start
 /help
 /ca
-/mood
+/mood <${moods}>
 /website
 /mission
+/dj
+/playlist
+/spin
 
 You can also just talk to me normally 🥺
 You can call me by name too, not only with @mention.`,
@@ -506,7 +535,45 @@ You can call me by name too, not only with @mention.`,
     return true;
   }
 
+  if (text.startsWith("/playlist")) {
+    await sendTelegramMessage(chatId, getPlaylistMessage(), messageId);
+    return true;
+  }
+
+  if (text.startsWith("/spin")) {
+    await sendTelegramMessage(chatId, getSpinMessage(), messageId);
+    const result = getRandomDJTrack();
+    await sendTelegramMessage(chatId, result.message, messageId);
+    return true;
+  }
+
+  if (text.startsWith("/dj")) {
+    const result = getRandomDJTrack();
+    await sendTelegramMessage(chatId, result.message, messageId);
+    return true;
+  }
+
   if (text.startsWith("/mood")) {
+    const mood = parseMoodCommand(text);
+
+    if (mood && isMoodSupported(mood)) {
+      const result = getTrackForMood(mood);
+      await sendTelegramMessage(chatId, result.message, messageId);
+      return true;
+    }
+
+    if (mood && !isMoodSupported(mood)) {
+      await sendTelegramMessage(
+        chatId,
+        `I don’t know that mood yet 🥺
+
+Try:
+${getAvailableMoods().map(x => `/mood ${x}`).join("\n")}`,
+        messageId
+      );
+      return true;
+    }
+
     const reply = await askChiikawa(
       "Tell me your current mood in one warm message and maybe ask me something back.",
       sessionId,
