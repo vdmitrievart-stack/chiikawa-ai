@@ -18,7 +18,10 @@ import {
   getTrackForMood,
   getRandomDJTrack,
   getPlaylistMessage,
-  getSpinMessage
+  getSpinMessage,
+  getRadioIntro,
+  getMoodOfTheDay,
+  buildMusicKeyboard
 } from "./music-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -88,6 +91,13 @@ async function sendTyping(chatId) {
   return tg("sendChatAction", {
     chat_id: chatId,
     action: "typing"
+  });
+}
+
+async function answerCallbackQuery(callbackQueryId, text = "") {
+  return tg("answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text
   });
 }
 
@@ -390,6 +400,7 @@ function shouldRespond(message) {
   if (text.startsWith("/dj")) return true;
   if (text.startsWith("/playlist")) return true;
   if (text.startsWith("/spin")) return true;
+  if (text.startsWith("/radio")) return true;
 
   if (isCARequest(text)) return true;
   if (isWebsiteRequest(text)) return true;
@@ -427,7 +438,8 @@ async function moderateMessageIfNeeded(message) {
     text.startsWith("/mood") ||
     text.startsWith("/dj") ||
     text.startsWith("/playlist") ||
-    text.startsWith("/spin")
+    text.startsWith("/spin") ||
+    text.startsWith("/radio")
   ) {
     return false;
   }
@@ -480,6 +492,54 @@ Reason: ${analysis.reason}`
   return false;
 }
 
+async function handleMusicCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+
+  if (!chatId) return false;
+
+  if (data === "music:dj") {
+    const result = getRandomDJTrack();
+    await answerCallbackQuery(callbackQuery.id, "Tiny DJ picked something ✨");
+    await sendTelegramMessage(chatId, result.message, messageId);
+    return true;
+  }
+
+  if (data === "music:radio") {
+    const intro = getRadioIntro();
+    const dayTrack = getMoodOfTheDay();
+    await answerCallbackQuery(callbackQuery.id, "Chiikawa Radio is on 🎧");
+    await sendTelegramMessage(chatId, `${intro}
+
+Mood of the day:
+${dayTrack.message}`, messageId);
+    return true;
+  }
+
+  if (data === "music:spin") {
+    const intro = getSpinMessage();
+    const result = getRandomDJTrack();
+    await answerCallbackQuery(callbackQuery.id, "Spinning...");
+    await sendTelegramMessage(chatId, `${intro}
+
+${result.message}`, messageId);
+    return true;
+  }
+
+  if (data.startsWith("music:mood:")) {
+    const mood = data.split(":")[2];
+    if (isMoodSupported(mood)) {
+      const result = getTrackForMood(mood);
+      await answerCallbackQuery(callbackQuery.id, `Mood: ${mood}`);
+      await sendTelegramMessage(chatId, result.message, messageId);
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function handleCommand(message) {
   const text = normalizeText(message.text);
   const chatId = message.chat.id;
@@ -512,6 +572,7 @@ Commands:
 /dj
 /playlist
 /spin
+/radio
 
 You can also just talk to me normally 🥺
 You can call me by name too, not only with @mention.`,
@@ -536,20 +597,40 @@ You can call me by name too, not only with @mention.`,
   }
 
   if (text.startsWith("/playlist")) {
-    await sendTelegramMessage(chatId, getPlaylistMessage(), messageId);
+    await sendTelegramMessage(chatId, getPlaylistMessage(), messageId, {
+      reply_markup: buildMusicKeyboard()
+    });
     return true;
   }
 
   if (text.startsWith("/spin")) {
-    await sendTelegramMessage(chatId, getSpinMessage(), messageId);
+    const intro = getSpinMessage();
     const result = getRandomDJTrack();
-    await sendTelegramMessage(chatId, result.message, messageId);
+    await sendTelegramMessage(chatId, `${intro}
+
+${result.message}`, messageId, {
+      reply_markup: buildMusicKeyboard()
+    });
+    return true;
+  }
+
+  if (text.startsWith("/radio")) {
+    const intro = getRadioIntro();
+    const dayTrack = getMoodOfTheDay();
+    await sendTelegramMessage(chatId, `${intro}
+
+Mood of the day:
+${dayTrack.message}`, messageId, {
+      reply_markup: buildMusicKeyboard()
+    });
     return true;
   }
 
   if (text.startsWith("/dj")) {
     const result = getRandomDJTrack();
-    await sendTelegramMessage(chatId, result.message, messageId);
+    await sendTelegramMessage(chatId, result.message, messageId, {
+      reply_markup: buildMusicKeyboard()
+    });
     return true;
   }
 
@@ -558,7 +639,9 @@ You can call me by name too, not only with @mention.`,
 
     if (mood && isMoodSupported(mood)) {
       const result = getTrackForMood(mood);
-      await sendTelegramMessage(chatId, result.message, messageId);
+      await sendTelegramMessage(chatId, result.message, messageId, {
+        reply_markup: buildMusicKeyboard()
+      });
       return true;
     }
 
@@ -569,7 +652,10 @@ You can call me by name too, not only with @mention.`,
 
 Try:
 ${getAvailableMoods().map(x => `/mood ${x}`).join("\n")}`,
-        messageId
+        messageId,
+        {
+          reply_markup: buildMusicKeyboard()
+        }
       );
       return true;
     }
@@ -580,7 +666,9 @@ ${getAvailableMoods().map(x => `/mood ${x}`).join("\n")}`,
       "normal"
     );
     markChatActive(chatId);
-    await sendTelegramMessage(chatId, reply, messageId);
+    await sendTelegramMessage(chatId, reply, messageId, {
+      reply_markup: buildMusicKeyboard()
+    });
     return true;
   }
 
@@ -736,11 +824,15 @@ async function pollLoop() {
       const updates = await tg("getUpdates", {
         offset,
         timeout: 25,
-        allowed_updates: ["message"]
+        allowed_updates: ["message", "callback_query"]
       });
 
       for (const update of updates) {
         offset = update.update_id + 1;
+
+        if (update.callback_query) {
+          await handleMusicCallback(update.callback_query);
+        }
 
         if (update.message) {
           await handleMessage(update.message);
