@@ -7,6 +7,11 @@ import {
   getRandomMission,
   shouldSendMission
 } from "./community-engine.js";
+import {
+  analyzeModeration,
+  escalateAction,
+  getMuteDurationSeconds
+} from "./moderation-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHIIKAWA_AI_URL =
@@ -75,6 +80,47 @@ async function sendTyping(chatId) {
   return tg("sendChatAction", {
     chat_id: chatId,
     action: "typing"
+  });
+}
+
+async function deleteTelegramMessage(chatId, messageId) {
+  return tg("deleteMessage", {
+    chat_id: chatId,
+    message_id: messageId
+  });
+}
+
+async function muteTelegramUser(chatId, userId, durationSeconds) {
+  const untilDate = Math.floor(Date.now() / 1000) + durationSeconds;
+
+  return tg("restrictChatMember", {
+    chat_id: chatId,
+    user_id: userId,
+    permissions: {
+      can_send_messages: false,
+      can_send_audios: false,
+      can_send_documents: false,
+      can_send_photos: false,
+      can_send_videos: false,
+      can_send_video_notes: false,
+      can_send_voice_notes: false,
+      can_send_polls: false,
+      can_send_other_messages: false,
+      can_add_web_page_previews: false,
+      can_change_info: false,
+      can_invite_users: false,
+      can_pin_messages: false,
+      can_manage_topics: false
+    },
+    until_date: untilDate
+  });
+}
+
+async function banTelegramUser(chatId, userId) {
+  return tg("banChatMember", {
+    chat_id: chatId,
+    user_id: userId,
+    revoke_messages: true
   });
 }
 
@@ -338,6 +384,78 @@ function shouldRespond(message) {
   return false;
 }
 
+async function moderateMessageIfNeeded(message) {
+  const chatId = message.chat?.id;
+  const messageId = message.message_id;
+  const userId = message.from?.id;
+  const text = normalizeText(message.text);
+
+  if (!chatId || !messageId || !userId || !text) {
+    return false;
+  }
+
+  // В личке не модерируем
+  if (isPrivateChat(message)) {
+    return false;
+  }
+
+  // Не модерируем служебные команды и полезные команды
+  if (
+    text.startsWith("/start") ||
+    text.startsWith("/help") ||
+    text.startsWith("/ca") ||
+    text.startsWith("/website") ||
+    text.startsWith("/mission") ||
+    text.startsWith("/mood")
+  ) {
+    return false;
+  }
+
+  const analysis = analyzeModeration(text);
+
+  if (analysis.action === "none") {
+    return false;
+  }
+
+  const escalation = escalateAction(userId, analysis.action, analysis.reason);
+
+  try {
+    await deleteTelegramMessage(chatId, messageId);
+  } catch (err) {
+    console.error("Failed to delete suspicious message:", err);
+  }
+
+  if (escalation.finalAction === "ban") {
+    try {
+      await banTelegramUser(chatId, userId);
+      await sendTelegramMessage(
+        chatId,
+        `A suspicious spam/scam account was removed.\nReason: ${analysis.reason}`
+      );
+    } catch (err) {
+      console.error("Failed to ban user:", err);
+    }
+    return true;
+  }
+
+  if (escalation.finalAction === "mute") {
+    const muteSeconds = getMuteDurationSeconds(escalation.state.strikes - 1);
+
+    try {
+      await muteTelegramUser(chatId, userId, muteSeconds);
+      await sendTelegramMessage(
+        chatId,
+        `A suspicious promotional message was removed.\nThe user has been muted temporarily.\nReason: ${analysis.reason}`
+      );
+    } catch (err) {
+      console.error("Failed to mute user:", err);
+    }
+    return true;
+  }
+
+  return false;
+}
+
 async function handleCommand(message) {
   const text = normalizeText(message.text);
   const chatId = message.chat.id;
@@ -502,6 +620,9 @@ async function handleMessage(message) {
   if (!message || message.text == null) return;
 
   try {
+    const moderated = await moderateMessageIfNeeded(message);
+    if (moderated) return;
+
     const wasCommandHandled = await handleCommand(message);
     if (wasCommandHandled) return;
 
