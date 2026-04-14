@@ -6,6 +6,8 @@ import { fetchTweets, filterTweets, formatAlert } from "./x-engine.js";
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
 const X_GIF_FILE_IDS = process.env.X_GIF_FILE_IDS || "";
+const CHIIKAWA_AI_URL =
+  process.env.CHIIKAWA_AI_URL || "https://chiikawa-ai.onrender.com/chat";
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_ALERT_CHAT_ID) {
   console.error("Missing Telegram config");
@@ -82,7 +84,6 @@ function persistSentTweetId(tweetId) {
   const trimmed = Array.from(sentTweets).slice(-MAX_STORED_IDS);
   state.sentTweetIds = trimmed;
 
-  // пересобираем Set чтобы не пух бесконечно
   sentTweets.clear();
   for (const id of trimmed) {
     sentTweets.add(id);
@@ -141,6 +142,64 @@ I’m watching X for Chiikawa mentions and posting only higher-signal finds here
   }
 }
 
+async function askChiikawaForXReaction(tweet) {
+  try {
+    const prompt = `
+You found a post on X and want to react to it as Chiikawa.
+
+Rules:
+- Reply in the SAME language as the tweet.
+- Keep it short: 1 to 3 lines maximum.
+- Be playful, witty, and a little humorous when it fits.
+- Do not repeat the entire tweet.
+- Do not be mean or toxic.
+- Do not sound corporate.
+- React to the meaning of the post, not just keywords.
+- If the post is hype, be excited.
+- If the post is thoughtful, be thoughtful back.
+- If the post is funny, add a light funny reaction.
+- Do not use hashtags.
+- Do not include links.
+- Sound like Chiikawa: cute, alive, perceptive, slightly emotional.
+
+Context:
+Author: @${tweet.username}
+Followers: ${tweet.followers}
+Tweet text:
+${tweet.text}
+`;
+
+    const res = await fetch(CHIIKAWA_AI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        message: prompt,
+        sessionId: `xwatcher_${tweet.id}`,
+        mode: "normal"
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(`Chiikawa backend error: ${JSON.stringify(data)}`);
+    }
+
+    const reply = String(data.reply || "").trim();
+
+    if (!reply) {
+      return null;
+    }
+
+    return reply;
+  } catch (error) {
+    console.error("AI reaction error:", error.message);
+    return null;
+  }
+}
+
 async function postTweetAlert(tweet) {
   const randomGif = pickRandomGif(X_GIF_POOL);
 
@@ -153,12 +212,21 @@ async function postTweetAlert(tweet) {
   }
 
   await sendToTelegram(formatAlert(tweet));
+
+  const aiReaction = await askChiikawaForXReaction(tweet);
+
+  if (aiReaction) {
+    await sendToTelegram(`💭 Chiikawa reaction
+
+${aiReaction}`);
+  }
 }
 
 async function loop() {
   console.log("X watcher started...");
   console.log("Loaded sent tweet ids:", sentTweets.size);
   console.log("Loaded GIF ids:", X_GIF_POOL.length);
+  console.log("AI backend:", CHIIKAWA_AI_URL);
 
   await sendStartupMessageOnce();
 
@@ -171,7 +239,6 @@ async function loop() {
         `Fetched ${tweets.length} tweets, ${filtered.length} new tweets passed filters`
       );
 
-      // На первом цикле можно только прогреться и не постить старое
       if (!warmedUp && STARTUP_WARM_SKIP) {
         for (const tweet of filtered) {
           persistSentTweetId(tweet.id);
