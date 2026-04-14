@@ -4,7 +4,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
-// Плейлист, который ты дал
+// Твой плейлист
 const YOUTUBE_PLAYLIST_ID = "PLHIKP_Dyl1zwJy0JjSvVV5l8Kyg-8sjdv";
 
 if (!TELEGRAM_BOT_TOKEN) {
@@ -25,10 +25,9 @@ if (!YOUTUBE_API_KEY) {
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 минут
 
-// Храним уже виденные видео только в памяти процесса.
-// Для старта этого достаточно.
 const seenVideoIds = new Set();
 let initialized = false;
+let startupMessageSent = false;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -72,7 +71,7 @@ function buildYoutubeApiUrl() {
   const params = new URLSearchParams({
     part: "snippet,contentDetails",
     playlistId: YOUTUBE_PLAYLIST_ID,
-    maxResults: "5",
+    maxResults: "10",
     key: YOUTUBE_API_KEY
   });
 
@@ -81,7 +80,6 @@ function buildYoutubeApiUrl() {
 
 async function fetchLatestPlaylistItems() {
   const url = buildYoutubeApiUrl();
-
   const res = await fetch(url);
   const data = await res.json();
 
@@ -95,8 +93,12 @@ async function fetchLatestPlaylistItems() {
 function mapItem(item) {
   const videoId = item?.contentDetails?.videoId;
   const title = item?.snippet?.title || "New episode";
-  const publishedAt = item?.contentDetails?.videoPublishedAt || item?.snippet?.publishedAt || "";
+  const publishedAt =
+    item?.contentDetails?.videoPublishedAt ||
+    item?.snippet?.publishedAt ||
+    "";
   const thumbnails = item?.snippet?.thumbnails || {};
+
   const thumbnailUrl =
     thumbnails.maxres?.url ||
     thumbnails.standard?.url ||
@@ -132,26 +134,49 @@ async function announceVideo(video) {
       await sendPhoto(video.thumbnailUrl, caption);
       return;
     } catch (error) {
-      console.error("sendPhoto failed, falling back to text:", error.message);
+      console.error("sendPhoto failed, fallback to text:", error.message);
     }
   }
 
   await sendText(caption);
 }
 
+async function sendStartupMessageOnce() {
+  if (startupMessageSent) return;
+
+  startupMessageSent = true;
+
+  try {
+    await sendText(
+      `📺 YouTube watcher is live
+
+Watching playlist:
+https://www.youtube.com/playlist?list=${YOUTUBE_PLAYLIST_ID}
+
+I will announce new Chiikawa episodes here ✨`
+    );
+  } catch (error) {
+    console.error("Failed to send startup message:", error.message);
+  }
+}
+
 async function checkYouTube() {
   const items = await fetchLatestPlaylistItems();
+
   const videos = items
     .map(mapItem)
-    .filter(v => v.videoId && v.videoUrl)
+    .filter(video => video.videoId && video.videoUrl)
     .sort((a, b) => new Date(a.publishedAt).getTime() - new Date(b.publishedAt).getTime());
+
+  console.log(`Fetched ${videos.length} videos from playlist`);
 
   if (!initialized) {
     for (const video of videos) {
       seenVideoIds.add(video.videoId);
     }
+
     initialized = true;
-    console.log(`YouTube watcher initialized with ${videos.length} known videos`);
+    console.log(`Initialized with ${videos.length} known videos`);
     return;
   }
 
@@ -159,7 +184,7 @@ async function checkYouTube() {
 
   for (const video of newVideos) {
     seenVideoIds.add(video.videoId);
-    console.log(`New YouTube video detected: ${video.title}`);
+    console.log(`New video detected: ${video.title}`);
     await announceVideo(video);
   }
 }
@@ -167,6 +192,8 @@ async function checkYouTube() {
 async function main() {
   console.log("YouTube watcher started...");
   console.log(`Watching playlist: ${YOUTUBE_PLAYLIST_ID}`);
+
+  await sendStartupMessageOnce();
 
   while (true) {
     try {
