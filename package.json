@@ -1,13 +1,18 @@
 {
-  "name": "chiikawa-buybot",
+  "name": "chiikawa-ai",
   "version": "1.0.0",
-  "description": "Chiikawa Buybot + AI + Telegram",
-  "main": "buybot-worker.js",
+  "description": "Chiikawa AI server + Telegram bot + X watcher + Buybot",
+  "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node buybot-worker.js"
+    "start": "node server.js",
+    "telegram": "node telegram-bot.js",
+    "x": "node x-watcher.js",
+    "buybot": "node buybot-worker.js"
   },
   "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
     "node-fetch": "^3.3.2"
   }
 }
