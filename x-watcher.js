@@ -9,13 +9,9 @@ const X_GIF_FILE_IDS = process.env.X_GIF_FILE_IDS || "";
 const CHIIKAWA_AI_URL =
   process.env.CHIIKAWA_AI_URL || "https://chiikawa-ai.onrender.com/chat";
 
-const SEND_X_STARTUP_MESSAGE =
-  String(process.env.SEND_X_STARTUP_MESSAGE || "false").toLowerCase() === "true";
-const X_STARTUP_COOLDOWN_HOURS = Number(process.env.X_STARTUP_COOLDOWN_HOURS || 12);
 const LOOP_INTERVAL_MS = Number(process.env.X_LOOP_INTERVAL_MS || 60000);
 const MAX_STORED_IDS = Number(process.env.X_MAX_STORED_IDS || 1500);
 const STATE_FILE = path.resolve("./x-watcher-state.json");
-const STARTUP_WARM_SKIP = true;
 
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_ALERT_CHAT_ID) {
   console.error("Missing Telegram config");
@@ -49,65 +45,34 @@ function pickRandomGif(pool) {
 function loadState() {
   try {
     if (!fs.existsSync(STATE_FILE)) {
-      return {
-        sentTweetIds: [],
-        sentTweetUrls: [],
-        lastStartupMessageAt: 0
-      };
+      return { sentTweetIds: [], sentTweetUrls: [] };
     }
 
-    const raw = fs.readFileSync(STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-
-    return {
-      sentTweetIds: Array.isArray(parsed.sentTweetIds) ? parsed.sentTweetIds : [],
-      sentTweetUrls: Array.isArray(parsed.sentTweetUrls) ? parsed.sentTweetUrls : [],
-      lastStartupMessageAt: Number(parsed.lastStartupMessageAt || 0)
-    };
-  } catch (error) {
-    console.error("Failed to load x-watcher state:", error.message);
-    return {
-      sentTweetIds: [],
-      sentTweetUrls: [],
-      lastStartupMessageAt: 0
-    };
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return { sentTweetIds: [], sentTweetUrls: [] };
   }
 }
 
 function saveState(state) {
-  try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
-  } catch (error) {
-    console.error("Failed to save x-watcher state:", error.message);
-  }
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 const state = loadState();
-const sentTweetIds = new Set(state.sentTweetIds);
-const sentTweetUrls = new Set(state.sentTweetUrls);
+const sentTweetIds = new Set(state.sentTweetIds || []);
+const sentTweetUrls = new Set(state.sentTweetUrls || []);
 
 function persistTweet(tweet) {
   if (!tweet?.id || !tweet?.url) return;
 
-  if (sentTweetIds.has(tweet.id) || sentTweetUrls.has(tweet.url)) {
-    console.log("Duplicate prevented:", tweet.id, tweet.url);
-    return;
-  }
-
   sentTweetIds.add(tweet.id);
   sentTweetUrls.add(tweet.url);
 
-  const trimmedIds = Array.from(sentTweetIds).slice(-MAX_STORED_IDS);
-  const trimmedUrls = Array.from(sentTweetUrls).slice(-MAX_STORED_IDS);
+  const ids = Array.from(sentTweetIds).slice(-MAX_STORED_IDS);
+  const urls = Array.from(sentTweetUrls).slice(-MAX_STORED_IDS);
 
-  state.sentTweetIds = trimmedIds;
-  state.sentTweetUrls = trimmedUrls;
-
-  sentTweetIds.clear();
-  sentTweetUrls.clear();
-
-  for (const id of trimmedIds) sentTweetIds.add(id);
-  for (const url of trimmedUrls) sentTweetUrls.add(url);
+  state.sentTweetIds = ids;
+  state.sentTweetUrls = urls;
 
   saveState(state);
 }
@@ -115,194 +80,106 @@ function persistTweet(tweet) {
 async function tg(method, body = {}) {
   const res = await fetch(`${TG_API}/${method}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
 
   const data = await res.json();
-
-  if (!res.ok || !data.ok) {
-    throw new Error(`Telegram API error in ${method}: ${JSON.stringify(data)}`);
-  }
-
+  if (!data.ok) throw new Error(JSON.stringify(data));
   return data.result;
 }
 
-async function sendText(text, replyToMessageId = null) {
-  const body = {
+async function sendText(text) {
+  return tg("sendMessage", {
     chat_id: TELEGRAM_ALERT_CHAT_ID,
-    text,
-    disable_web_page_preview: false
-  };
-
-  if (replyToMessageId) {
-    body.reply_parameters = {
-      message_id: replyToMessageId
-    };
-  }
-
-  return tg("sendMessage", body);
+    text
+  });
 }
 
-async function sendGif(fileId, caption = "", replyToMessageId = null) {
-  const body = {
+async function sendGifWithReply(fileId, caption, replyToMessageId) {
+  return tg("sendDocument", {
     chat_id: TELEGRAM_ALERT_CHAT_ID,
     document: fileId,
-    caption
-  };
-
-  if (replyToMessageId) {
-    body.reply_parameters = {
+    caption,
+    reply_parameters: {
       message_id: replyToMessageId
-    };
-  }
-
-  return tg("sendDocument", body);
-}
-
-async function maybeSendStartupMessage() {
-  if (!SEND_X_STARTUP_MESSAGE) return;
-
-  const now = Date.now();
-  const cooldownMs = X_STARTUP_COOLDOWN_HOURS * 60 * 60 * 1000;
-
-  if (now - state.lastStartupMessageAt < cooldownMs) {
-    return;
-  }
-
-  try {
-    await sendText(
-      `🐦 X watcher is live
-
-I’m watching X for Chiikawa mentions and posting only higher-signal finds here ✨`
-    );
-
-    state.lastStartupMessageAt = now;
-    saveState(state);
-  } catch (error) {
-    console.error("Failed to send startup message:", error.message);
-  }
+    }
+  });
 }
 
 async function askChiikawaForXReaction(tweet) {
   try {
     const prompt = `
-You are reacting to a post from X as Chiikawa.
+React to this X post.
 
 Rules:
-- Reply in the SAME language as the tweet.
-- Keep it short: 1 or 2 lines maximum.
-- No greeting.
-- No self introduction.
-- Do not say who you are.
-- Do not say "Hi", "Hello", or "I'm Chiikawa".
-- Do not restate the whole post.
-- React to the meaning of the post.
-- Be playful, perceptive, and slightly humorous when appropriate.
-- Be warm, not toxic.
-- No hashtags.
-- No links.
-- Sound like a natural direct reaction under the post in Telegram.
+- Same language as tweet
+- 1 short sentence max
+- No greetings
+- No "I'm Chiikawa"
+- Just reaction
+- Slightly funny / cute
 
-Context:
-Author: @${tweet.username}
-Followers: ${tweet.followers}
-Tweet text:
+Tweet:
 ${tweet.text}
 `;
 
     const res = await fetch(CHIIKAWA_AI_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         message: prompt,
-        sessionId: `xwatcher_${tweet.id}`,
-        mode: "normal"
+        sessionId: `x_${tweet.id}`
       })
     });
 
     const data = await res.json();
-
-    if (!res.ok) {
-      throw new Error(`Chiikawa backend error: ${JSON.stringify(data)}`);
-    }
-
-    const reply = String(data.reply || "").trim();
-    return reply || null;
-  } catch (error) {
-    console.error("AI reaction error:", error.message);
-    return null;
+    return (data.reply || "").trim();
+  } catch {
+    return "🥺✨";
   }
 }
 
 async function postTweetAlert(tweet) {
-  // 1. Сначала публикуем сам X-пост
-  const postMessage = await sendText(formatAlert(tweet));
-  const replyToId = postMessage?.message_id || null;
+  const post = await sendText(formatAlert(tweet));
+  const msgId = post.message_id;
 
-  // 2. Потом reply-gif именно к этому посту
-  const randomGif = pickRandomGif(X_GIF_POOL);
+  const gif = pickRandomGif(X_GIF_POOL);
+  const reaction = await askChiikawaForXReaction(tweet);
 
-  if (randomGif && replyToId) {
-    try {
-      await sendGif(randomGif, "✨", replyToId);
-    } catch (error) {
-      console.error("GIF send error:", error.message);
-    }
-  }
-
-  // 3. Потом AI-реакция тоже reply к этому посту
-  const aiReaction = await askChiikawaForXReaction(tweet);
-
-  if (aiReaction && replyToId) {
-    await sendText(aiReaction, replyToId);
+  if (gif) {
+    await sendGifWithReply(gif, reaction || "✨", msgId);
+  } else {
+    await tg("sendMessage", {
+      chat_id: TELEGRAM_ALERT_CHAT_ID,
+      text: reaction,
+      reply_parameters: { message_id: msgId }
+    });
   }
 }
 
 async function loop() {
-  console.log("X watcher PRO MAX started...");
-  console.log("Loaded sent tweet ids:", sentTweetIds.size);
-  console.log("Loaded sent tweet urls:", sentTweetUrls.size);
-  console.log("Loaded GIF ids:", X_GIF_POOL.length);
-  console.log("AI backend:", CHIIKAWA_AI_URL);
-
-  await maybeSendStartupMessage();
+  console.log("X watcher PRO MAX (clean UI) started");
 
   while (true) {
     try {
       const tweets = await fetchTweets();
       const filtered = filterTweets(tweets, sentTweetIds, sentTweetUrls);
 
-      console.log(
-        `Fetched ${tweets.length} tweets, ${filtered.length} new tweets passed filters`
-      );
-
-      if (!warmedUp && STARTUP_WARM_SKIP) {
-        for (const tweet of filtered) {
-          persistTweet(tweet);
-        }
+      if (!warmedUp) {
+        filtered.forEach(persistTweet);
         warmedUp = true;
-        console.log(`Warm start complete, cached ${filtered.length} tweet ids`);
+        console.log("Warm start complete");
       } else {
-        warmedUp = true;
-
         for (const tweet of filtered) {
-          if (sentTweetIds.has(tweet.id) || sentTweetUrls.has(tweet.url)) {
-            console.log("Skipped duplicate during loop:", tweet.id);
-            continue;
-          }
+          if (sentTweetIds.has(tweet.id)) continue;
 
-          console.log(`Posting tweet ${tweet.id} from @${tweet.username}`);
           await postTweetAlert(tweet);
           persistTweet(tweet);
         }
       }
-    } catch (error) {
-      console.error("Watcher error:", error.message);
+    } catch (err) {
+      console.error("Error:", err.message);
     }
 
     await sleep(LOOP_INTERVAL_MS);
