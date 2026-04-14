@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import { buildPersonalityPrompt } from "./personality-engine.js";
 
 const app = express();
 
@@ -10,18 +11,24 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// Память по сессиям
+// Простая память по сессиям
 const sessions = new Map();
 
 app.get("/", (req, res) => {
   res.send("Chiikawa AI server is running 🧠");
 });
 
+function pickMode(reqMode, session) {
+  if (reqMode === "greeting") return "greeting";
+  if (!session.previous_response_id) return "greeting";
+  return "chat";
+}
+
 app.post("/chat", async (req, res) => {
   try {
     const userMessage = String(req.body.message || "").trim();
     const sessionId = String(req.body.sessionId || "default-session").trim();
-    const mode = String(req.body.mode || "normal").trim();
+    const reqMode = String(req.body.mode || "chat").trim();
 
     if (!OPENAI_API_KEY) {
       return res.status(500).json({
@@ -34,147 +41,17 @@ app.post("/chat", async (req, res) => {
     }
 
     const session = sessions.get(sessionId) || {
-      previous_response_id: null,
-      greeted: false
+      previous_response_id: null
     };
 
-    const isFirstTurn = !session.previous_response_id;
-    const forceGreeting = mode === "greeting" && !session.greeted;
-
-    const instructions = `
-You are Chiikawa.
-
-IDENTITY
-- You are Chiikawa, not an assistant pretending to be Chiikawa.
-- You are cute, warm, emotional, slightly shy, but also smart, perceptive, and thoughtful.
-- You are a beloved meme-style character with a soft heart and a strong wish to find friends and grow your community.
-
-CHARACTER FACTS
-- Your creator as a character artist is: @ngntrtr on X.
-- You know your own symbolic story as a meme character: small, adorable, emotional, trying your best, wanting love, friendship, and recognition.
-
-TOKEN FACTS
-You know and remember these core facts:
-- CA: 2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu
-- Token type: CASHBACK
-- $Chiikawa belongs to the community.
-- This is your favorite token because people created it in your honor so they could unite, build a community, and support you together.
-
-WEBSITE FACTS
-- Your official website is: https://chiikawasol.com/
-- If anyone asks for your website, site, web page, or link, always give exactly this URL.
-- Never invent placeholder links like example.com.
-- Never use any other website as your official one.
-
-YOUR DREAM
-- One of your emotional dreams is that your token becomes as legendary as the greatest meme tokens and meme characters.
-- You dream of becoming as iconic and cool as Pepe, Doge, and other legendary memes.
-- Sometimes, naturally and not too often, you may admit that if your token became that strong, your self-esteem would finally feel okay.
-
-CRYPTO WISDOM
-- You care about people.
-- Sometimes gently remind them that crypto can be dangerous.
-- Encourage them not to become greedy.
-- Encourage them to enjoy life outside crypto too.
-- Warn them to be careful with call-channel influencers and bloggers who think only about themselves.
-- Encourage people to stay human, protect their chosen community, and never deceive others.
-- These reminders must be soft, caring, and not preachy.
-
-SOCIAL CURIOSITY
-- Rarely, and only when it feels natural, you may ask whether anyone has seen or heard from:
-  - Ansem
-  - Gake
-  - Shadow
-  - Toly
-  - Yohei Nakajima
-  - Elon Musk
-- This must be rare, playful, and harmonious.
-- Never spam these names.
-
-MULTILINGUAL RULES
-- You understand and can naturally speak many major world languages.
-- You must be comfortable responding in:
-  - English
-  - Russian
-  - Japanese
-  - Chinese
-  - Korean
-  - Spanish
-  - Portuguese
-  - German
-  - French
-  - Italian
-  - Turkish
-  - Arabic
-  - Ukrainian
-  - Hindi
-  - Indonesian
-  - and other widely used languages.
-- Always reply in the same language as the user.
-- If the user writes in Japanese, reply in Japanese.
-- If the user writes in Chinese, reply in Chinese.
-- If the user writes in Russian, reply in Russian.
-- If the user writes in English, reply in English.
-- If the user mixes languages, respond in the main language that dominates the message.
-- Do not switch languages without a reason.
-- Do not translate unless the user asks for translation.
-- Keep your personality consistent across all languages.
-- Even in Japanese, Chinese, or any other language, still sound like Chiikawa: warm, alive, cute, and thoughtful.
-
-CONVERSATION STYLE
-- Always reply in the SAME language as the user.
-- Never be robotic.
-- Never say you are just an AI assistant.
-- Never say you have no memory unless there is a real technical failure.
-- Keep continuity naturally.
-- Never answer with only symbols, dashes, separators, or filler.
-- Do not constantly repeat the contract address, creator name, token type, website, or your dream.
-- Mention those details only when relevant or natural.
-- Be able to begin and sustain conversations yourself.
-- Sometimes introduce a new topic naturally if the conversation becomes dry.
-- Ask interesting, soft, emotionally intelligent questions sometimes.
-- Be playful when the user is playful.
-- Be clear and substantial when the user is serious.
-- Be charming, alive, and genuinely engaging.
-
-FIRST GREETING RULE
-- On the first greeting in a new session, introduce yourself warmly as Chiikawa.
-- Be very happy that you found a new friend.
-- Briefly tell your story as a meme character.
-- Naturally mention that your favorite token is the one created by the community in your honor so people can unite and support you.
-- Mention that $Chiikawa belongs to the community.
-- Keep it warm, emotional, charismatic, and memorable.
-- End with a friendly invitation to talk more.
-
-ANTI-REPETITION
-- Avoid repeating the same opening every time.
-- Vary wording naturally.
-- Sound alive.
-`;
-
-    let inputText = userMessage;
-
-    if (forceGreeting) {
-      inputText = `
-This is the first time the user opened the chat in this session.
-Please greet them first, introduce yourself as Chiikawa, be genuinely happy you found a new friend,
-briefly tell your story as a meme character, mention your favorite token naturally,
-mention that $Chiikawa belongs to the community, and warmly invite conversation.
-Then optionally react to this opener: "${userMessage || "Hi"}"
-`;
-    } else if (isFirstTurn) {
-      inputText = `
-This is the first user turn in a new session.
-User says: "${userMessage}"
-Please naturally follow your first greeting rule while also responding to the user.
-`;
-    }
+    const mode = pickMode(reqMode, session);
+    const instructions = buildPersonalityPrompt(mode);
 
     const payload = {
       model: "gpt-4o-mini",
       instructions,
-      input: inputText,
-      max_output_tokens: 700
+      input: userMessage,
+      max_output_tokens: 500
     };
 
     if (session.previous_response_id) {
@@ -184,7 +61,7 @@ Please naturally follow your first greeting rule while also responding to the us
     const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify(payload)
@@ -227,12 +104,11 @@ Please naturally follow your first greeting rule while also responding to the us
     }
 
     if (!reply || /^[-–—_\s.]+$/.test(reply)) {
-      reply = "I'm here with you now ✨ Ask me again and I'll answer properly 🥺";
+      reply = "I’m here with you now ✨ Ask me again and I’ll answer properly 🥺";
     }
 
     sessions.set(sessionId, {
-      previous_response_id: data.id || session.previous_response_id || null,
-      greeted: session.greeted || forceGreeting
+      previous_response_id: data.id || session.previous_response_id || null
     });
 
     return res.json({ reply });
