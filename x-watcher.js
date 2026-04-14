@@ -9,7 +9,8 @@ const X_GIF_FILE_IDS = process.env.X_GIF_FILE_IDS || "";
 const CHIIKAWA_AI_URL =
   process.env.CHIIKAWA_AI_URL || "https://chiikawa-ai.onrender.com/chat";
 
-const SEND_X_STARTUP_MESSAGE = String(process.env.SEND_X_STARTUP_MESSAGE || "false").toLowerCase() === "true";
+const SEND_X_STARTUP_MESSAGE =
+  String(process.env.SEND_X_STARTUP_MESSAGE || "false").toLowerCase() === "true";
 const X_STARTUP_COOLDOWN_HOURS = Number(process.env.X_STARTUP_COOLDOWN_HOURS || 12);
 const LOOP_INTERVAL_MS = Number(process.env.X_LOOP_INTERVAL_MS || 60000);
 const MAX_STORED_IDS = Number(process.env.X_MAX_STORED_IDS || 1500);
@@ -129,20 +130,36 @@ async function tg(method, body = {}) {
   return data.result;
 }
 
-async function sendText(text) {
-  return tg("sendMessage", {
+async function sendText(text, replyToMessageId = null) {
+  const body = {
     chat_id: TELEGRAM_ALERT_CHAT_ID,
     text,
     disable_web_page_preview: false
-  });
+  };
+
+  if (replyToMessageId) {
+    body.reply_parameters = {
+      message_id: replyToMessageId
+    };
+  }
+
+  return tg("sendMessage", body);
 }
 
-async function sendGif(fileId, caption = "") {
-  return tg("sendDocument", {
+async function sendGif(fileId, caption = "", replyToMessageId = null) {
+  const body = {
     chat_id: TELEGRAM_ALERT_CHAT_ID,
     document: fileId,
     caption
-  });
+  };
+
+  if (replyToMessageId) {
+    body.reply_parameters = {
+      message_id: replyToMessageId
+    };
+  }
+
+  return tg("sendDocument", body);
 }
 
 async function maybeSendStartupMessage() {
@@ -172,22 +189,22 @@ I’m watching X for Chiikawa mentions and posting only higher-signal finds here
 async function askChiikawaForXReaction(tweet) {
   try {
     const prompt = `
-You found a post on X and want to react to it as Chiikawa.
+You are reacting to a post from X as Chiikawa.
 
 Rules:
 - Reply in the SAME language as the tweet.
-- Keep it short: 1 to 3 lines maximum.
-- Be playful, witty, and a little humorous when it fits.
-- Do not repeat the entire tweet.
-- Do not be mean or toxic.
-- Do not sound corporate.
-- React to the meaning of the post, not just keywords.
-- If the post is hype, be excited.
-- If the post is thoughtful, be thoughtful back.
-- If the post is funny, add a light funny reaction.
-- Do not use hashtags.
-- Do not include links.
-- Sound like Chiikawa: cute, alive, perceptive, slightly emotional.
+- Keep it short: 1 or 2 lines maximum.
+- No greeting.
+- No self introduction.
+- Do not say who you are.
+- Do not say "Hi", "Hello", or "I'm Chiikawa".
+- Do not restate the whole post.
+- React to the meaning of the post.
+- Be playful, perceptive, and slightly humorous when appropriate.
+- Be warm, not toxic.
+- No hashtags.
+- No links.
+- Sound like a natural direct reaction under the post in Telegram.
 
 Context:
 Author: @${tweet.username}
@@ -223,24 +240,26 @@ ${tweet.text}
 }
 
 async function postTweetAlert(tweet) {
+  // 1. Сначала публикуем сам X-пост
+  const postMessage = await sendText(formatAlert(tweet));
+  const replyToId = postMessage?.message_id || null;
+
+  // 2. Потом reply-gif именно к этому посту
   const randomGif = pickRandomGif(X_GIF_POOL);
 
-  if (randomGif) {
+  if (randomGif && replyToId) {
     try {
-      await sendGif(randomGif, "✨ Chiikawa spotted something on X ✨");
+      await sendGif(randomGif, "✨", replyToId);
     } catch (error) {
       console.error("GIF send error:", error.message);
     }
   }
 
-  await sendText(formatAlert(tweet));
-
+  // 3. Потом AI-реакция тоже reply к этому посту
   const aiReaction = await askChiikawaForXReaction(tweet);
 
-  if (aiReaction) {
-    await sendText(`💭 Chiikawa reaction
-
-${aiReaction}`);
+  if (aiReaction && replyToId) {
+    await sendText(aiReaction, replyToId);
   }
 }
 
