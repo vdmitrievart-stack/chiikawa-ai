@@ -74,10 +74,12 @@ async function setTelegramCommands() {
   return tg("setMyCommands", {
     commands: [
       { command: "start", description: "Start talking to Chiikawa" },
-      { command: "help", description: "Show all commands" },
+      { command: "help", description: "Show all available commands" },
       { command: "ca", description: "Show token contract address" },
       { command: "website", description: "Open the official website" },
       { command: "mission", description: "Get a tiny community mission" },
+      { command: "about", description: "Learn who Chiikawa is" },
+      { command: "community", description: "See the Chiikawa community spirit" },
       { command: "playlist", description: "Show music moods and playlists" },
       { command: "dj", description: "Get a random Chiikawa track" },
       { command: "spin", description: "Spin the tiny DJ wheel" },
@@ -414,6 +416,8 @@ function shouldRespond(message) {
   if (text.startsWith("/mood")) return true;
   if (text.startsWith("/website")) return true;
   if (text.startsWith("/mission")) return true;
+  if (text.startsWith("/about")) return true;
+  if (text.startsWith("/community")) return true;
   if (text.startsWith("/dj")) return true;
   if (text.startsWith("/playlist")) return true;
   if (text.startsWith("/spin")) return true;
@@ -452,6 +456,8 @@ async function moderateMessageIfNeeded(message) {
     text.startsWith("/ca") ||
     text.startsWith("/website") ||
     text.startsWith("/mission") ||
+    text.startsWith("/about") ||
+    text.startsWith("/community") ||
     text.startsWith("/mood") ||
     text.startsWith("/dj") ||
     text.startsWith("/playlist") ||
@@ -591,16 +597,43 @@ Commands:
 /start
 /help
 /ca
-/mood <${moods}>
 /website
 /mission
+/about
+/community
 /dj
 /playlist
 /spin
 /radio
+/mood <${moods}>
 
 You can also just talk to me normally 🥺
 You can call me by name too, not only with @mention.`,
+      messageId
+    );
+    return true;
+  }
+
+  if (text.startsWith("/about")) {
+    await sendTelegramMessage(
+      chatId,
+      `I’m Chiikawa ✨
+
+I’m a small, emotional, warm little character trying my best to find friends and grow a kind community.
+
+My favorite token is the one the community created in my honor:
+$Chiikawa belongs to the community 🥺`,
+      messageId
+    );
+    return true;
+  }
+
+  if (text.startsWith("/community")) {
+    await sendTelegramMessage(
+      chatId,
+      `The heart of Chiikawa is friendship, kindness, and community 🌸
+
+Please stay human, protect your people, and help us find new friends in Telegram and X ✨`,
       messageId
     );
     return true;
