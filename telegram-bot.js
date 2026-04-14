@@ -71,21 +71,37 @@ async function tg(method, body = {}) {
 }
 
 async function setTelegramCommands() {
-  return tg("setMyCommands", {
-    commands: [
-      { command: "start", description: "Start talking to Chiikawa" },
-      { command: "help", description: "Show all available commands" },
-      { command: "ca", description: "Show token contract address" },
-      { command: "website", description: "Open the official website" },
-      { command: "mission", description: "Get a tiny community mission" },
-      { command: "about", description: "Learn who Chiikawa is" },
-      { command: "community", description: "See the Chiikawa community spirit" },
-      { command: "playlist", description: "Show music moods and playlists" },
-      { command: "dj", description: "Get a random Chiikawa track" },
-      { command: "spin", description: "Spin the tiny DJ wheel" },
-      { command: "radio", description: "Play Chiikawa radio mood of the day" },
-      { command: "mood", description: "Pick a music mood" }
-    ]
+  const commands = [
+    { command: "start", description: "Start talking to Chiikawa" },
+    { command: "help", description: "Show all available commands" },
+    { command: "ca", description: "Show token contract address" },
+    { command: "website", description: "Open the official website" },
+    { command: "mission", description: "Get a tiny community mission" },
+    { command: "about", description: "Learn who Chiikawa is" },
+    { command: "community", description: "See the Chiikawa community spirit" },
+    { command: "playlist", description: "Show music moods and playlists" },
+    { command: "dj", description: "Get a random Chiikawa track" },
+    { command: "spin", description: "Spin the tiny DJ wheel" },
+    { command: "radio", description: "Play Chiikawa radio mood of the day" },
+    { command: "mood", description: "Pick a music mood" }
+  ];
+
+  await tg("setMyCommands", {
+    commands,
+    scope: {
+      type: "all_private_chats"
+    }
+  });
+
+  await tg("setMyCommands", {
+    commands,
+    scope: {
+      type: "all_group_chats"
+    }
+  });
+
+  await tg("setMyCommands", {
+    commands
   });
 }
 
