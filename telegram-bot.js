@@ -70,6 +70,23 @@ async function tg(method, body = {}) {
   return data.result;
 }
 
+async function setTelegramCommands() {
+  return tg("setMyCommands", {
+    commands: [
+      { command: "start", description: "Start talking to Chiikawa" },
+      { command: "help", description: "Show all commands" },
+      { command: "ca", description: "Show token contract address" },
+      { command: "website", description: "Open the official website" },
+      { command: "mission", description: "Get a tiny community mission" },
+      { command: "playlist", description: "Show music moods and playlists" },
+      { command: "dj", description: "Get a random Chiikawa track" },
+      { command: "spin", description: "Spin the tiny DJ wheel" },
+      { command: "radio", description: "Play Chiikawa radio mood of the day" },
+      { command: "mood", description: "Pick a music mood" }
+    ]
+  });
+}
+
 async function sendTelegramMessage(chatId, text, replyToMessageId = null, extra = {}) {
   const payload = {
     chat_id: chatId,
@@ -510,10 +527,14 @@ async function handleMusicCallback(callbackQuery) {
     const intro = getRadioIntro();
     const dayTrack = getMoodOfTheDay();
     await answerCallbackQuery(callbackQuery.id, "Chiikawa Radio is on 🎧");
-    await sendTelegramMessage(chatId, `${intro}
+    await sendTelegramMessage(
+      chatId,
+      `${intro}
 
 Mood of the day:
-${dayTrack.message}`, messageId);
+${dayTrack.message}`,
+      messageId
+    );
     return true;
   }
 
@@ -521,9 +542,13 @@ ${dayTrack.message}`, messageId);
     const intro = getSpinMessage();
     const result = getRandomDJTrack();
     await answerCallbackQuery(callbackQuery.id, "Spinning...");
-    await sendTelegramMessage(chatId, `${intro}
+    await sendTelegramMessage(
+      chatId,
+      `${intro}
 
-${result.message}`, messageId);
+${result.message}`,
+      messageId
+    );
     return true;
   }
 
@@ -606,23 +631,33 @@ You can call me by name too, not only with @mention.`,
   if (text.startsWith("/spin")) {
     const intro = getSpinMessage();
     const result = getRandomDJTrack();
-    await sendTelegramMessage(chatId, `${intro}
+    await sendTelegramMessage(
+      chatId,
+      `${intro}
 
-${result.message}`, messageId, {
-      reply_markup: buildMusicKeyboard()
-    });
+${result.message}`,
+      messageId,
+      {
+        reply_markup: buildMusicKeyboard()
+      }
+    );
     return true;
   }
 
   if (text.startsWith("/radio")) {
     const intro = getRadioIntro();
     const dayTrack = getMoodOfTheDay();
-    await sendTelegramMessage(chatId, `${intro}
+    await sendTelegramMessage(
+      chatId,
+      `${intro}
 
 Mood of the day:
-${dayTrack.message}`, messageId, {
-      reply_markup: buildMusicKeyboard()
-    });
+${dayTrack.message}`,
+      messageId,
+      {
+        reply_markup: buildMusicKeyboard()
+      }
+    );
     return true;
   }
 
@@ -811,6 +846,8 @@ async function bootstrap() {
   botUsername = me.username || null;
   botId = me.id || null;
   botFirstName = me.first_name || "Chiikawa";
+
+  await setTelegramCommands();
 
   console.log(`Telegram bot started as @${botUsername || "unknown_bot"}`);
   console.log(`Using backend: ${CHIIKAWA_AI_URL}`);
