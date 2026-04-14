@@ -2,6 +2,7 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fetchTweets, filterTweets, formatAlert } from "./x-engine.js";
+import { buildXReactionPrompt } from "./personality-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
@@ -109,27 +110,15 @@ async function sendGifWithReply(fileId, caption, replyToMessageId) {
 
 async function askChiikawaForXReaction(tweet) {
   try {
-    const prompt = `
-React to this X post.
-
-Rules:
-- Same language as tweet
-- 1 short sentence max
-- No greetings
-- No "I'm Chiikawa"
-- Just reaction
-- Slightly funny / cute
-
-Tweet:
-${tweet.text}
-`;
+    const prompt = buildXReactionPrompt(tweet);
 
     const res = await fetch(CHIIKAWA_AI_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         message: prompt,
-        sessionId: `x_${tweet.id}`
+        sessionId: `x_${tweet.id}`,
+        mode: "normal"
       })
     });
 
@@ -152,7 +141,7 @@ async function postTweetAlert(tweet) {
   } else {
     await tg("sendMessage", {
       chat_id: TELEGRAM_ALERT_CHAT_ID,
-      text: reaction,
+      text: reaction || "✨",
       reply_parameters: { message_id: msgId }
     });
   }
