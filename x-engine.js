@@ -12,7 +12,8 @@ const SEARCH_QUERY = `
 -is:reply
 `;
 
-const MIN_FOLLOWERS = 1000;
+const MIN_FOLLOWERS = Number(process.env.X_MIN_FOLLOWERS || 1000);
+const MAX_RESULTS = Number(process.env.X_MAX_RESULTS || 10);
 
 const BLOCKED_KEYWORDS = [
   "politics",
@@ -23,11 +24,37 @@ const BLOCKED_KEYWORDS = [
   "government"
 ];
 
+function normalizeText(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function lowerText(text) {
+  return normalizeText(text).toLowerCase();
+}
+
+function isBlocked(text) {
+  const lower = lowerText(text);
+  return BLOCKED_KEYWORDS.some(word => lower.includes(word));
+}
+
+function looksLowSignal(tweet) {
+  const text = lowerText(tweet.text);
+
+  if (!tweet.username) return true;
+  if (tweet.followers < MIN_FOLLOWERS) return true;
+  if (text.length < 20) return true;
+  if (isBlocked(text)) return true;
+
+  return false;
+}
+
 export async function fetchTweets() {
   const url =
     `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(SEARCH_QUERY)}` +
-    `&max_results=10` +
-    `&tweet.fields=created_at,author_id,text,public_metrics` +
+    `&max_results=${MAX_RESULTS}` +
+    `&tweet.fields=created_at,author_id,text,public_metrics,lang` +
     `&expansions=author_id` +
     `&user.fields=username,name,public_metrics,verified`;
 
@@ -54,8 +81,9 @@ export async function fetchTweets() {
 
     return {
       id: tweet.id,
-      text: tweet.text || "",
+      text: normalizeText(tweet.text || ""),
       created_at: tweet.created_at || "",
+      lang: tweet.lang || "",
       username: author.username || null,
       author_name: author.name || null,
       followers: author.public_metrics?.followers_count || 0,
@@ -70,38 +98,15 @@ export async function fetchTweets() {
   });
 }
 
-function normalizeText(text) {
-  return String(text || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function isBlocked(text) {
-  const lower = normalizeText(text);
-  return BLOCKED_KEYWORDS.some(word => lower.includes(word));
-}
-
-function looksLowSignal(tweet) {
-  const text = normalizeText(tweet.text);
-
-  if (!tweet.username) return true;
-  if (tweet.followers < MIN_FOLLOWERS) return true;
-  if (text.length < 20) return true;
-  if (isBlocked(text)) return true;
-
-  return false;
-}
-
-export function filterTweets(tweets, alreadySentIds = new Set()) {
+export function filterTweets(tweets, alreadySentIds = new Set(), alreadySentUrls = new Set()) {
   const unique = new Map();
 
   for (const tweet of tweets) {
-    if (!tweet?.id) continue;
+    if (!tweet?.id || !tweet?.url) continue;
     if (alreadySentIds.has(tweet.id)) continue;
+    if (alreadySentUrls.has(tweet.url)) continue;
     if (looksLowSignal(tweet)) continue;
 
-    // страховка от дублей по id
     if (!unique.has(tweet.id)) {
       unique.set(tweet.id, tweet);
     }
