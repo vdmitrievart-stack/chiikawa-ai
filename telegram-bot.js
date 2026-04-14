@@ -76,11 +76,12 @@ async function setTelegramCommands() {
   const commands = [
     { command: "start", description: "Start talking to Chiikawa" },
     { command: "help", description: "Show all available commands" },
+    { command: "menu", description: "Open the Chiikawa menu" },
     { command: "ca", description: "Show token contract address" },
     { command: "website", description: "Open the official website" },
     { command: "mission", description: "Get a tiny community mission" },
     { command: "about", description: "Learn who Chiikawa is" },
-    { command: "community", description: "See the Chiikawa community spirit" },
+    { command: "community", description: "See the community spirit" },
     { command: "playlist", description: "Show music moods and playlists" },
     { command: "dj", description: "Get a random Chiikawa track" },
     { command: "spin", description: "Spin the tiny DJ wheel" },
@@ -390,6 +391,54 @@ function buildCAKeyboard() {
   };
 }
 
+function buildMainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "CA", callback_data: "menu:ca" },
+        { text: "Website", callback_data: "menu:website" }
+      ],
+      [
+        { text: "About", callback_data: "menu:about" },
+        { text: "Community", callback_data: "menu:community" }
+      ],
+      [
+        { text: "Mission", callback_data: "menu:mission" },
+        { text: "Help", callback_data: "menu:help" }
+      ],
+      [
+        { text: "DJ", callback_data: "music:dj" },
+        { text: "Radio", callback_data: "music:radio" }
+      ],
+      [
+        { text: "Playlist", callback_data: "menu:playlist" },
+        { text: "Spin", callback_data: "music:spin" }
+      ]
+    ]
+  };
+}
+
+function buildMenuText() {
+  return `✨ Chiikawa Menu ✨
+
+Choose what you want to explore:
+
+• CA
+• Website
+• About
+• Community
+• Mission
+• Music
+
+You can also use /help to see all commands 🥺`;
+}
+
+async function sendMainMenu(chatId, replyToMessageId = null) {
+  return sendTelegramMessage(chatId, buildMenuText(), replyToMessageId, {
+    reply_markup: buildMainMenuKeyboard()
+  });
+}
+
 async function sendCAMessage(chatId, replyToMessageId = null) {
   return sendTelegramMessage(chatId, buildCAMessage(), replyToMessageId, {
     reply_markup: buildCAKeyboard()
@@ -445,6 +494,7 @@ function shouldRespond(message) {
 
   if (text.startsWith("/start")) return true;
   if (text.startsWith("/help")) return true;
+  if (text.startsWith("/menu")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/mood")) return true;
   if (text.startsWith("/website")) return true;
@@ -481,6 +531,7 @@ async function moderateMessageIfNeeded(message) {
   if (
     text.startsWith("/start") ||
     text.startsWith("/help") ||
+    text.startsWith("/menu") ||
     text.startsWith("/ca") ||
     text.startsWith("/website") ||
     text.startsWith("/mission") ||
@@ -534,6 +585,96 @@ Reason: ${analysis.reason}`
     } catch (err) {
       console.error("Failed to mute user:", err);
     }
+    return true;
+  }
+
+  return false;
+}
+
+async function handleMenuCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+
+  if (!chatId) return false;
+
+  if (data === "menu:ca") {
+    await answerCallbackQuery(callbackQuery.id, "Opening CA");
+    await sendCAMessage(chatId, messageId);
+    return true;
+  }
+
+  if (data === "menu:website") {
+    await answerCallbackQuery(callbackQuery.id, "Opening website");
+    await sendTelegramMessage(chatId, getWebsiteInvite(), messageId);
+    return true;
+  }
+
+  if (data === "menu:about") {
+    await answerCallbackQuery(callbackQuery.id, "About Chiikawa");
+    await sendTelegramMessage(
+      chatId,
+      `I’m Chiikawa ✨
+
+I’m a small, emotional, warm little character trying my best to find friends and grow a kind community.
+
+My favorite token is the one the community created in my honor:
+$Chiikawa belongs to the community 🥺`,
+      messageId
+    );
+    return true;
+  }
+
+  if (data === "menu:community") {
+    await answerCallbackQuery(callbackQuery.id, "Community spirit");
+    await sendTelegramMessage(
+      chatId,
+      `The heart of Chiikawa is friendship, kindness, and community 🌸
+
+Please stay human, protect your people, and help us find new friends in Telegram and X ✨`,
+      messageId
+    );
+    return true;
+  }
+
+  if (data === "menu:mission") {
+    await answerCallbackQuery(callbackQuery.id, "Tiny mission");
+    await sendTelegramMessage(chatId, getRandomMission(), messageId);
+    return true;
+  }
+
+  if (data === "menu:help") {
+    const moods = getAvailableMoods().join(", ");
+    await answerCallbackQuery(callbackQuery.id, "Opening help");
+    await sendTelegramMessage(
+      chatId,
+      `Hi ✨ I’m Chiikawa.
+
+Commands:
+/start
+/help
+/menu
+/ca
+/website
+/mission
+/about
+/community
+/dj
+/playlist
+/spin
+/radio
+/mood <${moods}>`,
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
+    );
+    return true;
+  }
+
+  if (data === "menu:playlist") {
+    await answerCallbackQuery(callbackQuery.id, "Opening playlist");
+    await sendTelegramMessage(chatId, getPlaylistMessage(), messageId, {
+      reply_markup: buildMusicKeyboard()
+    });
     return true;
   }
 
@@ -621,6 +762,7 @@ async function handleCommand(message) {
 Commands:
 /start
 /help
+/menu
 /ca
 /website
 /mission
@@ -634,8 +776,14 @@ Commands:
 
 You can also just talk to me normally 🥺
 You can call me by name too, not only with @mention.`,
-      messageId
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
     );
+    return true;
+  }
+
+  if (text.startsWith("/menu")) {
+    await sendMainMenu(chatId, messageId);
     return true;
   }
 
@@ -648,7 +796,8 @@ I’m a small, emotional, warm little character trying my best to find friends a
 
 My favorite token is the one the community created in my honor:
 $Chiikawa belongs to the community 🥺`,
-      messageId
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
     );
     return true;
   }
@@ -659,7 +808,8 @@ $Chiikawa belongs to the community 🥺`,
       `The heart of Chiikawa is friendship, kindness, and community 🌸
 
 Please stay human, protect your people, and help us find new friends in Telegram and X ✨`,
-      messageId
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
     );
     return true;
   }
@@ -670,12 +820,16 @@ Please stay human, protect your people, and help us find new friends in Telegram
   }
 
   if (text.startsWith("/website")) {
-    await sendTelegramMessage(chatId, getWebsiteInvite(), messageId);
+    await sendTelegramMessage(chatId, getWebsiteInvite(), messageId, {
+      reply_markup: buildMainMenuKeyboard()
+    });
     return true;
   }
 
   if (text.startsWith("/mission")) {
-    await sendTelegramMessage(chatId, getRandomMission(), messageId);
+    await sendTelegramMessage(chatId, getRandomMission(), messageId, {
+      reply_markup: buildMainMenuKeyboard()
+    });
     return true;
   }
 
@@ -792,7 +946,9 @@ async function handleRegularMessage(message) {
 
   if (isWebsiteRequest(text)) {
     markChatActive(chatId);
-    await sendTelegramMessage(chatId, getWebsiteInvite(), messageId);
+    await sendTelegramMessage(chatId, getWebsiteInvite(), messageId, {
+      reply_markup: buildMainMenuKeyboard()
+    });
     return;
   }
 
@@ -804,7 +960,9 @@ async function handleRegularMessage(message) {
 
   if (isSimpleGreeting(text)) {
     markChatActive(chatId);
-    await sendTelegramMessage(chatId, "Hi… I’m here 🥺✨", messageId);
+    await sendTelegramMessage(chatId, "Hi… I’m here 🥺✨", messageId, {
+      reply_markup: buildMainMenuKeyboard()
+    });
     return;
   }
 
@@ -842,7 +1000,9 @@ If it feels natural, you may also end with a tiny community mission:
   }
 
   const reply = await askChiikawa(prompt, sessionId, "normal");
-  await sendTelegramMessage(chatId, reply, messageId);
+  await sendTelegramMessage(chatId, reply, messageId, {
+    reply_markup: buildMainMenuKeyboard()
+  });
 
   if (Math.random() < 0.1) {
     await sendTelegramMessage(chatId, "…🥺✨");
@@ -910,7 +1070,10 @@ async function pollLoop() {
         offset = update.update_id + 1;
 
         if (update.callback_query) {
-          await handleMusicCallback(update.callback_query);
+          const handledMenu = await handleMenuCallback(update.callback_query);
+          if (!handledMenu) {
+            await handleMusicCallback(update.callback_query);
+          }
         }
 
         if (update.message) {
