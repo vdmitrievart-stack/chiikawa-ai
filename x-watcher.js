@@ -11,7 +11,6 @@ if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_ALERT_CHAT_ID) {
 }
 
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
-
 const sentTweets = new Set();
 
 const X_GIF_POOL = X_GIF_FILE_IDS
@@ -19,13 +18,20 @@ const X_GIF_POOL = X_GIF_FILE_IDS
   .map(x => x.trim())
   .filter(Boolean);
 
-function pickRandom(arr) {
-  if (!arr.length) return null;
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+let lastGifUsed = null;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function pickRandomGif(pool) {
+  if (!pool.length) return null;
+  if (pool.length === 1) return pool[0];
+
+  const candidates = pool.filter(gif => gif !== lastGifUsed);
+  const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+  lastGifUsed = chosen;
+  return chosen;
 }
 
 async function tg(method, body = {}) {
@@ -76,7 +82,10 @@ I’m watching X for Chiikawa mentions and will post notable finds here ✨`
 
 async function postTweetAlert(tweet) {
   const msg = formatAlert(tweet);
-  const randomGif = pickRandom(X_GIF_POOL);
+  const randomGif = pickRandomGif(X_GIF_POOL);
+
+  console.log("GIF pool size:", X_GIF_POOL.length);
+  console.log("Chosen GIF:", randomGif);
 
   if (randomGif) {
     try {
@@ -91,7 +100,7 @@ async function postTweetAlert(tweet) {
 
 async function loop() {
   console.log("X watcher started...");
-  console.log(`GIF pool size: ${X_GIF_POOL.length}`);
+  console.log("Loaded GIF ids:", X_GIF_POOL);
 
   await sendStartupMessageOnce();
 
@@ -104,7 +113,6 @@ async function loop() {
 
       for (const tweet of filtered) {
         sentTweets.add(tweet.id);
-
         console.log(`New tweet from @${tweet.username}`);
         await postTweetAlert(tweet);
       }
