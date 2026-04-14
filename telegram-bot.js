@@ -34,6 +34,8 @@ if (!TELEGRAM_BOT_TOKEN) {
 }
 
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+const FORCED_GROUP_CHAT_ID = "-1003953010138";
+
 let offset = 0;
 let botUsername = null;
 let botId = null;
@@ -86,22 +88,37 @@ async function setTelegramCommands() {
     { command: "mood", description: "Pick a music mood" }
   ];
 
+  await tg("setMyCommands", { commands });
+
+  await tg("setMyCommands", {
+    commands,
+    scope: { type: "all_private_chats" }
+  });
+
+  await tg("setMyCommands", {
+    commands,
+    scope: { type: "all_group_chats" }
+  });
+
+  await tg("setMyCommands", {
+    commands,
+    scope: { type: "all_chat_administrators" }
+  });
+
   await tg("setMyCommands", {
     commands,
     scope: {
-      type: "all_private_chats"
+      type: "chat",
+      chat_id: FORCED_GROUP_CHAT_ID
     }
   });
 
   await tg("setMyCommands", {
     commands,
     scope: {
-      type: "all_group_chats"
+      type: "chat_administrators",
+      chat_id: FORCED_GROUP_CHAT_ID
     }
-  });
-
-  await tg("setMyCommands", {
-    commands
   });
 }
 
@@ -458,13 +475,8 @@ async function moderateMessageIfNeeded(message) {
   const userId = message.from?.id;
   const text = normalizeText(message.text);
 
-  if (!chatId || !messageId || !userId || !text) {
-    return false;
-  }
-
-  if (isPrivateChat(message)) {
-    return false;
-  }
+  if (!chatId || !messageId || !userId || !text) return false;
+  if (isPrivateChat(message)) return false;
 
   if (
     text.startsWith("/start") ||
@@ -484,10 +496,7 @@ async function moderateMessageIfNeeded(message) {
   }
 
   const analysis = analyzeModeration(text);
-
-  if (analysis.action === "none") {
-    return false;
-  }
+  if (analysis.action === "none") return false;
 
   const escalation = escalateAction(userId, analysis.action, analysis.reason);
 
@@ -686,9 +695,7 @@ Please stay human, protect your people, and help us find new friends in Telegram
 
 ${result.message}`,
       messageId,
-      {
-        reply_markup: buildMusicKeyboard()
-      }
+      { reply_markup: buildMusicKeyboard() }
     );
     return true;
   }
@@ -703,9 +710,7 @@ ${result.message}`,
 Mood of the day:
 ${dayTrack.message}`,
       messageId,
-      {
-        reply_markup: buildMusicKeyboard()
-      }
+      { reply_markup: buildMusicKeyboard() }
     );
     return true;
   }
@@ -737,9 +742,7 @@ ${dayTrack.message}`,
 Try:
 ${getAvailableMoods().map(x => `/mood ${x}`).join("\n")}`,
         messageId,
-        {
-          reply_markup: buildMusicKeyboard()
-        }
+        { reply_markup: buildMusicKeyboard() }
       );
       return true;
     }
@@ -779,8 +782,7 @@ async function handleRegularMessage(message) {
   const text = normalizeText(message.text);
   const sessionId = buildSessionId(chatId, userId);
 
-  if (!text) return;
-  if (!shouldRespond(message)) return;
+  if (!text || !shouldRespond(message)) return;
 
   if (isCARequest(text)) {
     markChatActive(chatId);
@@ -796,21 +798,13 @@ async function handleRegularMessage(message) {
 
   if (isThanksMessage(text)) {
     markChatActive(chatId);
-    await sendTelegramMessage(
-      chatId,
-      "Hehe… I’m happy I could help 🥺✨",
-      messageId
-    );
+    await sendTelegramMessage(chatId, "Hehe… I’m happy I could help 🥺✨", messageId);
     return;
   }
 
   if (isSimpleGreeting(text)) {
     markChatActive(chatId);
-    await sendTelegramMessage(
-      chatId,
-      "Hi… I’m here 🥺✨",
-      messageId
-    );
+    await sendTelegramMessage(chatId, "Hi… I’m here 🥺✨", messageId);
     return;
   }
 
@@ -886,9 +880,7 @@ async function bootstrap() {
     await tg("deleteWebhook", { drop_pending_updates: false });
   } catch (error) {
     const code = error?.telegram?.error_code;
-    if (code !== 404) {
-      throw error;
-    }
+    if (code !== 404) throw error;
   }
 
   const me = await tg("getMe");
@@ -902,6 +894,7 @@ async function bootstrap() {
   console.log(`Using backend: ${CHIIKAWA_AI_URL}`);
   console.log(`Website: ${getWebsiteUrl()}`);
   console.log(`Bot first name: ${botFirstName}`);
+  console.log(`Forced group scope: ${FORCED_GROUP_CHAT_ID}`);
 }
 
 async function pollLoop() {
