@@ -3,6 +3,8 @@ import fs from "fs";
 import path from "path";
 import { fetchTweets, filterTweets, formatAlert } from "./x-engine.js";
 import { buildXReactionPrompt } from "./personality-engine.js";
+import { getMoodState, buildMoodContext } from "./mood-engine.js";
+import { shouldSuggestRaid, buildRaidNudge } from "./raid-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
@@ -108,9 +110,26 @@ async function sendGifWithReply(fileId, caption, replyToMessageId) {
   });
 }
 
+async function sendReplyText(text, replyToMessageId) {
+  return tg("sendMessage", {
+    chat_id: TELEGRAM_ALERT_CHAT_ID,
+    text,
+    reply_parameters: {
+      message_id: replyToMessageId
+    }
+  });
+}
+
 async function askChiikawaForXReaction(tweet) {
   try {
-    const prompt = buildXReactionPrompt(tweet);
+    const moodState = getMoodState({
+      source: "x",
+      signal: "normal",
+      text: tweet.text,
+      now: new Date()
+    });
+    const moodContext = buildMoodContext(moodState);
+    const prompt = buildXReactionPrompt(tweet, moodContext, "");
 
     const res = await fetch(CHIIKAWA_AI_URL, {
       method: "POST",
@@ -118,7 +137,8 @@ async function askChiikawaForXReaction(tweet) {
       body: JSON.stringify({
         message: prompt,
         sessionId: `x_${tweet.id}`,
-        mode: "normal"
+        mode: "normal",
+        source: "x"
       })
     });
 
@@ -139,16 +159,16 @@ async function postTweetAlert(tweet) {
   if (gif) {
     await sendGifWithReply(gif, reaction || "✨", msgId);
   } else {
-    await tg("sendMessage", {
-      chat_id: TELEGRAM_ALERT_CHAT_ID,
-      text: reaction || "✨",
-      reply_parameters: { message_id: msgId }
-    });
+    await sendReplyText(reaction || "✨", msgId);
+  }
+
+  if (shouldSuggestRaid(tweet)) {
+    await sendReplyText(buildRaidNudge(tweet), msgId);
   }
 }
 
 async function loop() {
-  console.log("X watcher PRO MAX (clean UI) started");
+  console.log("X watcher PRO MAX (clean UI + raids) started");
 
   while (true) {
     try {
@@ -162,7 +182,6 @@ async function loop() {
       } else {
         for (const tweet of filtered) {
           if (sentTweetIds.has(tweet.id)) continue;
-
           await postTweetAlert(tweet);
           persistTweet(tweet);
         }
