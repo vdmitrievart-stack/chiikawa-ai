@@ -2,11 +2,14 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import http from "http";
+import { buildBuybotReactionPrompt } from "./personality-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
+const CHIIKAWA_AI_URL =
+  process.env.CHIIKAWA_AI_URL || "https://chiikawa-ai.onrender.com/chat";
 
-// Твой pair id на Dexscreener
+// Dexscreener pair
 const PAIR_ID =
   process.env.DEXSCREENER_PAIR_ID ||
   "ey75tsmuy7gnb3noq7pdcjg8gxczthou6h6xjwccfvh3";
@@ -15,7 +18,7 @@ const PORT = Number(process.env.PORT || 10000);
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const STATE_FILE = path.resolve("./buybot-state.json");
 
-// Настройки
+// Config
 const LOOP_INTERVAL_MS = Number(process.env.BUYBOT_LOOP_INTERVAL_MS || 15000);
 const ALERT_MIN_USD = Number(process.env.BUYBOT_ALERT_MIN_USD || 20);
 const STRONG_BUY_USD = Number(process.env.BUYBOT_STRONG_BUY_USD || 300);
@@ -176,7 +179,7 @@ function classifyBuy(avgBuyUsd) {
   return "normal";
 }
 
-function buildBuyMessage(snapshot, avgBuyUsd, buysDelta) {
+function buildBuyMessage(snapshot, avgBuyUsd, buysDelta, reaction) {
   const type = classifyBuy(avgBuyUsd);
 
   if (type === "whale") {
@@ -188,7 +191,7 @@ ${formatUsd(avgBuyUsd)}
 Buys detected:
 ${buysDelta}
 
-Pair:
+${reaction ? `💭 ${reaction}\n` : ""}Pair:
 ${snapshot.pairName}
 
 Price:
@@ -209,7 +212,7 @@ ${formatUsd(avgBuyUsd)}
 Buys detected:
 ${buysDelta}
 
-Pair:
+${reaction ? `💭 ${reaction}\n` : ""}Pair:
 ${snapshot.pairName}
 
 Price:
@@ -229,7 +232,7 @@ ${formatUsd(avgBuyUsd)}
 Buys detected:
 ${buysDelta}
 
-Pair:
+${reaction ? `💭 ${reaction}\n` : ""}Pair:
 ${snapshot.pairName}
 
 Price:
@@ -239,6 +242,36 @@ Dex:
 ${snapshot.url}
 
 Every friend matters 🥺`;
+}
+
+async function askChiikawaForBuyReaction(kind, amountUsd) {
+  try {
+    const prompt = buildBuybotReactionPrompt(kind, amountUsd);
+
+    const res = await fetch(CHIIKAWA_AI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        message: prompt,
+        sessionId: `buy_${kind}_${amountUsd}`,
+        mode: "normal"
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(`Chiikawa backend error: ${JSON.stringify(data)}`);
+    }
+
+    const reply = String(data.reply || "").trim();
+    return reply || null;
+  } catch (error) {
+    console.error("Buybot AI reaction error:", error.message);
+    return null;
+  }
 }
 
 async function maybeSendBuyAlert(snapshot) {
@@ -258,7 +291,6 @@ async function maybeSendBuyAlert(snapshot) {
   const volumeDelta = snapshot.volumeM5 - previous.volumeM5;
   const now = Date.now();
 
-  // Обновляем baseline всегда, чтобы не застревать на старых данных
   state.baseline = snapshot;
 
   if (buysDelta <= 0 || volumeDelta <= 0) {
@@ -275,14 +307,12 @@ async function maybeSendBuyAlert(snapshot) {
     return;
   }
 
-  // анти-дубль по сигнатуре
   if (state.lastSignature === currentSignature) {
     console.log("Buybot duplicate prevented by signature");
     saveState(state);
     return;
   }
 
-  // cooldown
   if (now - state.lastAlertAt < COOLDOWN_MS) {
     console.log("Buybot cooldown active");
     state.lastSignature = currentSignature;
@@ -290,17 +320,19 @@ async function maybeSendBuyAlert(snapshot) {
     return;
   }
 
+  const kind = classifyBuy(avgBuyUsd);
+  const reaction = await askChiikawaForBuyReaction(kind, Math.round(avgBuyUsd));
   const gif = pickRandomGif(GIF_POOL);
 
   if (gif) {
     try {
-      await sendGif(gif, "✨ Chiikawa buy energy ✨");
+      await sendGif(gif, reaction || "✨");
     } catch (error) {
       console.error("Buybot GIF send error:", error.message);
     }
   }
 
-  const message = buildBuyMessage(snapshot, avgBuyUsd, buysDelta);
+  const message = buildBuyMessage(snapshot, avgBuyUsd, buysDelta, reaction);
   await sendText(message);
 
   state.lastAlertAt = now;
@@ -312,6 +344,7 @@ async function loop() {
   console.log("Buybot PRO MAX started...");
   console.log("Pair ID:", PAIR_ID);
   console.log("GIF pool size:", GIF_POOL.length);
+  console.log("AI backend:", CHIIKAWA_AI_URL);
 
   while (true) {
     try {
@@ -325,7 +358,7 @@ async function loop() {
   }
 }
 
-// Мини-сервер для Render Web Service
+// Health server for Render Web Service
 const server = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
