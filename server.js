@@ -2,6 +2,12 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import { buildPersonalityPrompt } from "./personality-engine.js";
+import {
+  rememberInteraction,
+  buildMemoryContext,
+  addUserNote
+} from "./memory-engine.js";
+import { getMoodState, buildMoodContext } from "./mood-engine.js";
 
 const app = express();
 
@@ -11,7 +17,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// Простая память по сессиям
+// session memory for OpenAI response chaining
 const sessions = new Map();
 
 app.get("/", (req, res) => {
@@ -30,6 +36,13 @@ app.post("/chat", async (req, res) => {
     const sessionId = String(req.body.sessionId || "default-session").trim();
     const reqMode = String(req.body.mode || "chat").trim();
 
+    const userId = String(req.body.userId || "anonymous");
+    const userName = String(req.body.userName || "").trim();
+    const username = String(req.body.username || "").trim();
+    const chatId = String(req.body.chatId || "").trim();
+    const chatType = String(req.body.chatType || "unknown").trim();
+    const source = String(req.body.source || "chat").trim();
+
     if (!OPENAI_API_KEY) {
       return res.status(500).json({
         reply: "OpenAI error: OPENAI_API_KEY is missing"
@@ -40,12 +53,48 @@ app.post("/chat", async (req, res) => {
       return res.json({ reply: "Say something 🥺" });
     }
 
+    rememberInteraction({
+      userId,
+      displayName: userName,
+      username,
+      chatId,
+      chatType,
+      text: userMessage
+    });
+
     const session = sessions.get(sessionId) || {
       previous_response_id: null
     };
 
     const mode = pickMode(reqMode, session);
-    const instructions = buildPersonalityPrompt(mode);
+    const memoryContext = buildMemoryContext(userId);
+    const moodState = getMoodState({
+      source,
+      signal: "normal",
+      text: userMessage,
+      now: new Date()
+    });
+    const moodContext = buildMoodContext(moodState);
+
+    const instructions = buildPersonalityPrompt(
+      mode,
+      `
+${memoryContext}
+
+${moodContext}
+
+Current source:
+- source: ${source}
+- chat type: ${chatType}
+- user display name: ${userName || "unknown"}
+- username: ${username || "unknown"}
+
+Extra behavior:
+- In group chats, be clearer and more context-aware.
+- Do not constantly greet the same person again and again.
+- Use memory naturally, without sounding creepy.
+`
+    );
 
     const payload = {
       model: "gpt-4o-mini",
@@ -106,6 +155,8 @@ app.post("/chat", async (req, res) => {
     if (!reply || /^[-–—_\s.]+$/.test(reply)) {
       reply = "I’m here with you now ✨ Ask me again and I’ll answer properly 🥺";
     }
+
+    addUserNote(userId, `Bot recently replied about: ${userMessage.slice(0, 100)}`);
 
     sessions.set(sessionId, {
       previous_response_id: data.id || session.previous_response_id || null
