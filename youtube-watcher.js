@@ -4,6 +4,7 @@ import path from "path";
 import {
   buildYouTubeReactionPrompt
 } from "./personality-engine.js";
+import { getMoodState, buildMoodContext } from "./mood-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
@@ -244,7 +245,14 @@ ${reaction ? `💭 ${reaction}\n\n` : ""}▶️ ${video.videoUrl}
 
 async function askChiikawaForYouTubeReaction(videoTitle) {
   try {
-    const prompt = buildYouTubeReactionPrompt(videoTitle);
+    const moodState = getMoodState({
+      source: "youtube",
+      signal: "normal",
+      text: videoTitle,
+      now: new Date()
+    });
+    const moodContext = buildMoodContext(moodState);
+    const prompt = buildYouTubeReactionPrompt(videoTitle, moodContext);
 
     const res = await fetch(CHIIKAWA_AI_URL, {
       method: "POST",
@@ -254,7 +262,8 @@ async function askChiikawaForYouTubeReaction(videoTitle) {
       body: JSON.stringify({
         message: prompt,
         sessionId: `yt_${videoTitle}`,
-        mode: "normal"
+        mode: "normal",
+        source: "youtube"
       })
     });
 
