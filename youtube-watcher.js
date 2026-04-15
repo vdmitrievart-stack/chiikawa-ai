@@ -1,12 +1,19 @@
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import {
+  buildYouTubeReactionPrompt
+} from "./personality-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 const YOUTUBE_GIF_FILE_IDS = process.env.YOUTUBE_GIF_FILE_IDS || "";
-const SEND_YT_STARTUP_MESSAGE = String(process.env.SEND_YT_STARTUP_MESSAGE || "false").toLowerCase() === "true";
+const CHIIKAWA_AI_URL =
+  process.env.CHIIKAWA_AI_URL || "https://chiikawa-ai.onrender.com/chat";
+
+const SEND_YT_STARTUP_MESSAGE =
+  String(process.env.SEND_YT_STARTUP_MESSAGE || "false").toLowerCase() === "true";
 const YT_STARTUP_COOLDOWN_HOURS = Number(process.env.YT_STARTUP_COOLDOWN_HOURS || 12);
 
 const YOUTUBE_PLAYLIST_ID = "PLHIKP_Dyl1zwJy0JjSvVV5l8Kyg-8sjdv";
@@ -225,28 +232,59 @@ function mapItem(item) {
   };
 }
 
-function buildAnnouncement(video) {
+function buildAnnouncement(video, reaction) {
   return `🎬 New Chiikawa episode detected!
 
 ${video.title}
 
-▶️ ${video.videoUrl}
+${reaction ? `💭 ${reaction}\n\n` : ""}▶️ ${video.videoUrl}
 
 ✨ A new episode just appeared in the playlist.`;
 }
 
+async function askChiikawaForYouTubeReaction(videoTitle) {
+  try {
+    const prompt = buildYouTubeReactionPrompt(videoTitle);
+
+    const res = await fetch(CHIIKAWA_AI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        message: prompt,
+        sessionId: `yt_${videoTitle}`,
+        mode: "normal"
+      })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      throw new Error(`Chiikawa backend error: ${JSON.stringify(data)}`);
+    }
+
+    const reply = String(data.reply || "").trim();
+    return reply || null;
+  } catch (error) {
+    console.error("YouTube AI reaction error:", error.message);
+    return null;
+  }
+}
+
 async function announceVideo(video) {
   const randomGif = pickRandomGif(GIF_POOL);
+  const reaction = await askChiikawaForYouTubeReaction(video.title);
 
   if (randomGif) {
     try {
-      await sendGif(randomGif, "✨ New episode energy ✨");
+      await sendGif(randomGif, reaction || "✨");
     } catch (error) {
       console.error("YouTube GIF send error:", error.message);
     }
   }
 
-  const caption = buildAnnouncement(video);
+  const caption = buildAnnouncement(video, reaction);
 
   if (video.thumbnailUrl) {
     try {
@@ -294,6 +332,7 @@ async function main() {
   console.log(`Watching playlist: ${YOUTUBE_PLAYLIST_ID}`);
   console.log(`GIF pool size: ${GIF_POOL.length}`);
   console.log(`Seen video ids loaded: ${seenVideoIds.size}`);
+  console.log(`AI backend: ${CHIIKAWA_AI_URL}`);
 
   await maybeSendStartupMessage();
 
