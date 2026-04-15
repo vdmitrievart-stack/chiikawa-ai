@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import http from "http";
 import { buildBuybotReactionPrompt } from "./personality-engine.js";
+import { getMoodState, buildMoodContext } from "./mood-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
@@ -246,7 +247,14 @@ Every friend matters 🥺`;
 
 async function askChiikawaForBuyReaction(kind, amountUsd) {
   try {
-    const prompt = buildBuybotReactionPrompt(kind, amountUsd);
+    const moodState = getMoodState({
+      source: "buybot",
+      signal: kind,
+      text: String(amountUsd),
+      now: new Date()
+    });
+    const moodContext = buildMoodContext(moodState);
+    const prompt = buildBuybotReactionPrompt(kind, amountUsd, moodContext);
 
     const res = await fetch(CHIIKAWA_AI_URL, {
       method: "POST",
@@ -256,7 +264,8 @@ async function askChiikawaForBuyReaction(kind, amountUsd) {
       body: JSON.stringify({
         message: prompt,
         sessionId: `buy_${kind}_${amountUsd}`,
-        mode: "normal"
+        mode: "normal",
+        source: "buybot"
       })
     });
 
