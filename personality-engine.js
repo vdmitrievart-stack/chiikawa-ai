@@ -108,39 +108,6 @@ Mode: thoughtful reflection
 `
 };
 
-const REACTION_BANKS = {
-  happy: [
-    "hehe this feels nice",
-    "that made my little heart lighter",
-    "this is such a friendly kind of energy",
-    "aw… this one is cute"
-  ],
-  hype: [
-    "okay this has real sparkle",
-    "mmm yes this is powerful little gremlin energy",
-    "the timeline just drank espresso",
-    "this one has movement"
-  ],
-  thoughtful: [
-    "there’s actually something real underneath this",
-    "this feels more meaningful than it looks at first",
-    "hmm… this one lingers a little",
-    "there’s a quiet truth in this"
-  ],
-  protective: [
-    "please stay careful and stay human",
-    "protect your peace and protect your people",
-    "slow down and look twice before trusting things",
-    "community first, greed last"
-  ],
-  funny: [
-    "my brain made a tiny backflip reading this",
-    "this is so chaotic in a strangely lovable way",
-    "i can almost hear the timeline wobbling",
-    "this one arrived wearing little clown shoes"
-  ]
-};
-
 function randomItem(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -162,10 +129,13 @@ ${extraContext || "None"}
 `.trim();
 }
 
-export function buildXReactionPrompt(tweet) {
+export function buildXReactionPrompt(tweet, moodContext = "", memoryContext = "") {
   return buildPersonalityPrompt(
     "x_reaction",
     `
+${moodContext || ""}
+${memoryContext || ""}
+
 React to this X post.
 
 Author: @${tweet.username}
@@ -183,10 +153,12 @@ Requirements:
   );
 }
 
-export function buildYouTubeReactionPrompt(videoTitle) {
+export function buildYouTubeReactionPrompt(videoTitle, moodContext = "") {
   return buildPersonalityPrompt(
     "youtube_reaction",
     `
+${moodContext || ""}
+
 A new Chiikawa-related YouTube episode appeared.
 
 Video title:
@@ -199,7 +171,7 @@ Requirements:
   );
 }
 
-export function buildBuybotReactionPrompt(kind, amountUsd) {
+export function buildBuybotReactionPrompt(kind, amountUsd, moodContext = "") {
   const mode =
     kind === "whale" ? "buybot_whale" :
     kind === "strong" ? "buybot_strong" :
@@ -208,6 +180,8 @@ export function buildBuybotReactionPrompt(kind, amountUsd) {
   return buildPersonalityPrompt(
     mode,
     `
+${moodContext || ""}
+
 A buy event happened.
 
 Estimated size:
@@ -218,27 +192,6 @@ Requirements:
 - Be cute and alive.
 `
   );
-}
-
-export function buildModerationPrompt(reason) {
-  return buildPersonalityPrompt(
-    "moderation_warning",
-    `
-You are warning/protecting the community.
-
-Reason:
-${reason}
-
-Requirements:
-- Very short.
-- Calm but firm.
-`
-  );
-}
-
-export function getQuickReaction(kind = "happy") {
-  const bank = REACTION_BANKS[kind] || REACTION_BANKS.happy;
-  return randomItem(bank);
 }
 
 export function getCommunityReminder() {
