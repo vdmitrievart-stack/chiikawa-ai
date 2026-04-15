@@ -23,6 +23,12 @@ import {
   getMoodOfTheDay,
   buildMusicKeyboard
 } from "./music-engine.js";
+import { getMoodState, buildMoodContext } from "./mood-engine.js";
+import {
+  rememberInteraction,
+  buildMemoryContext
+} from "./memory-engine.js";
+import { getAboutText } from "./personality-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHIIKAWA_AI_URL =
@@ -195,7 +201,17 @@ async function banTelegramUser(chatId, userId) {
   });
 }
 
-async function askChiikawa(message, sessionId, mode = "normal") {
+async function askChiikawa({
+  message,
+  sessionId,
+  mode = "chat",
+  userId = "anonymous",
+  userName = "",
+  username = "",
+  chatId = "",
+  chatType = "",
+  source = "telegram"
+}) {
   const res = await fetch(CHIIKAWA_AI_URL, {
     method: "POST",
     headers: {
@@ -204,7 +220,13 @@ async function askChiikawa(message, sessionId, mode = "normal") {
     body: JSON.stringify({
       message,
       sessionId,
-      mode
+      mode,
+      userId,
+      userName,
+      username,
+      chatId,
+      chatType,
+      source
     })
   });
 
@@ -223,6 +245,11 @@ function buildSessionId(chatId, userId) {
 
 function isPrivateChat(message) {
   return message.chat?.type === "private";
+}
+
+function isGroupChat(message) {
+  const type = message.chat?.type;
+  return type === "group" || type === "supergroup";
 }
 
 function normalizeText(text) {
@@ -291,7 +318,6 @@ function shouldSendSoftCheckIn(userId) {
   userLastSeen.set(userId, now);
 
   if (now - last < 4 * 60 * 60 * 1000) return false;
-
   return Math.random() < 0.08;
 }
 
@@ -480,16 +506,13 @@ function isThanksMessage(text) {
 
 function parseMoodCommand(text) {
   const lower = cleanLower(text);
-
   if (!lower.startsWith("/mood")) return null;
-
   const parts = lower.split(/\s+/);
   return parts[1] || null;
 }
 
 function shouldRespond(message) {
   const text = normalizeText(message.text);
-
   if (!text) return false;
 
   if (text.startsWith("/start")) return true;
@@ -510,7 +533,6 @@ function shouldRespond(message) {
   if (isWebsiteRequest(text)) return true;
 
   if (isPrivateChat(message)) return true;
-
   if (mentionsBotUsername(text)) return true;
   if (mentionsBotByName(text)) return true;
   if (isReplyToBot(message)) return true;
@@ -563,7 +585,8 @@ async function moderateMessageIfNeeded(message) {
       await sendTelegramMessage(
         chatId,
         `A suspicious spam/scam account was removed.
-Reason: ${analysis.reason}`
+Reason: ${analysis.reason}`,
+        messageId
       );
     } catch (err) {
       console.error("Failed to ban user:", err);
@@ -580,7 +603,8 @@ Reason: ${analysis.reason}`
         chatId,
         `A suspicious promotional message was removed.
 The user has been muted temporarily.
-Reason: ${analysis.reason}`
+Reason: ${analysis.reason}`,
+        messageId
       );
     } catch (err) {
       console.error("Failed to mute user:", err);
@@ -612,16 +636,7 @@ async function handleMenuCallback(callbackQuery) {
 
   if (data === "menu:about") {
     await answerCallbackQuery(callbackQuery.id, "About Chiikawa");
-    await sendTelegramMessage(
-      chatId,
-      `I’m Chiikawa ✨
-
-I’m a small, emotional, warm little character trying my best to find friends and grow a kind community.
-
-My favorite token is the one the community created in my honor:
-$Chiikawa belongs to the community 🥺`,
-      messageId
-    );
+    await sendTelegramMessage(chatId, getAboutText(), messageId);
     return true;
   }
 
@@ -740,12 +755,24 @@ ${result.message}`,
 async function handleCommand(message) {
   const text = normalizeText(message.text);
   const chatId = message.chat.id;
-  const userId = message.from?.id;
+  const userId = String(message.from?.id || "anonymous");
   const messageId = message.message_id;
   const sessionId = buildSessionId(chatId, userId);
+  const userName = getDisplayName(message.from);
+  const username = message.from?.username || "";
 
   if (text.startsWith("/start")) {
-    const reply = await askChiikawa("Hi", sessionId, "greeting");
+    const reply = await askChiikawa({
+      message: "Meet a new friend warmly.",
+      sessionId,
+      mode: "greeting",
+      userId,
+      userName,
+      username,
+      chatId: String(chatId),
+      chatType: message.chat?.type || "",
+      source: "telegram"
+    });
     greetedChats.add(chatId);
     markChatActive(chatId);
     await sendTelegramMessage(chatId, reply, messageId);
@@ -790,12 +817,7 @@ You can call me by name too, not only with @mention.`,
   if (text.startsWith("/about")) {
     await sendTelegramMessage(
       chatId,
-      `I’m Chiikawa ✨
-
-I’m a small, emotional, warm little character trying my best to find friends and grow a kind community.
-
-My favorite token is the one the community created in my honor:
-$Chiikawa belongs to the community 🥺`,
+      getAboutText(),
       messageId,
       { reply_markup: buildMainMenuKeyboard() }
     );
@@ -901,13 +923,7 @@ ${getAvailableMoods().map(x => `/mood ${x}`).join("\n")}`,
       return true;
     }
 
-    const reply = await askChiikawa(
-      "Tell me your current mood in one warm message and maybe ask me something back.",
-      sessionId,
-      "normal"
-    );
-    markChatActive(chatId);
-    await sendTelegramMessage(chatId, reply, messageId, {
+    await sendTelegramMessage(chatId, "Try /mood happy or /mood chill ✨", messageId, {
       reply_markup: buildMusicKeyboard()
     });
     return true;
@@ -918,25 +934,54 @@ ${getAvailableMoods().map(x => `/mood ${x}`).join("\n")}`,
 
 async function maybeSendGreeting(message) {
   const chatId = message.chat.id;
-  const userId = message.from?.id;
+  const userId = String(message.from?.id || "anonymous");
   const sessionId = buildSessionId(chatId, userId);
+  const userName = getDisplayName(message.from);
+  const username = message.from?.username || "";
 
   if (!greetedChats.has(chatId)) {
-    const greeting = await askChiikawa("Hi", sessionId, "greeting");
+    const greeting = await askChiikawa({
+      message: "Meet a new friend warmly.",
+      sessionId,
+      mode: "greeting",
+      userId,
+      userName,
+      username,
+      chatId: String(chatId),
+      chatType: message.chat?.type || "",
+      source: "telegram"
+    });
     greetedChats.add(chatId);
     markChatActive(chatId);
-    await sendTelegramMessage(chatId, greeting);
+    await sendTelegramMessage(chatId, greeting, message.message_id);
   }
+}
+
+function addressReplyForGroup(message, reply) {
+  if (!isGroupChat(message)) return reply;
+  const name = getDisplayName(message.from);
+  return `${name}, ${reply}`;
 }
 
 async function handleRegularMessage(message) {
   const chatId = message.chat.id;
-  const userId = message.from?.id;
+  const userId = String(message.from?.id || "anonymous");
   const messageId = message.message_id;
   const text = normalizeText(message.text);
   const sessionId = buildSessionId(chatId, userId);
+  const userName = getDisplayName(message.from);
+  const username = message.from?.username || "";
 
   if (!text || !shouldRespond(message)) return;
+
+  rememberInteraction({
+    userId,
+    displayName: userName,
+    username,
+    chatId: String(chatId),
+    chatType: message.chat?.type || "",
+    text
+  });
 
   if (isCARequest(text)) {
     markChatActive(chatId);
@@ -954,15 +999,22 @@ async function handleRegularMessage(message) {
 
   if (isThanksMessage(text)) {
     markChatActive(chatId);
-    await sendTelegramMessage(chatId, "Hehe… I’m happy I could help 🥺✨", messageId);
+    await sendTelegramMessage(
+      chatId,
+      addressReplyForGroup(message, "Hehe… I’m happy I could help 🥺✨"),
+      messageId
+    );
     return;
   }
 
   if (isSimpleGreeting(text)) {
     markChatActive(chatId);
-    await sendTelegramMessage(chatId, "Hi… I’m here 🥺✨", messageId, {
-      reply_markup: buildMainMenuKeyboard()
-    });
+    await sendTelegramMessage(
+      chatId,
+      addressReplyForGroup(message, "Hi… I’m here 🥺✨"),
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
+    );
     return;
   }
 
@@ -975,16 +1027,25 @@ async function handleRegularMessage(message) {
 
   markChatActive(chatId);
 
+  const moodState = getMoodState({
+    source: "chat",
+    signal: "normal",
+    text,
+    now: new Date()
+  });
+  const moodContext = buildMoodContext(moodState);
+  const memoryContext = buildMemoryContext(userId);
+
   let prompt = maybeAddTelegramPrefix(text, message.from, message);
 
   if (!isPrivateChat(message) && isChatActive(chatId)) {
     prompt += `
-The group conversation with you is currently active. Even if the user did not mention you with @username this time, you should treat this as a direct continuation of the ongoing dialogue.`;
+The group conversation with you is currently active. Treat this as a direct continuation of dialogue with this same user when appropriate.`;
   }
 
   if (shouldSendSoftCheckIn(userId)) {
     prompt += `
-Also, if it feels natural, you may gently continue the conversation with one soft, engaging follow-up question. Keep it warm and not pushy.`;
+You may gently continue the conversation with one soft, engaging follow-up question.`;
   }
 
   if (shouldSendCommunityNudge()) {
@@ -999,14 +1060,35 @@ If it feels natural, you may also end with a tiny community mission:
 "${getRandomMission()}"`;
   }
 
-  const reply = await askChiikawa(prompt, sessionId, "normal");
-  await sendTelegramMessage(chatId, reply, messageId, {
-    reply_markup: buildMainMenuKeyboard()
+  prompt += `
+
+${memoryContext}
+
+${moodContext}
+
+Important:
+- In a group, answer this specific user directly and clearly.
+- No unnecessary repeated self-introductions.
+`;
+
+  const reply = await askChiikawa({
+    message: prompt,
+    sessionId,
+    mode: "chat",
+    userId,
+    userName,
+    username,
+    chatId: String(chatId),
+    chatType: message.chat?.type || "",
+    source: "telegram"
   });
 
-  if (Math.random() < 0.1) {
-    await sendTelegramMessage(chatId, "…🥺✨");
-  }
+  await sendTelegramMessage(
+    chatId,
+    addressReplyForGroup(message, reply),
+    messageId,
+    { reply_markup: buildMainMenuKeyboard() }
+  );
 }
 
 async function handleMessage(message) {
