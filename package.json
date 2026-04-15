@@ -1,15 +1,15 @@
 {
   "name": "chiikawa-ai",
-  "version": "1.0.0",
-  "description": "Chiikawa AI server + Telegram bot + X watcher + Buybot + YouTube watcher",
+  "version": "2.0.0",
+  "description": "Chiikawa AI server + Telegram bot + X watcher + YouTube watcher + Buybot",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "telegram": "node telegram-bot.js",
     "x": "node x-watcher.js",
-    "buybot": "node buybot-worker.js",
-    "youtube": "node youtube-watcher.js"
+    "youtube": "node youtube-watcher.js",
+    "buybot": "node buybot-worker.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
