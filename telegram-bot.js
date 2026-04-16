@@ -23,16 +23,15 @@ import {
   getMoodOfTheDay,
   buildMusicKeyboard
 } from "./music-engine.js";
-import { getMoodState, buildMoodContext } from "./mood-engine.js";
-import {
-  rememberInteraction,
-  buildMemoryContext
-} from "./memory-engine.js";
+import { rememberInteraction } from "./memory-engine.js";
 import { getAboutText } from "./personality-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHIIKAWA_AI_URL =
   process.env.CHIIKAWA_AI_URL || "https://chiikawa-ai.onrender.com/chat";
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+const AI_SERVER_BASE_URL =
+  (CHIIKAWA_AI_URL || "").replace(/\/chat$/, "") || "https://chiikawa-ai.onrender.com";
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN");
@@ -41,6 +40,7 @@ if (!TELEGRAM_BOT_TOKEN) {
 
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
 const FORCED_GROUP_CHAT_ID = "-1003953010138";
+const ADMIN_IDS = [617743971];
 
 let offset = 0;
 let botUsername = null;
@@ -54,8 +54,62 @@ const greetedChats = new Set();
 const userLastSeen = new Map();
 const activeChatUntil = new Map();
 
+// auto self-tuning counters
+const chatTraffic = new Map();
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function countTraffic(chatId) {
+  const now = Date.now();
+  const bucket = chatTraffic.get(chatId) || [];
+  bucket.push(now);
+
+  const filtered = bucket.filter(ts => now - ts < 60 * 1000);
+  chatTraffic.set(chatId, filtered);
+
+  return filtered.length;
+}
+
+async function getRuntimeConfig() {
+  try {
+    const res = await fetch(
+      `${AI_SERVER_BASE_URL}/runtime/config?secret=${encodeURIComponent(ADMIN_SECRET)}`
+    );
+    const data = await res.json();
+    if (data?.ok) return data.config;
+  } catch (error) {
+    console.error("getRuntimeConfig error:", error.message);
+  }
+
+  return {
+    quietMode: false,
+    xWatcherEnabled: true,
+    youtubeWatcherEnabled: true,
+    buybotEnabled: true,
+    buybotAlertMinUsd: 20,
+    autoSelfTuning: true
+  };
+}
+
+async function patchRuntimeConfig(patch) {
+  const res = await fetch(`${AI_SERVER_BASE_URL}/runtime/config`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      secret: ADMIN_SECRET,
+      patch
+    })
+  });
+
+  const data = await res.json();
+  if (!data?.ok) {
+    throw new Error(data?.error || "runtime config update failed");
+  }
+  return data.config;
 }
 
 async function tg(method, body = {}) {
@@ -83,6 +137,8 @@ async function setTelegramCommands() {
     { command: "start", description: "Start talking to Chiikawa" },
     { command: "help", description: "Show all available commands" },
     { command: "menu", description: "Open the Chiikawa menu" },
+    { command: "admin", description: "Open admin panel" },
+    { command: "status", description: "Show runtime status" },
     { command: "ca", description: "Show token contract address" },
     { command: "website", description: "Open the official website" },
     { command: "mission", description: "Get a tiny community mission" },
@@ -444,6 +500,48 @@ function buildMainMenuKeyboard() {
   };
 }
 
+function buildAdminKeyboard(config) {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: config.quietMode ? "Quiet: ON" : "Quiet: OFF",
+          callback_data: "admin:toggle_quiet"
+        },
+        {
+          text: config.autoSelfTuning ? "Self-tuning: ON" : "Self-tuning: OFF",
+          callback_data: "admin:toggle_self_tuning"
+        }
+      ],
+      [
+        {
+          text: config.xWatcherEnabled ? "X watcher: ON" : "X watcher: OFF",
+          callback_data: "admin:toggle_x"
+        },
+        {
+          text: config.youtubeWatcherEnabled ? "YT watcher: ON" : "YT watcher: OFF",
+          callback_data: "admin:toggle_youtube"
+        }
+      ],
+      [
+        {
+          text: config.buybotEnabled ? "Buybot: ON" : "Buybot: OFF",
+          callback_data: "admin:toggle_buybot"
+        }
+      ],
+      [
+        { text: "Buy min -10", callback_data: "admin:buymin_down_10" },
+        { text: `Buy min ${config.buybotAlertMinUsd}$`, callback_data: "admin:noop" },
+        { text: "Buy min +10", callback_data: "admin:buymin_up_10" }
+      ],
+      [
+        { text: "Refresh", callback_data: "admin:refresh" },
+        { text: "Test", callback_data: "admin:test" }
+      ]
+    ]
+  };
+}
+
 function buildMenuText() {
   return `✨ Chiikawa Menu ✨
 
@@ -463,6 +561,23 @@ async function sendMainMenu(chatId, replyToMessageId = null) {
   return sendTelegramMessage(chatId, buildMenuText(), replyToMessageId, {
     reply_markup: buildMainMenuKeyboard()
   });
+}
+
+async function sendAdminPanel(chatId, replyToMessageId = null) {
+  const config = await getRuntimeConfig();
+  return sendTelegramMessage(
+    chatId,
+    `🛠 Admin Panel
+
+quietMode: ${config.quietMode}
+autoSelfTuning: ${config.autoSelfTuning}
+xWatcherEnabled: ${config.xWatcherEnabled}
+youtubeWatcherEnabled: ${config.youtubeWatcherEnabled}
+buybotEnabled: ${config.buybotEnabled}
+buybotAlertMinUsd: ${config.buybotAlertMinUsd}`,
+    replyToMessageId,
+    { reply_markup: buildAdminKeyboard(config) }
+  );
 }
 
 async function sendCAMessage(chatId, replyToMessageId = null) {
@@ -518,6 +633,8 @@ function shouldRespond(message) {
   if (text.startsWith("/start")) return true;
   if (text.startsWith("/help")) return true;
   if (text.startsWith("/menu")) return true;
+  if (text.startsWith("/admin")) return true;
+  if (text.startsWith("/status")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/mood")) return true;
   if (text.startsWith("/website")) return true;
@@ -541,6 +658,10 @@ function shouldRespond(message) {
   return false;
 }
 
+function isAdmin(userId) {
+  return ADMIN_IDS.includes(Number(userId));
+}
+
 async function moderateMessageIfNeeded(message) {
   const chatId = message.chat?.id;
   const messageId = message.message_id;
@@ -554,6 +675,8 @@ async function moderateMessageIfNeeded(message) {
     text.startsWith("/start") ||
     text.startsWith("/help") ||
     text.startsWith("/menu") ||
+    text.startsWith("/admin") ||
+    text.startsWith("/status") ||
     text.startsWith("/ca") ||
     text.startsWith("/website") ||
     text.startsWith("/mission") ||
@@ -615,6 +738,71 @@ Reason: ${analysis.reason}`,
   return false;
 }
 
+async function handleAdminCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+  const userId = callbackQuery.from?.id;
+
+  if (!chatId || !isAdmin(userId)) return false;
+  if (!data.startsWith("admin:")) return false;
+
+  try {
+    const current = await getRuntimeConfig();
+
+    if (data === "admin:noop") {
+      await answerCallbackQuery(callbackQuery.id, "No change");
+      return true;
+    }
+
+    if (data === "admin:toggle_quiet") {
+      await patchRuntimeConfig({ quietMode: !current.quietMode });
+    } else if (data === "admin:toggle_self_tuning") {
+      await patchRuntimeConfig({ autoSelfTuning: !current.autoSelfTuning });
+    } else if (data === "admin:toggle_x") {
+      await patchRuntimeConfig({ xWatcherEnabled: !current.xWatcherEnabled });
+    } else if (data === "admin:toggle_youtube") {
+      await patchRuntimeConfig({ youtubeWatcherEnabled: !current.youtubeWatcherEnabled });
+    } else if (data === "admin:toggle_buybot") {
+      await patchRuntimeConfig({ buybotEnabled: !current.buybotEnabled });
+    } else if (data === "admin:buymin_down_10") {
+      await patchRuntimeConfig({
+        buybotAlertMinUsd: Math.max(0, Number(current.buybotAlertMinUsd || 20) - 10)
+      });
+    } else if (data === "admin:buymin_up_10") {
+      await patchRuntimeConfig({
+        buybotAlertMinUsd: Number(current.buybotAlertMinUsd || 20) + 10
+      });
+    } else if (data === "admin:test") {
+      await sendTelegramMessage(chatId, "🧪 Admin panel test OK", messageId);
+    } else if (data === "admin:refresh") {
+      // nothing
+    }
+
+    const updated = await getRuntimeConfig();
+
+    await answerCallbackQuery(callbackQuery.id, "Updated");
+    await sendTelegramMessage(
+      chatId,
+      `🛠 Admin Panel
+
+quietMode: ${updated.quietMode}
+autoSelfTuning: ${updated.autoSelfTuning}
+xWatcherEnabled: ${updated.xWatcherEnabled}
+youtubeWatcherEnabled: ${updated.youtubeWatcherEnabled}
+buybotEnabled: ${updated.buybotEnabled}
+buybotAlertMinUsd: ${updated.buybotAlertMinUsd}`,
+      messageId,
+      { reply_markup: buildAdminKeyboard(updated) }
+    );
+  } catch (error) {
+    await answerCallbackQuery(callbackQuery.id, "Update failed");
+    console.error("Admin callback error:", error.message);
+  }
+
+  return true;
+}
+
 async function handleMenuCallback(callbackQuery) {
   const data = callbackQuery.data || "";
   const chatId = callbackQuery.message?.chat?.id;
@@ -669,6 +857,8 @@ Commands:
 /start
 /help
 /menu
+/admin
+/status
 /ca
 /website
 /mission
@@ -790,6 +980,8 @@ Commands:
 /start
 /help
 /menu
+/admin
+/status
 /ca
 /website
 /mission
@@ -799,10 +991,7 @@ Commands:
 /playlist
 /spin
 /radio
-/mood <${moods}>
-
-You can also just talk to me normally 🥺
-You can call me by name too, not only with @mention.`,
+/mood <${moods}>`,
       messageId,
       { reply_markup: buildMainMenuKeyboard() }
     );
@@ -814,13 +1003,36 @@ You can call me by name too, not only with @mention.`,
     return true;
   }
 
-  if (text.startsWith("/about")) {
+  if (text.startsWith("/admin")) {
+    if (!isAdmin(userId)) {
+      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      return true;
+    }
+    await sendAdminPanel(chatId, messageId);
+    return true;
+  }
+
+  if (text.startsWith("/status")) {
+    const cfg = await getRuntimeConfig();
     await sendTelegramMessage(
       chatId,
-      getAboutText(),
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
+      `📊 Runtime status
+
+quietMode: ${cfg.quietMode}
+autoSelfTuning: ${cfg.autoSelfTuning}
+xWatcherEnabled: ${cfg.xWatcherEnabled}
+youtubeWatcherEnabled: ${cfg.youtubeWatcherEnabled}
+buybotEnabled: ${cfg.buybotEnabled}
+buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}`,
+      messageId
     );
+    return true;
+  }
+
+  if (text.startsWith("/about")) {
+    await sendTelegramMessage(chatId, getAboutText(), messageId, {
+      reply_markup: buildMainMenuKeyboard()
+    });
     return true;
   }
 
@@ -974,6 +1186,9 @@ async function handleRegularMessage(message) {
 
   if (!text || !shouldRespond(message)) return;
 
+  const runtimeConfig = await getRuntimeConfig();
+  const traffic = countTraffic(chatId);
+
   rememberInteraction({
     userId,
     displayName: userName,
@@ -1018,6 +1233,22 @@ async function handleRegularMessage(message) {
     return;
   }
 
+  if (runtimeConfig.quietMode) {
+    return;
+  }
+
+  if (runtimeConfig.autoSelfTuning && isGroupChat(message) && traffic > 18) {
+    // under heavy load, only respond when directly addressed or replied to
+    const directlyAddressed =
+      mentionsBotUsername(text) ||
+      mentionsBotByName(text) ||
+      isReplyToBot(message);
+
+    if (!directlyAddressed) {
+      return;
+    }
+  }
+
   await maybeSendGreeting(message);
 
   if (Math.random() < 0.15) {
@@ -1027,15 +1258,6 @@ async function handleRegularMessage(message) {
 
   markChatActive(chatId);
 
-  const moodState = getMoodState({
-    source: "chat",
-    signal: "normal",
-    text,
-    now: new Date()
-  });
-  const moodContext = buildMoodContext(moodState);
-  const memoryContext = buildMemoryContext(userId);
-
   let prompt = maybeAddTelegramPrefix(text, message.from, message);
 
   if (!isPrivateChat(message) && isChatActive(chatId)) {
@@ -1043,7 +1265,7 @@ async function handleRegularMessage(message) {
 The group conversation with you is currently active. Treat this as a direct continuation of dialogue with this same user when appropriate.`;
   }
 
-  if (shouldSendSoftCheckIn(userId)) {
+  if (shouldSendSoftCheckIn(userId) && !runtimeConfig.quietMode) {
     prompt += `
 You may gently continue the conversation with one soft, engaging follow-up question.`;
   }
@@ -1062,13 +1284,10 @@ If it feels natural, you may also end with a tiny community mission:
 
   prompt += `
 
-${memoryContext}
-
-${moodContext}
-
 Important:
 - In a group, answer this specific user directly and clearly.
 - No unnecessary repeated self-introductions.
+- Keep things cleaner if chat is busy.
 `;
 
   const reply = await askChiikawa({
@@ -1152,9 +1371,12 @@ async function pollLoop() {
         offset = update.update_id + 1;
 
         if (update.callback_query) {
-          const handledMenu = await handleMenuCallback(update.callback_query);
-          if (!handledMenu) {
-            await handleMusicCallback(update.callback_query);
+          const handledAdmin = await handleAdminCallback(update.callback_query);
+          if (!handledAdmin) {
+            const handledMenu = await handleMenuCallback(update.callback_query);
+            if (!handledMenu) {
+              await handleMusicCallback(update.callback_query);
+            }
           }
         }
 
