@@ -50,15 +50,22 @@ let botFirstName = "Chiikawa";
 const ACTIVE_CONVERSATION_MS = 8 * 60 * 1000;
 const TOKEN_CA = "2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu";
 
+// anti-dead chat + traffic
 const greetedChats = new Set();
 const userLastSeen = new Map();
 const activeChatUntil = new Map();
-
-// auto self-tuning counters
 const chatTraffic = new Map();
+const groupHeartbeat = new Map();
+
+const HEARTBEAT_INTERVAL_MS = 90 * 60 * 1000;
+const HEARTBEAT_SILENCE_MS = 60 * 60 * 1000;
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isAdmin(userId) {
+  return ADMIN_IDS.includes(Number(userId));
 }
 
 function countTraffic(chatId) {
@@ -70,6 +77,15 @@ function countTraffic(chatId) {
   chatTraffic.set(chatId, filtered);
 
   return filtered.length;
+}
+
+function markGroupSeen(chatId) {
+  const current = groupHeartbeat.get(chatId) || {
+    lastUserMessageAt: 0,
+    lastBotNudgeAt: 0
+  };
+  current.lastUserMessageAt = Date.now();
+  groupHeartbeat.set(chatId, current);
 }
 
 async function getRuntimeConfig() {
@@ -139,6 +155,7 @@ async function setTelegramCommands() {
     { command: "menu", description: "Open the Chiikawa menu" },
     { command: "admin", description: "Open admin panel" },
     { command: "status", description: "Show runtime status" },
+    { command: "pulse", description: "AI read on the room / signal" },
     { command: "ca", description: "Show token contract address" },
     { command: "website", description: "Open the official website" },
     { command: "mission", description: "Get a tiny community mission" },
@@ -635,6 +652,7 @@ function shouldRespond(message) {
   if (text.startsWith("/menu")) return true;
   if (text.startsWith("/admin")) return true;
   if (text.startsWith("/status")) return true;
+  if (text.startsWith("/pulse")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/mood")) return true;
   if (text.startsWith("/website")) return true;
@@ -658,10 +676,6 @@ function shouldRespond(message) {
   return false;
 }
 
-function isAdmin(userId) {
-  return ADMIN_IDS.includes(Number(userId));
-}
-
 async function moderateMessageIfNeeded(message) {
   const chatId = message.chat?.id;
   const messageId = message.message_id;
@@ -677,6 +691,7 @@ async function moderateMessageIfNeeded(message) {
     text.startsWith("/menu") ||
     text.startsWith("/admin") ||
     text.startsWith("/status") ||
+    text.startsWith("/pulse") ||
     text.startsWith("/ca") ||
     text.startsWith("/website") ||
     text.startsWith("/mission") ||
@@ -775,8 +790,6 @@ async function handleAdminCallback(callbackQuery) {
       });
     } else if (data === "admin:test") {
       await sendTelegramMessage(chatId, "🧪 Admin panel test OK", messageId);
-    } else if (data === "admin:refresh") {
-      // nothing
     }
 
     const updated = await getRuntimeConfig();
@@ -859,6 +872,7 @@ Commands:
 /menu
 /admin
 /status
+/pulse
 /ca
 /website
 /mission
@@ -982,6 +996,7 @@ Commands:
 /menu
 /admin
 /status
+/pulse
 /ca
 /website
 /mission
@@ -1026,6 +1041,31 @@ buybotEnabled: ${cfg.buybotEnabled}
 buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}`,
       messageId
     );
+    return true;
+  }
+
+  if (text.startsWith("/pulse")) {
+    const traffic = countTraffic(chatId);
+    const cfg = await getRuntimeConfig();
+    const pulseReply = await askChiikawa({
+      message: `Give a short pulse read on this community chat right now.
+
+Traffic in last minute: ${traffic}
+quietMode: ${cfg.quietMode}
+autoSelfTuning: ${cfg.autoSelfTuning}
+
+Keep it to 3 short lines max.`,
+      sessionId: `pulse_${chatId}`,
+      mode: "chat",
+      userId,
+      userName,
+      username,
+      chatId: String(chatId),
+      chatType: message.chat?.type || "",
+      source: "telegram"
+    });
+
+    await sendTelegramMessage(chatId, `📈 Pulse\n\n${pulseReply}`, messageId);
     return true;
   }
 
@@ -1175,6 +1215,45 @@ function addressReplyForGroup(message, reply) {
   return `${name}, ${reply}`;
 }
 
+async function maybeSendHeartbeatToQuietGroups() {
+  const cfg = await getRuntimeConfig();
+  if (cfg.quietMode) return;
+
+  const now = Date.now();
+
+  for (const [chatId, info] of groupHeartbeat.entries()) {
+    if (!chatId) continue;
+
+    const silence = now - (info.lastUserMessageAt || 0);
+    const sinceBotNudge = now - (info.lastBotNudgeAt || 0);
+
+    if (silence < HEARTBEAT_SILENCE_MS) continue;
+    if (sinceBotNudge < HEARTBEAT_INTERVAL_MS) continue;
+
+    try {
+      const heartbeat = await askChiikawa({
+        message: `The community chat has gone quiet for a while.
+Send one short, warm, non-spammy message to gently revive the room.
+Keep it under 2 lines.`,
+        sessionId: `heartbeat_${chatId}`,
+        mode: "chat",
+        userId: "system",
+        userName: "system",
+        username: "",
+        chatId: String(chatId),
+        chatType: "supergroup",
+        source: "telegram"
+      });
+
+      await sendTelegramMessage(chatId, heartbeat);
+      info.lastBotNudgeAt = now;
+      groupHeartbeat.set(chatId, info);
+    } catch (error) {
+      console.error("heartbeat error:", error.message);
+    }
+  }
+}
+
 async function handleRegularMessage(message) {
   const chatId = message.chat.id;
   const userId = String(message.from?.id || "anonymous");
@@ -1185,6 +1264,10 @@ async function handleRegularMessage(message) {
   const username = message.from?.username || "";
 
   if (!text || !shouldRespond(message)) return;
+
+  if (isGroupChat(message)) {
+    markGroupSeen(chatId);
+  }
 
   const runtimeConfig = await getRuntimeConfig();
   const traffic = countTraffic(chatId);
@@ -1238,7 +1321,6 @@ async function handleRegularMessage(message) {
   }
 
   if (runtimeConfig.autoSelfTuning && isGroupChat(message) && traffic > 18) {
-    // under heavy load, only respond when directly addressed or replied to
     const directlyAddressed =
       mentionsBotUsername(text) ||
       mentionsBotByName(text) ||
@@ -1351,14 +1433,12 @@ async function bootstrap() {
 
   await setTelegramCommands();
 
-  console.log(`Telegram bot started as @${botUsername || "unknown_bot"}`);
-  console.log(`Using backend: ${CHIIKAWA_AI_URL}`);
-  console.log(`Website: ${getWebsiteUrl()}`);
-  console.log(`Bot first name: ${botFirstName}`);
-  console.log(`Forced group scope: ${FORCED_GROUP_CHAT_ID}`);
+  console.log(`Telegram bot LEVEL 3 started as @${botUsername || "unknown_bot"}`);
 }
 
 async function pollLoop() {
+  let lastHeartbeatSweep = 0;
+
   while (true) {
     try {
       const updates = await tg("getUpdates", {
@@ -1383,6 +1463,12 @@ async function pollLoop() {
         if (update.message) {
           await handleMessage(update.message);
         }
+      }
+
+      const now = Date.now();
+      if (now - lastHeartbeatSweep > 5 * 60 * 1000) {
+        lastHeartbeatSweep = now;
+        await maybeSendHeartbeatToQuietGroups();
       }
     } catch (error) {
       const code = error?.telegram?.error_code;
