@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
 import { buildPersonalityPrompt } from "./personality-engine.js";
 import {
   rememberInteraction,
@@ -16,12 +18,87 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+
+const CONFIG_FILE = path.resolve("./runtime-config.json");
 
 // session memory for OpenAI response chaining
 const sessions = new Map();
 
+const DEFAULT_CONFIG = {
+  quietMode: false,
+  xWatcherEnabled: true,
+  youtubeWatcherEnabled: true,
+  buybotEnabled: true,
+  buybotAlertMinUsd: 20,
+  autoSelfTuning: true,
+  updatedAt: Date.now()
+};
+
+function loadRuntimeConfig() {
+  try {
+    if (!fs.existsSync(CONFIG_FILE)) {
+      return { ...DEFAULT_CONFIG };
+    }
+    const raw = fs.readFileSync(CONFIG_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_CONFIG,
+      ...parsed
+    };
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
+function saveRuntimeConfig(config) {
+  try {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf8");
+  } catch (error) {
+    console.error("Failed to save runtime config:", error.message);
+  }
+}
+
+let runtimeConfig = loadRuntimeConfig();
+
+function authOk(secret) {
+  return ADMIN_SECRET && secret && secret === ADMIN_SECRET;
+}
+
 app.get("/", (req, res) => {
   res.send("Chiikawa AI server is running 🧠");
+});
+
+app.get("/runtime/config", (req, res) => {
+  const secret = String(req.query.secret || "");
+  if (!authOk(secret)) {
+    return res.status(403).json({ ok: false, error: "forbidden" });
+  }
+
+  return res.json({
+    ok: true,
+    config: runtimeConfig
+  });
+});
+
+app.post("/runtime/config", (req, res) => {
+  const secret = String(req.body.secret || "");
+  if (!authOk(secret)) {
+    return res.status(403).json({ ok: false, error: "forbidden" });
+  }
+
+  const patch = req.body.patch || {};
+  runtimeConfig = {
+    ...runtimeConfig,
+    ...patch,
+    updatedAt: Date.now()
+  };
+  saveRuntimeConfig(runtimeConfig);
+
+  return res.json({
+    ok: true,
+    config: runtimeConfig
+  });
 });
 
 function pickMode(reqMode, session) {
@@ -117,7 +194,6 @@ Extra behavior:
     });
 
     const data = await response.json();
-    console.log("OPENAI RAW RESPONSE:", JSON.stringify(data, null, 2));
 
     if (!response.ok) {
       const errorMessage =
