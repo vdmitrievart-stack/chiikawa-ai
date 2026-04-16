@@ -4,7 +4,11 @@ import path from "path";
 import { fetchTweets, filterTweets, formatAlert } from "./x-engine.js";
 import { buildXReactionPrompt } from "./personality-engine.js";
 import { getMoodState, buildMoodContext } from "./mood-engine.js";
-import { shouldSuggestRaid, buildRaidNudge } from "./raid-engine.js";
+import {
+  shouldSuggestRaid,
+  buildRaidNudge,
+  markRaidSuggested
+} from "./raid-engine.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_ALERT_CHAT_ID = process.env.TELEGRAM_ALERT_CHAT_ID;
@@ -50,7 +54,6 @@ function loadState() {
     if (!fs.existsSync(STATE_FILE)) {
       return { sentTweetIds: [], sentTweetUrls: [] };
     }
-
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
   } catch {
     return { sentTweetIds: [], sentTweetUrls: [] };
@@ -95,7 +98,8 @@ async function tg(method, body = {}) {
 async function sendText(text) {
   return tg("sendMessage", {
     chat_id: TELEGRAM_ALERT_CHAT_ID,
-    text
+    text,
+    disable_web_page_preview: false
   });
 }
 
@@ -164,11 +168,12 @@ async function postTweetAlert(tweet) {
 
   if (shouldSuggestRaid(tweet)) {
     await sendReplyText(buildRaidNudge(tweet), msgId);
+    markRaidSuggested(tweet.id);
   }
 }
 
 async function loop() {
-  console.log("X watcher PRO MAX (clean UI + raids) started");
+  console.log("X watcher LEVEL 3 started");
 
   while (true) {
     try {
@@ -187,7 +192,7 @@ async function loop() {
         }
       }
     } catch (err) {
-      console.error("Error:", err.message);
+      console.error("X watcher error:", err.message);
     }
 
     await sleep(LOOP_INTERVAL_MS);
