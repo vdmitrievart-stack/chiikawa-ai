@@ -35,6 +35,9 @@ const X_GIF_POOL = X_GIF_FILE_IDS
 let lastGifUsed = null;
 let warmedUp = false;
 
+// Жёсткий лок против повторной отправки одного и того же твита
+const inFlightTweets = new Set();
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -70,6 +73,11 @@ const sentTweetUrls = new Set(state.sentTweetUrls || []);
 
 function persistTweet(tweet) {
   if (!tweet?.id || !tweet?.url) return;
+
+  // дополнительная защита
+  if (sentTweetIds.has(tweet.id) || sentTweetUrls.has(tweet.url)) {
+    return;
+  }
 
   sentTweetIds.add(tweet.id);
   sentTweetUrls.add(tweet.url);
@@ -148,7 +156,8 @@ async function askChiikawaForXReaction(tweet) {
 
     const data = await res.json();
     return (data.reply || "").trim();
-  } catch {
+  } catch (error) {
+    console.error("askChiikawaForXReaction error:", error.message);
     return "🥺✨";
   }
 }
@@ -186,9 +195,29 @@ async function loop() {
         console.log("Warm start complete");
       } else {
         for (const tweet of filtered) {
-          if (sentTweetIds.has(tweet.id)) continue;
-          await postTweetAlert(tweet);
-          persistTweet(tweet);
+          if (!tweet?.id || !tweet?.url) continue;
+
+          // Главная антидубль-защита
+          if (
+            sentTweetIds.has(tweet.id) ||
+            sentTweetUrls.has(tweet.url) ||
+            inFlightTweets.has(tweet.id)
+          ) {
+            console.log("Duplicate skipped:", tweet.id);
+            continue;
+          }
+
+          inFlightTweets.add(tweet.id);
+
+          try {
+            await postTweetAlert(tweet);
+            persistTweet(tweet);
+            console.log("Posted tweet:", tweet.id);
+          } catch (err) {
+            console.error("Post tweet failed:", err.message);
+          } finally {
+            inFlightTweets.delete(tweet.id);
+          }
         }
       }
     } catch (err) {
