@@ -1,7 +1,7 @@
 {
   "name": "chiikawa-ai",
-  "version": "2.0.0",
-  "description": "Chiikawa AI server + Telegram bot + X watcher + YouTube watcher + Buybot",
+  "version": "2.1.0",
+  "description": "Chiikawa AI server + Telegram bot + X watcher + YouTube watcher + Buybot + admin runtime control",
   "main": "server.js",
   "type": "module",
   "scripts": {
