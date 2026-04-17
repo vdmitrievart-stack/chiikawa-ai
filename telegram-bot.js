@@ -45,6 +45,10 @@ const activeChatUntil = new Map();
 const chatTraffic = new Map();
 const greetedChats = new Set();
 
+// in-memory admin scan sessions
+const pendingAdminActions = new Map(); // key: userId => { type: "scan_ca" }
+const latestScans = new Map(); // key: userId => { dossier, createdAt }
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -124,6 +128,38 @@ function countTraffic(chatId) {
   chatTraffic.set(chatId, filtered);
 
   return filtered.length;
+}
+
+function isProbablySolanaAddress(value) {
+  const a = String(value || "").trim();
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a);
+}
+
+function setPendingAdminAction(userId, action) {
+  pendingAdminActions.set(String(userId), action);
+}
+
+function getPendingAdminAction(userId) {
+  return pendingAdminActions.get(String(userId)) || null;
+}
+
+function clearPendingAdminAction(userId) {
+  pendingAdminActions.delete(String(userId));
+}
+
+function setLatestScan(userId, dossier) {
+  latestScans.set(String(userId), {
+    dossier,
+    createdAt: Date.now()
+  });
+}
+
+function getLatestScan(userId) {
+  return latestScans.get(String(userId)) || null;
+}
+
+function clearLatestScan(userId) {
+  latestScans.delete(String(userId));
 }
 
 async function tg(method, body = {}) {
@@ -291,6 +327,12 @@ function buildAdminKeyboard(config) {
     inline_keyboard: [
       [
         {
+          text: "🔍 Scan CA",
+          callback_data: "scan:start"
+        }
+      ],
+      [
+        {
           text: config.quietMode ? "Quiet: ON" : "Quiet: OFF",
           callback_data: "admin:toggle_quiet"
         },
@@ -356,6 +398,17 @@ function buildProposalKeyboard(proposalId) {
   };
 }
 
+function buildScanResultKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ Create proposal", callback_data: "scan:create_proposal" },
+        { text: "❌ Cancel", callback_data: "scan:cancel" }
+      ]
+    ]
+  };
+}
+
 async function sendMainMenu(chatId, replyToMessageId = null) {
   return sendTelegramMessage(
     chatId,
@@ -414,6 +467,7 @@ function shouldRespond(message) {
   if (text.startsWith("/trading_off")) return true;
   if (text.startsWith("/setbuy")) return true;
   if (text.startsWith("/propose")) return true;
+  if (text.startsWith("/scan_ca")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/website")) return true;
 
@@ -442,7 +496,8 @@ function isTradingCommand(text) {
     "/trading_on",
     "/trading_off",
     "/setbuy",
-    "/propose"
+    "/propose",
+    "/scan_ca"
   ];
 
   return tradingPrefixes.some(cmd => lower.startsWith(cmd));
@@ -478,6 +533,35 @@ function parseProposeCommand(text) {
     tokenName: parts[1],
     ca: parts[2]
   };
+}
+
+async function handleScanByCA(chatId, userId, messageId, tokenNameHint, ca) {
+  await sendTyping(chatId);
+
+  const dossierResult = await buildTokenDossier(ca, tokenNameHint || "");
+
+  if (!dossierResult.ok) {
+    await sendTelegramMessage(
+      chatId,
+      `Failed to build dossier:
+${dossierResult.error}`,
+      messageId
+    );
+    return;
+  }
+
+  const dossier = dossierResult.dossier;
+  setLatestScan(userId, dossier);
+  clearPendingAdminAction(userId);
+
+  await sendTelegramMessage(
+    chatId,
+    `🧾 Scan Result
+
+${formatDossierForAdmin(dossier)}`,
+    messageId,
+    { reply_markup: buildScanResultKeyboard() }
+  );
 }
 
 async function handleProposalApprove(callbackQuery, proposalId) {
@@ -574,6 +658,95 @@ CA: ${proposal.ca}`,
   return true;
 }
 
+async function handleScanCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+  const userId = callbackQuery.from?.id;
+  const userName = getDisplayName(callbackQuery.from);
+
+  if (!chatId) return false;
+  if (!data.startsWith("scan:")) return false;
+
+  if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
+    await answerCallbackQuery(callbackQuery.id, "Private chat only");
+    return true;
+  }
+
+  if (!isAdmin(userId)) {
+    await answerCallbackQuery(callbackQuery.id, "Admins only");
+    return true;
+  }
+
+  if (data === "scan:start") {
+    setPendingAdminAction(userId, { type: "scan_ca" });
+    await answerCallbackQuery(callbackQuery.id, "Waiting for CA");
+    await sendTelegramMessage(
+      chatId,
+      `Send me the Solana CA you want to scan.
+
+Example:
+7xKXtg2CWd3xgRzx...`,
+      messageId
+    );
+    return true;
+  }
+
+  if (data === "scan:cancel") {
+    clearPendingAdminAction(userId);
+    clearLatestScan(userId);
+    await answerCallbackQuery(callbackQuery.id, "Cancelled");
+    await sendTelegramMessage(
+      chatId,
+      "Scan cancelled.",
+      messageId
+    );
+    return true;
+  }
+
+  if (data === "scan:create_proposal") {
+    const latest = getLatestScan(userId);
+
+    if (!latest?.dossier) {
+      await answerCallbackQuery(callbackQuery.id, "No scan data");
+      await sendTelegramMessage(
+        chatId,
+        "No scan data found. Please scan a CA first.",
+        messageId
+      );
+      return true;
+    }
+
+    const dossier = latest.dossier;
+
+    const proposal = createProposal({
+      token: dossier.token,
+      ca: dossier.ca,
+      reason: `Scanned via admin panel. Confidence ${dossier.confidence}/95, liquidity ${Math.round(dossier.liquidityUsd).toLocaleString("en-US")} USD, volume ${Math.round(dossier.volumeH24).toLocaleString("en-US")} USD.`,
+      score: dossier.confidence,
+      dossier,
+      createdBy: userName
+    });
+
+    await answerCallbackQuery(callbackQuery.id, "Proposal created");
+    await sendTelegramMessage(
+      chatId,
+      `🚀 Trade Proposal
+
+${formatDossierForAdmin(dossier)}
+
+Proposal ID:
+${proposal.id}`,
+      messageId,
+      { reply_markup: buildProposalKeyboard(proposal.id) }
+    );
+
+    return true;
+  }
+
+  return false;
+}
+
 async function handleAdminAndTradingCallback(callbackQuery) {
   const data = callbackQuery.data || "";
   const chatId = callbackQuery.message?.chat?.id;
@@ -581,6 +754,9 @@ async function handleAdminAndTradingCallback(callbackQuery) {
   const userId = callbackQuery.from?.id;
 
   if (!chatId) return false;
+
+  const handledScan = await handleScanCallback(callbackQuery);
+  if (handledScan) return true;
 
   if (data.startsWith("proposal:")) {
     if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
@@ -694,6 +870,41 @@ async function handleAdminAndTradingCallback(callbackQuery) {
   }
 }
 
+async function handlePendingAdminInput(message) {
+  const userId = String(message.from?.id || "");
+  const pending = getPendingAdminAction(userId);
+
+  if (!pending) return false;
+  if (!isPrivateChat(message)) return false;
+  if (!isAdmin(userId)) return false;
+
+  const text = normalizeText(message.text);
+
+  if (pending.type === "scan_ca") {
+    if (!isProbablySolanaAddress(text)) {
+      await sendTelegramMessage(
+        message.chat.id,
+        `That doesn't look like a Solana CA.
+
+Please send a valid Solana mint address.`,
+        message.message_id
+      );
+      return true;
+    }
+
+    await handleScanByCA(
+      message.chat.id,
+      userId,
+      message.message_id,
+      "",
+      text
+    );
+    return true;
+  }
+
+  return false;
+}
+
 async function handleCommand(message) {
   const text = normalizeText(message.text);
   const chatId = message.chat.id;
@@ -702,7 +913,7 @@ async function handleCommand(message) {
   const userName = getDisplayName(message.from);
   const username = message.from?.username || "";
 
-  if (isTradingCommand(text) && !text.startsWith("/propose")) {
+  if (isTradingCommand(text) && !text.startsWith("/propose") && !text.startsWith("/scan_ca")) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
@@ -728,6 +939,31 @@ async function handleCommand(message) {
     return true;
   }
 
+  if (text.startsWith("/scan_ca")) {
+    if (!isPrivateChat(message)) {
+      await sendTelegramMessage(
+        chatId,
+        "CA scan is available only in private chat with the bot.",
+        messageId
+      );
+      return true;
+    }
+
+    if (!isAdmin(userId)) {
+      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      return true;
+    }
+
+    setPendingAdminAction(userId, { type: "scan_ca" });
+
+    await sendTelegramMessage(
+      chatId,
+      `Send me the Solana CA you want to scan.`,
+      messageId
+    );
+    return true;
+  }
+
   if (text.startsWith("/propose")) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
@@ -749,43 +985,7 @@ async function handleCommand(message) {
       return true;
     }
 
-    await sendTyping(chatId);
-
-    const dossierResult = await buildTokenDossier(parsed.ca, parsed.tokenName);
-
-    if (!dossierResult.ok) {
-      await sendTelegramMessage(
-        chatId,
-        `Failed to build dossier:
-${dossierResult.error}`,
-        messageId
-      );
-      return true;
-    }
-
-    const dossier = dossierResult.dossier;
-
-    const proposal = createProposal({
-      token: dossier.token,
-      ca: dossier.ca,
-      reason: `Manual admin signal. Confidence ${dossier.confidence}/95, liquidity ${Math.round(dossier.liquidityUsd).toLocaleString("en-US")} USD, volume ${Math.round(dossier.volumeH24).toLocaleString("en-US")} USD.`,
-      score: dossier.confidence,
-      dossier,
-      createdBy: userName
-    });
-
-    await sendTelegramMessage(
-      chatId,
-      `🚀 Trade Proposal
-
-${formatDossierForAdmin(dossier)}
-
-Proposal ID:
-${proposal.id}`,
-      messageId,
-      { reply_markup: buildProposalKeyboard(proposal.id) }
-    );
-
+    await handleScanByCA(chatId, userId, messageId, parsed.tokenName, parsed.ca);
     return true;
   }
 
@@ -819,6 +1019,7 @@ ${proposal.id}`,
 /admin
 /status
 /trade_status
+/scan_ca
 /propose <token_name> <solana_ca>
 /ca
 /website`,
@@ -1014,6 +1215,9 @@ async function handleMessage(message) {
   if (!message || message.text == null) return;
 
   try {
+    const pendingHandled = await handlePendingAdminInput(message);
+    if (pendingHandled) return;
+
     const tradingRejectedInGroup = await maybeRejectTradingCommandInGroup(message);
     if (tradingRejectedInGroup) return;
 
@@ -1063,7 +1267,8 @@ async function setTelegramCommands() {
     { command: "admin", description: "Open admin panel (private only)" },
     { command: "status", description: "Show runtime status" },
     { command: "trade_status", description: "Trading status (private only)" },
-    { command: "propose", description: "Create trade proposal (private only)" },
+    { command: "scan_ca", description: "Scan Solana CA (private only)" },
+    { command: "propose", description: "Create proposal from token + CA" },
     { command: "ca", description: "Show contract" },
     { command: "website", description: "Show website" }
   ];
