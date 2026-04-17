@@ -21,7 +21,9 @@ const BLOCKED_KEYWORDS = [
   "election",
   "president",
   "war",
-  "government"
+  "government",
+  "campaign",
+  "vote"
 ];
 
 function normalizeText(text) {
@@ -34,7 +36,7 @@ function lowerText(text) {
   return normalizeText(text).toLowerCase();
 }
 
-function isBlocked(text) {
+function hasBlockedContent(text) {
   const lower = lowerText(text);
   return BLOCKED_KEYWORDS.some(word => lower.includes(word));
 }
@@ -44,17 +46,25 @@ function looksLowSignal(tweet) {
 
   if (!tweet.username) return true;
   if (tweet.followers < MIN_FOLLOWERS) return true;
-  if (text.length < 20) return true;
-  if (isBlocked(text)) return true;
+  if (text.length < 12) return true;
+  if (hasBlockedContent(text)) return true;
 
   return false;
+}
+
+function canonicalTweetUrl(username, tweetId) {
+  if (!tweetId) return null;
+  if (username) {
+    return `https://twitter.com/${username}/status/${tweetId}`;
+  }
+  return `https://twitter.com/i/web/status/${tweetId}`;
 }
 
 export async function fetchTweets() {
   const url =
     `https://api.twitter.com/2/tweets/search/recent?query=${encodeURIComponent(SEARCH_QUERY)}` +
     `&max_results=${MAX_RESULTS}` +
-    `&tweet.fields=created_at,author_id,text,public_metrics,lang` +
+    `&tweet.fields=created_at,author_id,text,public_metrics,lang,conversation_id` +
     `&expansions=author_id` +
     `&user.fields=username,name,public_metrics,verified`;
 
@@ -76,29 +86,36 @@ export async function fetchTweets() {
     usersById[user.id] = user;
   }
 
-  return (data.data || []).map(tweet => {
+  const tweets = (data.data || []).map(tweet => {
     const author = usersById[tweet.author_id] || {};
+    const username = author.username || null;
+    const tweetId = tweet.id;
 
     return {
-      id: tweet.id,
+      id: tweetId,
       text: normalizeText(tweet.text || ""),
       created_at: tweet.created_at || "",
       lang: tweet.lang || "",
-      username: author.username || null,
+      username,
       author_name: author.name || null,
       followers: author.public_metrics?.followers_count || 0,
       verified: Boolean(author.verified),
-      url: author.username
-        ? `https://twitter.com/${author.username}/status/${tweet.id}`
-        : `https://twitter.com/i/web/status/${tweet.id}`,
+      url: canonicalTweetUrl(username, tweetId),
       like_count: tweet.public_metrics?.like_count || 0,
       retweet_count: tweet.public_metrics?.retweet_count || 0,
-      reply_count: tweet.public_metrics?.reply_count || 0
+      reply_count: tweet.public_metrics?.reply_count || 0,
+      conversation_id: tweet.conversation_id || null
     };
   });
+
+  return tweets;
 }
 
-export function filterTweets(tweets, alreadySentIds = new Set(), alreadySentUrls = new Set()) {
+export function filterTweets(
+  tweets,
+  alreadySentIds = new Set(),
+  alreadySentUrls = new Set()
+) {
   const unique = new Map();
 
   for (const tweet of tweets) {
@@ -127,13 +144,16 @@ export function formatAlert(tweet) {
   const engagementLine =
     `❤️ ${tweet.like_count}   🔁 ${tweet.retweet_count}   💬 ${tweet.reply_count}`;
 
+  const safeText =
+    tweet.text.length > 500 ? `${tweet.text.slice(0, 500)}…` : tweet.text;
+
   return `🔥 Chiikawa spotted on X!
 
 👤 @${tweet.username}
 ${statsLine}
 ${engagementLine}
 
-📝 ${tweet.text.slice(0, 500)}
+📝 ${safeText}
 
 🔗 ${tweet.url}
 
