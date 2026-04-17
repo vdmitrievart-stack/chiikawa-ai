@@ -22,6 +22,7 @@ const DEFAULT_RUNTIME = {
   trackedWallets: [],
   walletScores: {},
   autoCopyEnabled: false,
+  level5DryRun: true,
   events: [],
   updatedAt: new Date().toISOString()
 };
@@ -70,7 +71,7 @@ function pushEvent(type, payload = {}) {
     at: new Date().toISOString()
   });
 
-  tradingRuntime.events = tradingRuntime.events.slice(0, 200);
+  tradingRuntime.events = tradingRuntime.events.slice(0, 300);
   persistRuntime();
 }
 
@@ -259,6 +260,7 @@ mode: ${runtime.mode}
 killSwitch: ${runtime.killSwitch}
 buybotAlertMinUsd: ${runtime.buybotAlertMinUsd}
 autoCopyEnabled: ${runtime.autoCopyEnabled}
+level5DryRun: ${runtime.level5DryRun}
 trackedWallets: ${runtime.trackedWallets.length}
 
 Tracked wallets:
@@ -538,13 +540,17 @@ ${text}`
 
 async function handleLevel5Command(command, args, context = {}) {
   const autoCopyTrader = context.autoCopyTrader || null;
+  const executionEngine = autoCopyTrader?.executionEngine || null;
 
   if (!autoCopyTrader) {
     if (
       command === "/autocopy_on" ||
       command === "/autocopy_off" ||
       command === "/autocopy_status" ||
-      command === "/execute_copy_now"
+      command === "/execute_copy_now" ||
+      command === "/level5_health" ||
+      command === "/level5_dryrun_on" ||
+      command === "/level5_dryrun_off"
     ) {
       return {
         ok: false,
@@ -555,6 +561,10 @@ async function handleLevel5Command(command, args, context = {}) {
   }
 
   if (command === "/autocopy_on") {
+    if (tradingRuntime.killSwitch) {
+      return { ok: false, error: "Cannot enable AutoCopy while kill switch is ON." };
+    }
+
     const started = await autoCopyTrader.start();
     patchRuntime({ autoCopyEnabled: true }, "autocopy_enabled");
     return {
@@ -577,16 +587,75 @@ autoCopyEnabled: false`
   }
 
   if (command === "/autocopy_status") {
+    const health = autoCopyTrader.getHealth();
+
     return {
       ok: true,
       message: `🤖 AutoCopy Status
 
 running: ${autoCopyTrader.isRunning()}
-runtimeFlag: ${tradingRuntime.autoCopyEnabled}`
+runtimeFlag: ${tradingRuntime.autoCopyEnabled}
+dryRun: ${health.dryRun}
+watchedLeaders: ${health.watchedLeaders}
+signalsSeen: ${health.stats?.signalsSeen || 0}
+signalsParsed: ${health.stats?.signalsParsed || 0}
+copyRuns: ${health.stats?.copyRuns || 0}
+executionAttempts: ${health.stats?.executionAttempts || 0}
+executionSuccess: ${health.stats?.executionSuccess || 0}
+executionFail: ${health.stats?.executionFail || 0}`
+    };
+  }
+
+  if (command === "/level5_health") {
+    const autoHealth = autoCopyTrader.getHealth();
+    const execHealth = executionEngine?.getHealth?.() || { ok: false };
+
+    return {
+      ok: true,
+      message: `🩺 Level5 Health
+
+autoCopyRunning: ${autoHealth.running}
+watchedLeaders: ${autoHealth.watchedLeaders}
+dryRun: ${execHealth.dryRun}
+wallet: ${execHealth.wallet || "n/a"}
+rpcUrl: ${autoHealth.rpcUrl || "n/a"}
+executionOk: ${execHealth.ok}`
+    };
+  }
+
+  if (command === "/level5_dryrun_on") {
+    if (!executionEngine) {
+      return { ok: false, error: "Execution engine not available." };
+    }
+
+    executionEngine.isDryRun = true;
+    patchRuntime({ level5DryRun: true }, "level5_dryrun_on");
+
+    return {
+      ok: true,
+      message: "Level5 dry-run is now ON"
+    };
+  }
+
+  if (command === "/level5_dryrun_off") {
+    if (!executionEngine) {
+      return { ok: false, error: "Execution engine not available." };
+    }
+
+    executionEngine.isDryRun = false;
+    patchRuntime({ level5DryRun: false }, "level5_dryrun_off");
+
+    return {
+      ok: true,
+      message: "Level5 dry-run is now OFF"
     };
   }
 
   if (command === "/execute_copy_now") {
+    if (tradingRuntime.killSwitch) {
+      return { ok: false, error: "Kill switch is ON." };
+    }
+
     if (args.length < 5) {
       return {
         ok: false,
@@ -633,6 +702,7 @@ error: ${x.error || "none"}`;
       message: `⚡ Execute Copy Now
 
 leaderId: ${leaderId}
+dryRun: ${result.dryRun}
 
 ${lines.join("\n\n") || "No executions"}`
     };
