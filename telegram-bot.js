@@ -1,4 +1,6 @@
 import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
 import {
   getTradingRuntime,
   buildTradingAdminKeyboard,
@@ -49,362 +51,315 @@ const greetedChats = new Set();
 const pendingAdminActions = new Map(); // userId -> { type: "scan_ca" }
 const latestScans = new Map(); // userId -> { dossier, createdAt }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+// language settings
+const LANG_FILE = path.resolve("./bot-language-settings.json");
+const DEFAULT_LANG = "en";
 
-function isAdmin(userId) {
-  return ADMIN_IDS.includes(Number(userId));
-}
+const SUPPORTED_LANGUAGES = [
+  { code: "en", label: "English" },
+  { code: "ru", label: "Русский" },
+  { code: "es", label: "Español" },
+  { code: "pt", label: "Português" },
+  { code: "de", label: "Deutsch" },
+  { code: "fr", label: "Français" },
+  { code: "it", label: "Italiano" },
+  { code: "tr", label: "Türkçe" },
+  { code: "ar", label: "العربية" },
+  { code: "ja", label: "日本語" },
+  { code: "zh", label: "中文" }
+];
 
-function normalizeText(text) {
-  return String(text || "").trim();
-}
-
-function cleanLower(text) {
-  return normalizeText(text).toLowerCase();
-}
-
-function getDisplayName(user) {
-  if (!user) return "friend";
-  return user.first_name || user.username || "friend";
-}
-
-function isPrivateChat(message) {
-  return message.chat?.type === "private";
-}
-
-function isGroupChat(message) {
-  const type = message.chat?.type;
-  return type === "group" || type === "supergroup";
-}
-
-function mentionsBotUsername(text) {
-  if (!botUsername) return false;
-  return cleanLower(text).includes(`@${botUsername.toLowerCase()}`);
-}
-
-function isReplyToBot(message) {
-  return message?.reply_to_message?.from?.id === botId;
-}
-
-function getNameTriggers() {
-  const triggers = [
-    "chiikawa",
-    "chiikawa ai",
-    "chiikawa bot",
-    "чикикава",
-    "чики"
-  ];
-
-  if (botUsername) {
-    triggers.push(botUsername.toLowerCase());
-    triggers.push(botUsername.toLowerCase().replace(/^@/, ""));
-  }
-
-  return [...new Set(triggers)];
-}
-
-function mentionsBotByName(text) {
-  const lower = cleanLower(text);
-  return getNameTriggers().some(name => lower.includes(name));
-}
-
-function markChatActive(chatId) {
-  activeChatUntil.set(chatId, Date.now() + ACTIVE_CONVERSATION_MS);
-}
-
-function isChatActive(chatId) {
-  const until = activeChatUntil.get(chatId) || 0;
-  return Date.now() < until;
-}
-
-function countTraffic(chatId) {
-  const now = Date.now();
-  const bucket = chatTraffic.get(chatId) || [];
-  bucket.push(now);
-
-  const filtered = bucket.filter(ts => now - ts < 60 * 1000);
-  chatTraffic.set(chatId, filtered);
-
-  return filtered.length;
-}
-
-function isProbablySolanaAddress(value) {
-  const a = String(value || "").trim();
-  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a);
-}
-
-function setPendingAdminAction(userId, action) {
-  pendingAdminActions.set(String(userId), action);
-}
-
-function getPendingAdminAction(userId) {
-  return pendingAdminActions.get(String(userId)) || null;
-}
-
-function clearPendingAdminAction(userId) {
-  pendingAdminActions.delete(String(userId));
-}
-
-function setLatestScan(userId, dossier) {
-  latestScans.set(String(userId), {
-    dossier,
-    createdAt: Date.now()
-  });
-}
-
-function getLatestScan(userId) {
-  return latestScans.get(String(userId)) || null;
-}
-
-function clearLatestScan(userId) {
-  latestScans.delete(String(userId));
-}
-
-async function tg(method, body = {}) {
-  const res = await fetch(`${TG_API}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-
-  const data = await res.json();
-
-  if (!res.ok || !data.ok) {
-    const err = new Error(`Telegram API error in ${method}: ${JSON.stringify(data)}`);
-    err.telegram = data;
-    throw err;
-  }
-
-  return data.result;
-}
-
-async function sendTelegramMessage(chatId, text, replyToMessageId = null, extra = {}) {
-  const payload = {
-    chat_id: chatId,
-    text,
-    allow_sending_without_reply: true,
-    ...extra
-  };
-
-  if (replyToMessageId) {
-    payload.reply_parameters = {
-      message_id: replyToMessageId
-    };
-  }
-
-  return tg("sendMessage", payload);
-}
-
-async function sendTyping(chatId) {
-  return tg("sendChatAction", {
-    chat_id: chatId,
-    action: "typing"
-  });
-}
-
-async function answerCallbackQuery(callbackQueryId, text = "") {
-  return tg("answerCallbackQuery", {
-    callback_query_id: callbackQueryId,
-    text
-  });
-}
-
-async function getRuntimeConfig() {
+function loadLangState() {
   try {
-    const res = await fetch(
-      `${AI_SERVER_BASE_URL}/runtime/config?secret=${encodeURIComponent(ADMIN_SECRET)}`
-    );
-    const data = await res.json();
-    if (data?.ok) return data.config;
+    if (!fs.existsSync(LANG_FILE)) {
+      return { users: {} };
+    }
+    const raw = fs.readFileSync(LANG_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      users: parsed && typeof parsed.users === "object" && parsed.users ? parsed.users : {}
+    };
   } catch (error) {
-    console.error("getRuntimeConfig error:", error.message);
+    console.error("language settings load error:", error.message);
+    return { users: {} };
   }
-
-  return {
-    quietMode: false,
-    xWatcherEnabled: true,
-    youtubeWatcherEnabled: true,
-    buybotEnabled: true,
-    buybotAlertMinUsd: 20,
-    autoSelfTuning: true
-  };
 }
 
-async function askChiikawa({
-  message,
-  userId = "anonymous",
-  userName = "",
-  username = "",
-  chatId = "",
-  chatType = "",
-  source = "telegram"
-}) {
-  const res = await fetch(CHIIKAWA_AI_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      message,
-      userId,
-      userName,
-      username,
-      chatId,
-      chatType,
-      source
-    })
-  });
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(`Chiikawa backend error: ${JSON.stringify(data)}`);
+function saveLangState() {
+  try {
+    fs.writeFileSync(LANG_FILE, JSON.stringify(langState, null, 2), "utf8");
+  } catch (error) {
+    console.error("language settings save error:", error.message);
   }
-
-  return data.reply || "Chiikawa got quiet... 🥺";
 }
 
-function isCARequest(text) {
-  const lower = cleanLower(text);
-  return (
-    lower === "ca" ||
-    lower === "ca?" ||
-    lower.includes("contract") ||
-    lower.includes("контракт")
+const langState = loadLangState();
+
+function setUserLanguage(userId, langCode) {
+  langState.users[String(userId)] = langCode;
+  saveLangState();
+}
+
+function getUserLanguage(userId) {
+  return langState.users[String(userId)] || DEFAULT_LANG;
+}
+
+const I18N = {
+  en: {
+    commands_help: `Commands:
+/start
+/help
+/menu
+/admin
+/tradepanel
+/status
+/trade_status
+/scan_ca
+/propose <token_name> <solana_ca>
+/language
+/ca
+/website`,
+    menu_title: `✨ Chiikawa Menu ✨
+
+Choose what you want to explore:
+
+• CA
+• Website
+• Status`,
+    admin_panel_title: (cfg, trading) => `🛠 Admin Panel
+
+quietMode: ${cfg.quietMode}
+autoSelfTuning: ${cfg.autoSelfTuning}
+xWatcherEnabled: ${cfg.xWatcherEnabled}
+youtubeWatcherEnabled: ${cfg.youtubeWatcherEnabled}
+buybotEnabled: ${cfg.buybotEnabled}
+buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}
+
+tradingEnabled: ${trading.enabled}
+tradeMode: ${trading.mode}
+killSwitch: ${trading.killSwitch}`,
+    trading_panel_title: trading => `🎛 Trading Panel
+
+enabled: ${trading.enabled}
+mode: ${trading.mode}
+killSwitch: ${trading.killSwitch}
+buybotAlertMinUsd: ${trading.buybotAlertMinUsd}
+trackedWallets: ${Array.isArray(trading.trackedWallets) ? trading.trackedWallets.length : 0}`,
+    private_only_trading: "Trading tools are available only in private chat with the bot.",
+    private_only_admin: "Admin panel is available only in private chat with the bot.",
+    private_only_tradepanel: "Trading panel is available only in private chat with the bot.",
+    private_only_scan: "CA scan is available only in private chat with the bot.",
+    private_only_proposals: "Trading proposals are available only in private chat with the bot.",
+    private_only_trade_status: "Trading status is available only in private chat with the bot.",
+    admins_only: "Admins only 🥺",
+    waiting_for_ca: `Send me the Solana CA you want to scan.
+
+Example:
+7xKXtg2CWd3xgRzx...`,
+    invalid_ca: `That doesn't look like a Solana CA.
+
+Please send a valid Solana mint address.`,
+    scan_failed: error => `Failed to build dossier:
+${error}`,
+    scan_result_title: dossier => `🧾 Scan Result
+
+${formatDossierForAdmin(dossier)}`,
+    scan_cancelled: "Scan cancelled.",
+    no_scan_data: "No scan data found. Please scan a CA first.",
+    proposal_created: (dossier, proposal) => `🚀 Trade Proposal
+
+${formatDossierForAdmin(dossier)}
+
+Proposal ID:
+${proposal.id}`,
+    proposal_approved: (proposal, execution) => `✅ Proposal approved
+
+Token: ${proposal.token}
+CA: ${proposal.ca}
+TX: ${execution.tx}
+
+Public buy post sent to the group.`,
+    proposal_rejected: proposal => `❌ Proposal rejected
+
+Token: ${proposal.token}
+CA: ${proposal.ca}`,
+    proposal_not_found: "Proposal not found",
+    proposal_already_processed: "Already processed",
+    execution_failed: id => `Execution failed for proposal ${id}`,
+    runtime_status: (cfg, trading) => `📊 Runtime status
+
+quietMode: ${cfg.quietMode}
+autoSelfTuning: ${cfg.autoSelfTuning}
+xWatcherEnabled: ${cfg.xWatcherEnabled}
+youtubeWatcherEnabled: ${cfg.youtubeWatcherEnabled}
+buybotEnabled: ${cfg.buybotEnabled}
+buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}
+
+tradingEnabled: ${trading.enabled}
+tradeMode: ${trading.mode}
+killSwitch: ${trading.killSwitch}`,
+    stumble: "Chiikawa stumbled a little... 🥺 Please try again.",
+    language_prompt: "🌐 Choose your language:",
+    language_set: label => `Language set to: ${label}`,
+    close_panel: "Closed",
+    trading_panel_closed: "Trading panel closed."
+  },
+  ru: {
+    commands_help: `Команды:
+/start
+/help
+/menu
+/admin
+/tradepanel
+/status
+/trade_status
+/scan_ca
+/propose <имя_токена> <solana_ca>
+/language
+/ca
+/website`,
+    menu_title: `✨ Меню Chiikawa ✨
+
+Выбери, что открыть:
+
+• CA
+• Сайт
+• Статус`,
+    admin_panel_title: (cfg, trading) => `🛠 Админ-панель
+
+quietMode: ${cfg.quietMode}
+autoSelfTuning: ${cfg.autoSelfTuning}
+xWatcherEnabled: ${cfg.xWatcherEnabled}
+youtubeWatcherEnabled: ${cfg.youtubeWatcherEnabled}
+buybotEnabled: ${cfg.buybotEnabled}
+buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}
+
+tradingEnabled: ${trading.enabled}
+tradeMode: ${trading.mode}
+killSwitch: ${trading.killSwitch}`,
+    trading_panel_title: trading => `🎛 Торговая панель
+
+enabled: ${trading.enabled}
+mode: ${trading.mode}
+killSwitch: ${trading.killSwitch}
+buybotAlertMinUsd: ${trading.buybotAlertMinUsd}
+trackedWallets: ${Array.isArray(trading.trackedWallets) ? trading.trackedWallets.length : 0}`,
+    private_only_trading: "Торговые инструменты доступны только в личном чате с ботом.",
+    private_only_admin: "Админ-панель доступна только в личном чате с ботом.",
+    private_only_tradepanel: "Торговая панель доступна только в личном чате с ботом.",
+    private_only_scan: "Сканирование CA доступно только в личном чате с ботом.",
+    private_only_proposals: "Торговые предложения доступны только в личном чате с ботом.",
+    private_only_trade_status: "Статус торговли доступен только в личном чате с ботом.",
+    admins_only: "Только для админов 🥺",
+    waiting_for_ca: `Отправь мне Solana CA, который хочешь просканировать.
+
+Пример:
+7xKXtg2CWd3xgRzx...`,
+    invalid_ca: `Это не похоже на Solana CA.
+
+Пожалуйста, отправь корректный mint address Solana.`,
+    scan_failed: error => `Не удалось собрать dossier:
+${error}`,
+    scan_result_title: dossier => `🧾 Результат сканирования
+
+${formatDossierForAdmin(dossier)}`,
+    scan_cancelled: "Сканирование отменено.",
+    no_scan_data: "Нет данных сканирования. Сначала просканируй CA.",
+    proposal_created: (dossier, proposal) => `🚀 Торговое предложение
+
+${formatDossierForAdmin(dossier)}
+
+ID предложения:
+${proposal.id}`,
+    proposal_approved: (proposal, execution) => `✅ Предложение одобрено
+
+Токен: ${proposal.token}
+CA: ${proposal.ca}
+TX: ${execution.tx}
+
+Публичный buy-post отправлен в группу.`,
+    proposal_rejected: proposal => `❌ Предложение отклонено
+
+Токен: ${proposal.token}
+CA: ${proposal.ca}`,
+    proposal_not_found: "Предложение не найдено",
+    proposal_already_processed: "Уже обработано",
+    execution_failed: id => `Исполнение не удалось для предложения ${id}`,
+    runtime_status: (cfg, trading) => `📊 Статус runtime
+
+quietMode: ${cfg.quietMode}
+autoSelfTuning: ${cfg.autoSelfTuning}
+xWatcherEnabled: ${cfg.xWatcherEnabled}
+youtubeWatcherEnabled: ${cfg.youtubeWatcherEnabled}
+buybotEnabled: ${cfg.buybotEnabled}
+buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}
+
+tradingEnabled: ${trading.enabled}
+tradeMode: ${trading.mode}
+killSwitch: ${trading.killSwitch}`,
+    stumble: "Chiikawa немного споткнулся... 🥺 Попробуй ещё раз.",
+    language_prompt: "🌐 Выбери язык:",
+    language_set: label => `Язык установлен: ${label}`,
+    close_panel: "Закрыто",
+    trading_panel_closed: "Торговая панель закрыта."
+  }
+};
+
+function t(userId, key, ...args) {
+  const lang = getUserLanguage(userId);
+  const dict = I18N[lang] || I18N.en;
+  const fallback = I18N.en[key];
+  const value = dict[key] ?? fallback;
+  if (typeof value === "function") return value(...args);
+  return value;
+}
+
+function getLanguageLabel(code) {
+  return SUPPORTED_LANGUAGES.find(x => x.code === code)?.label || code;
+}
+
+function buildLanguageKeyboard() {
+  const rows = [];
+  for (let i = 0; i < SUPPORTED_LANGUAGES.length; i += 2) {
+    const slice = SUPPORTED_LANGUAGES.slice(i, i + 2).map(lang => ({
+      text: lang.label,
+      callback_data: `lang:set:${lang.code}`
+    }));
+    rows.push(slice);
+  }
+  return { inline_keyboard: rows };
+}
+
+async function sendMainMenu(chatId, replyToMessageId = null, userId = null) {
+  return sendTelegramMessage(
+    chatId,
+    t(userId, "menu_title"),
+    replyToMessageId,
+    { reply_markup: buildMainMenuKeyboard() }
   );
 }
 
-function isWebsiteRequest(text) {
-  const lower = cleanLower(text);
-  return (
-    lower === "website" ||
-    lower.includes("site") ||
-    lower.includes("сайт") ||
-    lower.includes("ссылка")
+async function sendAdminPanel(chatId, replyToMessageId = null, userId = null) {
+  const config = await getRuntimeConfig();
+  const trading = getTradingRuntime();
+
+  return sendTelegramMessage(
+    chatId,
+    t(userId, "admin_panel_title", cfg = config, trading),
+    replyToMessageId,
+    { reply_markup: buildAdminKeyboard(config) }
   );
 }
 
-function buildCAKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        {
-          text: "Copy CA",
-          copy_text: { text: TOKEN_CA }
-        }
-      ],
-      [
-        {
-          text: "Website",
-          url: WEBSITE_URL
-        }
-      ]
-    ]
-  };
-}
-
-function buildMainMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "CA", callback_data: "menu:ca" },
-        { text: "Website", callback_data: "menu:website" }
-      ],
-      [
-        { text: "Status", callback_data: "menu:status" },
-        { text: "Admin", callback_data: "menu:admin" }
-      ]
-    ]
-  };
-}
-
-function buildTradingPanelKeyboard() {
+async function sendTradingPanel(chatId, replyToMessageId = null, userId = null) {
   const trading = getTradingRuntime();
 
-  return {
-    inline_keyboard: [
-      [
-        { text: "🔍 Scan CA", callback_data: "scan:start" }
-      ],
-      [
-        { text: "📊 Trade Status", callback_data: "trade:show_status" },
-        { text: "👛 Wallets", callback_data: "trade:show_wallets" }
-      ],
-      [
-        {
-          text: trading.enabled ? "⚙️ Trading ON" : "⚙️ Trading OFF",
-          callback_data: "trade:toggle_enabled"
-        },
-        {
-          text: trading.killSwitch ? "🛑 Kill ON" : "🛑 Kill OFF",
-          callback_data: "trade:toggle_kill"
-        }
-      ],
-      [
-        {
-          text: `🔁 Mode: ${trading.mode}`,
-          callback_data: "trade:cycle_mode"
-        },
-        {
-          text: `💰 Buy Min: $${trading.buybotAlertMinUsd}`,
-          callback_data: "trade:buymin_up"
-        }
-      ],
-      [
-        { text: "❎ Close", callback_data: "tradepanel:close" }
-      ]
-    ]
-  };
-}
-
-function buildAdminKeyboard(config) {
-  const trading = getTradingRuntime();
-
-  return {
-    inline_keyboard: [
-      [
-        { text: "🎛 Trading Panel", callback_data: "tradepanel:open" }
-      ],
-      [
-        {
-          text: config.quietMode ? "Quiet: ON" : "Quiet: OFF",
-          callback_data: "admin:toggle_quiet"
-        },
-        {
-          text: config.autoSelfTuning ? "Self-tuning: ON" : "Self-tuning: OFF",
-          callback_data: "admin:toggle_self_tuning"
-        }
-      ],
-      [
-        {
-          text: config.xWatcherEnabled ? "X watcher: ON" : "X watcher: OFF",
-          callback_data: "admin:toggle_x"
-        },
-        {
-          text: config.youtubeWatcherEnabled ? "YT watcher: ON" : "YT watcher: OFF",
-          callback_data: "admin:toggle_youtube"
-        }
-      ],
-      [
-        {
-          text: config.buybotEnabled ? "Buybot: ON" : "Buybot: OFF",
-          callback_data: "admin:toggle_buybot"
-        }
-      ],
-      [
-        {
-          text: trading.enabled ? "Trading: ON" : "Trading: OFF",
-          callback_data: "trade:toggle_enabled"
-        },
-        {
-          text: trading.killSwitch ? "Kill switch: ON" : "Kill switch: OFF",
-          callback_data: "trade:toggle_kill"
-        }
-      ]
-    ]
-  };
+  return sendTelegramMessage(
+    chatId,
+    t(userId, "trading_panel_title", trading),
+    replyToMessageId,
+    { reply_markup: buildTradingPanelKeyboard() }
+  );
 }
 
 function buildProposalKeyboard(proposalId) {
@@ -429,61 +384,6 @@ function buildScanResultKeyboard() {
   };
 }
 
-async function sendMainMenu(chatId, replyToMessageId = null) {
-  return sendTelegramMessage(
-    chatId,
-    `✨ Chiikawa Menu ✨
-
-Choose what you want to explore:
-
-• CA
-• Website
-• Status`,
-    replyToMessageId,
-    { reply_markup: buildMainMenuKeyboard() }
-  );
-}
-
-async function sendAdminPanel(chatId, replyToMessageId = null) {
-  const config = await getRuntimeConfig();
-  const trading = getTradingRuntime();
-
-  return sendTelegramMessage(
-    chatId,
-    `🛠 Admin Panel
-
-quietMode: ${config.quietMode}
-autoSelfTuning: ${config.autoSelfTuning}
-xWatcherEnabled: ${config.xWatcherEnabled}
-youtubeWatcherEnabled: ${config.youtubeWatcherEnabled}
-buybotEnabled: ${config.buybotEnabled}
-buybotAlertMinUsd: ${config.buybotAlertMinUsd}
-
-tradingEnabled: ${trading.enabled}
-tradeMode: ${trading.mode}
-killSwitch: ${trading.killSwitch}`,
-    replyToMessageId,
-    { reply_markup: buildAdminKeyboard(config) }
-  );
-}
-
-async function sendTradingPanel(chatId, replyToMessageId = null) {
-  const trading = getTradingRuntime();
-
-  return sendTelegramMessage(
-    chatId,
-    `🎛 Trading Panel
-
-enabled: ${trading.enabled}
-mode: ${trading.mode}
-killSwitch: ${trading.killSwitch}
-buybotAlertMinUsd: ${trading.buybotAlertMinUsd}
-trackedWallets: ${Array.isArray(trading.trackedWallets) ? trading.trackedWallets.length : 0}`,
-    replyToMessageId,
-    { reply_markup: buildTradingPanelKeyboard() }
-  );
-}
-
 function shouldRespond(message) {
   const text = normalizeText(message.text);
   if (!text) return false;
@@ -506,6 +406,7 @@ function shouldRespond(message) {
   if (text.startsWith("/setbuy")) return true;
   if (text.startsWith("/propose")) return true;
   if (text.startsWith("/scan_ca")) return true;
+  if (text.startsWith("/language")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/website")) return true;
 
@@ -551,7 +452,7 @@ async function maybeRejectTradingCommandInGroup(message) {
 
   await sendTelegramMessage(
     message.chat.id,
-    "Trading tools are available only in private chat with the bot.",
+    t(message.from?.id, "private_only_trading"),
     message.message_id
   );
   return true;
@@ -582,8 +483,7 @@ async function handleScanByCA(chatId, userId, messageId, tokenNameHint, ca) {
   if (!dossierResult.ok) {
     await sendTelegramMessage(
       chatId,
-      `Failed to build dossier:
-${dossierResult.error}`,
+      t(userId, "scan_failed", dossierResult.error),
       messageId
     );
     return;
@@ -595,9 +495,7 @@ ${dossierResult.error}`,
 
   await sendTelegramMessage(
     chatId,
-    `🧾 Scan Result
-
-${formatDossierForAdmin(dossier)}`,
+    t(userId, "scan_result_title", dossier),
     messageId,
     { reply_markup: buildScanResultKeyboard() }
   );
@@ -605,14 +503,15 @@ ${formatDossierForAdmin(dossier)}`,
 
 async function handleProposalApprove(callbackQuery, proposalId) {
   const proposal = getProposal(proposalId);
+  const userId = callbackQuery.from?.id;
 
   if (!proposal) {
-    await answerCallbackQuery(callbackQuery.id, "Proposal not found");
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
     return true;
   }
 
   if (proposal.status !== "pending") {
-    await answerCallbackQuery(callbackQuery.id, "Already processed");
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_already_processed"));
     return true;
   }
 
@@ -627,7 +526,7 @@ async function handleProposalApprove(callbackQuery, proposalId) {
     await answerCallbackQuery(callbackQuery.id, "Execution failed");
     await sendTelegramMessage(
       callbackQuery.message.chat.id,
-      `Execution failed for proposal ${proposalId}`,
+      t(userId, "execution_failed", proposalId),
       callbackQuery.message.message_id
     );
     return true;
@@ -659,13 +558,7 @@ async function handleProposalApprove(callbackQuery, proposalId) {
 
   await sendTelegramMessage(
     callbackQuery.message.chat.id,
-    `✅ Proposal approved
-
-Token: ${proposal.token}
-CA: ${proposal.ca}
-TX: ${execution.tx}
-
-Public buy post sent to the group.`,
+    t(userId, "proposal_approved", proposal, execution),
     callbackQuery.message.message_id
   );
 
@@ -674,9 +567,10 @@ Public buy post sent to the group.`,
 
 async function handleProposalReject(callbackQuery, proposalId) {
   const proposal = getProposal(proposalId);
+  const userId = callbackQuery.from?.id;
 
   if (!proposal) {
-    await answerCallbackQuery(callbackQuery.id, "Proposal not found");
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
     return true;
   }
 
@@ -687,14 +581,56 @@ async function handleProposalReject(callbackQuery, proposalId) {
   await answerCallbackQuery(callbackQuery.id, "Rejected");
   await sendTelegramMessage(
     callbackQuery.message.chat.id,
-    `❌ Proposal rejected
-
-Token: ${proposal.token}
-CA: ${proposal.ca}`,
+    t(userId, "proposal_rejected", proposal),
     callbackQuery.message.message_id
   );
 
   return true;
+}
+
+async function handleLanguageCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+  const userId = callbackQuery.from?.id;
+
+  if (!chatId) return false;
+  if (!data.startsWith("lang:")) return false;
+
+  if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
+    await answerCallbackQuery(callbackQuery.id, "Private chat only");
+    return true;
+  }
+
+  if (data === "lang:open") {
+    await answerCallbackQuery(callbackQuery.id, "Language");
+    await sendTelegramMessage(
+      chatId,
+      t(userId, "language_prompt"),
+      messageId,
+      { reply_markup: buildLanguageKeyboard() }
+    );
+    return true;
+  }
+
+  if (data.startsWith("lang:set:")) {
+    const langCode = data.split(":")[2];
+    if (!SUPPORTED_LANGUAGES.find(x => x.code === langCode)) {
+      await answerCallbackQuery(callbackQuery.id, "Unknown language");
+      return true;
+    }
+
+    setUserLanguage(userId, langCode);
+    await answerCallbackQuery(callbackQuery.id, getLanguageLabel(langCode));
+    await sendTelegramMessage(
+      chatId,
+      t(userId, "language_set", getLanguageLabel(langCode)),
+      messageId
+    );
+    return true;
+  }
+
+  return false;
 }
 
 async function handleTradePanelCallback(callbackQuery) {
@@ -712,19 +648,19 @@ async function handleTradePanelCallback(callbackQuery) {
   }
 
   if (!isAdmin(userId)) {
-    await answerCallbackQuery(callbackQuery.id, "Admins only");
+    await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
     return true;
   }
 
   if (data === "tradepanel:open") {
     await answerCallbackQuery(callbackQuery.id, "Opening trading panel");
-    await sendTradingPanel(chatId, messageId);
+    await sendTradingPanel(chatId, messageId, userId);
     return true;
   }
 
   if (data === "tradepanel:close") {
-    await answerCallbackQuery(callbackQuery.id, "Closed");
-    await sendTelegramMessage(chatId, "Trading panel closed.", messageId);
+    await answerCallbackQuery(callbackQuery.id, t(userId, "close_panel"));
+    await sendTelegramMessage(chatId, t(userId, "trading_panel_closed"), messageId);
     return true;
   }
 
@@ -747,7 +683,7 @@ async function handleScanCallback(callbackQuery) {
   }
 
   if (!isAdmin(userId)) {
-    await answerCallbackQuery(callbackQuery.id, "Admins only");
+    await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
     return true;
   }
 
@@ -756,10 +692,7 @@ async function handleScanCallback(callbackQuery) {
     await answerCallbackQuery(callbackQuery.id, "Waiting for CA");
     await sendTelegramMessage(
       chatId,
-      `Send me the Solana CA you want to scan.
-
-Example:
-7xKXtg2CWd3xgRzx...`,
+      t(userId, "waiting_for_ca"),
       messageId
     );
     return true;
@@ -769,7 +702,7 @@ Example:
     clearPendingAdminAction(userId);
     clearLatestScan(userId);
     await answerCallbackQuery(callbackQuery.id, "Cancelled");
-    await sendTelegramMessage(chatId, "Scan cancelled.", messageId);
+    await sendTelegramMessage(chatId, t(userId, "scan_cancelled"), messageId);
     return true;
   }
 
@@ -780,7 +713,7 @@ Example:
       await answerCallbackQuery(callbackQuery.id, "No scan data");
       await sendTelegramMessage(
         chatId,
-        "No scan data found. Please scan a CA first.",
+        t(userId, "no_scan_data"),
         messageId
       );
       return true;
@@ -800,12 +733,7 @@ Example:
     await answerCallbackQuery(callbackQuery.id, "Proposal created");
     await sendTelegramMessage(
       chatId,
-      `🚀 Trade Proposal
-
-${formatDossierForAdmin(dossier)}
-
-Proposal ID:
-${proposal.id}`,
+      t(userId, "proposal_created", dossier, proposal),
       messageId,
       { reply_markup: buildProposalKeyboard(proposal.id) }
     );
@@ -824,6 +752,9 @@ async function handleAdminAndTradingCallback(callbackQuery) {
 
   if (!chatId) return false;
 
+  const handledLanguage = await handleLanguageCallback(callbackQuery);
+  if (handledLanguage) return true;
+
   const handledTradePanel = await handleTradePanelCallback(callbackQuery);
   if (handledTradePanel) return true;
 
@@ -837,7 +768,7 @@ async function handleAdminAndTradingCallback(callbackQuery) {
     }
 
     if (!isAdmin(userId)) {
-      await answerCallbackQuery(callbackQuery.id, "Admins only");
+      await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
       return true;
     }
 
@@ -863,7 +794,7 @@ async function handleAdminAndTradingCallback(callbackQuery) {
     }
 
     if (!isAdmin(userId)) {
-      await answerCallbackQuery(callbackQuery.id, "Admins only");
+      await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
       return true;
     }
 
@@ -884,7 +815,7 @@ async function handleAdminAndTradingCallback(callbackQuery) {
     await answerCallbackQuery(callbackQuery.id, "Updated");
 
     if (isTradingPanelAction) {
-      await sendTradingPanel(chatId, messageId);
+      await sendTradingPanel(chatId, messageId, userId);
     } else {
       const config = await getRuntimeConfig();
       await sendTelegramMessage(
@@ -908,7 +839,7 @@ async function handleAdminAndTradingCallback(callbackQuery) {
   }
 
   if (!isAdmin(userId)) {
-    await answerCallbackQuery(callbackQuery.id, "Admins only");
+    await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
     return true;
   }
 
@@ -945,7 +876,7 @@ async function handleAdminAndTradingCallback(callbackQuery) {
     }
 
     await answerCallbackQuery(callbackQuery.id, "Updated");
-    await sendAdminPanel(chatId, messageId);
+    await sendAdminPanel(chatId, messageId, userId);
     return true;
   } catch (error) {
     console.error("Admin callback error:", error.message);
@@ -968,9 +899,7 @@ async function handlePendingAdminInput(message) {
     if (!isProbablySolanaAddress(text)) {
       await sendTelegramMessage(
         message.chat.id,
-        `That doesn't look like a Solana CA.
-
-Please send a valid Solana mint address.`,
+        t(userId, "invalid_ca"),
         message.message_id
       );
       return true;
@@ -1006,14 +935,14 @@ async function handleCommand(message) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
-        "Trading tools are available only in private chat with the bot.",
+        t(userId, "private_only_trading"),
         messageId
       );
       return true;
     }
 
     if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
       return true;
     }
 
@@ -1032,18 +961,18 @@ async function handleCommand(message) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
-        "Trading panel is available only in private chat with the bot.",
+        t(userId, "private_only_tradepanel"),
         messageId
       );
       return true;
     }
 
     if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
       return true;
     }
 
-    await sendTradingPanel(chatId, messageId);
+    await sendTradingPanel(chatId, messageId, userId);
     return true;
   }
 
@@ -1051,14 +980,14 @@ async function handleCommand(message) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
-        "CA scan is available only in private chat with the bot.",
+        t(userId, "private_only_scan"),
         messageId
       );
       return true;
     }
 
     if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
       return true;
     }
 
@@ -1066,8 +995,27 @@ async function handleCommand(message) {
 
     await sendTelegramMessage(
       chatId,
-      `Send me the Solana CA you want to scan.`,
+      t(userId, "waiting_for_ca"),
       messageId
+    );
+    return true;
+  }
+
+  if (text.startsWith("/language")) {
+    if (!isPrivateChat(message)) {
+      await sendTelegramMessage(
+        chatId,
+        "Language settings are available only in private chat with the bot.",
+        messageId
+      );
+      return true;
+    }
+
+    await sendTelegramMessage(
+      chatId,
+      t(userId, "language_prompt"),
+      messageId,
+      { reply_markup: buildLanguageKeyboard() }
     );
     return true;
   }
@@ -1076,14 +1024,14 @@ async function handleCommand(message) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
-        "Trading proposals are available only in private chat with the bot.",
+        t(userId, "private_only_proposals"),
         messageId
       );
       return true;
     }
 
     if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
       return true;
     }
 
@@ -1120,18 +1068,7 @@ async function handleCommand(message) {
   if (text.startsWith("/help")) {
     await sendTelegramMessage(
       chatId,
-      `Commands:
-/start
-/help
-/menu
-/admin
-/tradepanel
-/status
-/trade_status
-/scan_ca
-/propose <token_name> <solana_ca>
-/ca
-/website`,
+      t(userId, "commands_help"),
       messageId,
       { reply_markup: buildMainMenuKeyboard() }
     );
@@ -1139,7 +1076,7 @@ async function handleCommand(message) {
   }
 
   if (text.startsWith("/menu")) {
-    await sendMainMenu(chatId, messageId);
+    await sendMainMenu(chatId, messageId, userId);
     return true;
   }
 
@@ -1147,18 +1084,18 @@ async function handleCommand(message) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
-        "Admin panel is available only in private chat with the bot.",
+        t(userId, "private_only_admin"),
         messageId
       );
       return true;
     }
 
     if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
       return true;
     }
 
-    await sendAdminPanel(chatId, messageId);
+    await sendAdminPanel(chatId, messageId, userId);
     return true;
   }
 
@@ -1168,18 +1105,7 @@ async function handleCommand(message) {
 
     await sendTelegramMessage(
       chatId,
-      `📊 Runtime status
-
-quietMode: ${cfg.quietMode}
-autoSelfTuning: ${cfg.autoSelfTuning}
-xWatcherEnabled: ${cfg.xWatcherEnabled}
-youtubeWatcherEnabled: ${cfg.youtubeWatcherEnabled}
-buybotEnabled: ${cfg.buybotEnabled}
-buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}
-
-tradingEnabled: ${trading.enabled}
-tradeMode: ${trading.mode}
-killSwitch: ${trading.killSwitch}`,
+      t(userId, "runtime_status", cfg, trading),
       messageId
     );
     return true;
@@ -1189,14 +1115,14 @@ killSwitch: ${trading.killSwitch}`,
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
-        "Trading status is available only in private chat with the bot.",
+        t(userId, "private_only_trade_status"),
         messageId
       );
       return true;
     }
 
     if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
       return true;
     }
 
@@ -1293,6 +1219,7 @@ async function handleRegularMessage(message) {
   let prompt = `Telegram message from ${userName} in a ${message.chat?.type || "unknown"} chat: ${text}
 
 Important:
+- Reply in ${getUserLanguage(userId)}.
 - In a group, answer this specific user directly and clearly.
 - No unnecessary repeated self-introductions.
 `;
@@ -1340,7 +1267,7 @@ async function handleMessage(message) {
     try {
       await sendTelegramMessage(
         message.chat.id,
-        "Chiikawa stumbled a little... 🥺 Please try again.",
+        t(message.from?.id, "stumble"),
         message.message_id
       );
     } catch (e) {
@@ -1379,6 +1306,7 @@ async function setTelegramCommands() {
     { command: "trade_status", description: "Trading status (private only)" },
     { command: "scan_ca", description: "Scan Solana CA (private only)" },
     { command: "propose", description: "Create proposal from token + CA" },
+    { command: "language", description: "Choose interface language" },
     { command: "ca", description: "Show contract" },
     { command: "website", description: "Show website" }
   ];
