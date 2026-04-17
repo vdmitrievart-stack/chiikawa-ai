@@ -46,14 +46,9 @@ const FORCED_GROUP_CHAT_ID = "-1003953010138";
 const TOKEN_CA = "2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu";
 const WEBSITE_URL = "https://chiikawasol.com/";
 
-const DATA_DIR = path.resolve(__dirname, "./data");
-const TRADING_DIR = path.resolve(DATA_DIR, "./trading");
-const LEVEL4_STORAGE_DIR = path.resolve(TRADING_DIR, "./level4-runtime");
-
 let offset = 0;
 let botId = null;
 let botUsername = null;
-let level4Kernel = null;
 
 const ACTIVE_CONVERSATION_MS = 8 * 60 * 1000;
 const activeChatUntil = new Map();
@@ -63,8 +58,13 @@ const greetedChats = new Set();
 const pendingAdminActions = new Map();
 const latestScans = new Map();
 
-const LANG_FILE = path.resolve(__dirname, "./bot-language-settings.json");
+const LANG_FILE = path.resolve("./bot-language-settings.json");
 const DEFAULT_LANG = "en";
+
+const level4Kernel = new Level4TradingKernel({
+  baseDir: path.join(process.cwd(), "data", "trading"),
+  logger: console
+});
 
 const SUPPORTED_LANGUAGES = [
   { code: "en", label: "English" },
@@ -79,18 +79,6 @@ const SUPPORTED_LANGUAGES = [
   { code: "ja", label: "日本語" },
   { code: "zh", label: "中文" }
 ];
-
-function ensureDirSync(dirPath) {
-  try {
-    fs.mkdirSync(dirPath, { recursive: true });
-  } catch (error) {
-    console.error(`ensureDirSync failed for ${dirPath}:`, error.message);
-  }
-}
-
-ensureDirSync(DATA_DIR);
-ensureDirSync(TRADING_DIR);
-ensureDirSync(LEVEL4_STORAGE_DIR);
 
 function loadLangState() {
   try {
@@ -226,15 +214,7 @@ killSwitch: ${trading.killSwitch}`,
     language_prompt: "🌐 Choose your language:",
     language_set: label => `Language set to: ${label}`,
     close_panel: "Closed",
-    trading_panel_closed: "Trading panel closed.",
-    level4_not_ready: "Level 4 trading kernel is not ready.",
-    level4_wallets_empty: "No Level 4 wallets yet.",
-    level4_wallets_title: wallets => `👛 Level 4 Wallets
-
-${wallets}`,
-    level4_status_title: status => `🧠 Level 4 Status
-
-${status}`
+    trading_panel_closed: "Trading panel closed."
   },
   ru: {
     commands_help: `Команды:
@@ -334,15 +314,7 @@ killSwitch: ${trading.killSwitch}`,
     language_prompt: "🌐 Выбери язык:",
     language_set: label => `Язык установлен: ${label}`,
     close_panel: "Закрыто",
-    trading_panel_closed: "Торговая панель закрыта.",
-    level4_not_ready: "Ядро Level 4 ещё не готово.",
-    level4_wallets_empty: "В Level 4 пока нет кошельков.",
-    level4_wallets_title: wallets => `👛 Кошельки Level 4
-
-${wallets}`,
-    level4_status_title: status => `🧠 Статус Level 4
-
-${status}`
+    trading_panel_closed: "Торговая панель закрыта."
   }
 };
 
@@ -372,104 +344,6 @@ function buildLanguageKeyboard() {
   return { inline_keyboard: rows };
 }
 
-function normalizeText(value) {
-  return String(value || "").trim();
-}
-
-function cleanLower(value) {
-  return normalizeText(value).toLowerCase();
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function isPrivateChat(message) {
-  return message?.chat?.type === "private";
-}
-
-function isGroupChat(message) {
-  return message?.chat?.type === "group" || message?.chat?.type === "supergroup";
-}
-
-function getDisplayName(user) {
-  if (!user) return "friend";
-  const full = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
-  return full || user.username || "friend";
-}
-
-function isAdmin(userId) {
-  return ADMIN_IDS.includes(Number(userId));
-}
-
-function mentionsBotUsername(text) {
-  if (!botUsername) return false;
-  return cleanLower(text).includes(`@${String(botUsername).toLowerCase()}`);
-}
-
-function mentionsBotByName(text) {
-  const lower = cleanLower(text);
-  return lower.includes("chiikawa");
-}
-
-function isReplyToBot(message) {
-  return Number(message?.reply_to_message?.from?.id || 0) === Number(botId || 0);
-}
-
-function markChatActive(chatId) {
-  activeChatUntil.set(String(chatId), Date.now() + ACTIVE_CONVERSATION_MS);
-}
-
-function isChatActive(chatId) {
-  const until = activeChatUntil.get(String(chatId));
-  return Boolean(until && until > Date.now());
-}
-
-function countTraffic(chatId) {
-  const key = String(chatId);
-  const now = Date.now();
-  const entry = chatTraffic.get(key) || [];
-  const next = entry.filter(ts => now - ts < 60_000);
-  next.push(now);
-  chatTraffic.set(key, next);
-  return next.length;
-}
-
-function isProbablySolanaAddress(value) {
-  const text = normalizeText(value);
-  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
-}
-
-function setPendingAdminAction(userId, action) {
-  pendingAdminActions.set(String(userId), {
-    ...action,
-    createdAt: Date.now()
-  });
-}
-
-function getPendingAdminAction(userId) {
-  return pendingAdminActions.get(String(userId)) || null;
-}
-
-function clearPendingAdminAction(userId) {
-  pendingAdminActions.delete(String(userId));
-}
-
-function setLatestScan(userId, dossier) {
-  latestScans.set(String(userId), {
-    dossier,
-    createdAt: Date.now()
-  });
-}
-
-function getLatestScan(userId) {
-  return latestScans.get(String(userId)) || null;
-}
-
-function clearLatestScan(userId) {
-  latestScans.delete(String(userId));
-}
-
 async function tg(method, body = {}) {
   const res = await fetch(`${TG_API}/${method}`, {
     method: "POST",
@@ -491,7 +365,7 @@ async function tg(method, body = {}) {
 async function sendTelegramMessage(chatId, text, replyToMessageId = null, extra = {}) {
   const payload = {
     chat_id: chatId,
-    text: String(text || "").slice(0, 4096),
+    text,
     allow_sending_without_reply: true,
     ...extra
   };
@@ -515,7 +389,7 @@ async function sendTyping(chatId) {
 async function answerCallbackQuery(callbackQueryId, text = "") {
   return tg("answerCallbackQuery", {
     callback_query_id: callbackQueryId,
-    text: String(text || "").slice(0, 180)
+    text
   });
 }
 
@@ -770,58 +644,6 @@ async function sendTradingPanel(chatId, replyToMessageId = null, userId = null) 
   );
 }
 
-async function ensureLevel4Ready() {
-  if (level4Kernel) return level4Kernel;
-
-  level4Kernel = new Level4TradingKernel({
-    baseDir: LEVEL4_STORAGE_DIR,
-    logger: console
-  });
-
-  await level4Kernel.init();
-  return level4Kernel;
-}
-
-async function getLevel4StatusText() {
-  if (!level4Kernel) {
-    return "initialized: false\nstorage: not ready";
-  }
-
-  const health = await level4Kernel.healthCheck();
-
-  return [
-    `initialized: ${health.initialized}`,
-    `ok: ${health.ok}`,
-    `kernel: ${health.kernel}`,
-    `storageWritable: ${health?.storage?.writable}`,
-    `storageDir: ${health?.storage?.dataDir || "n/a"}`,
-    `checkedAt: ${health.checkedAt}`
-  ].join("\n");
-}
-
-async function getLevel4WalletsText() {
-  if (!level4Kernel) {
-    return null;
-  }
-
-  const wallets = await level4Kernel.wallets.listWallets();
-  if (!wallets.length) return null;
-
-  return wallets
-    .map((wallet, index) => {
-      return [
-        `${index + 1}. ${wallet.label || wallet.walletId}`,
-        `walletId: ${wallet.walletId}`,
-        `address: ${wallet.address}`,
-        `role: ${wallet.role || "n/a"}`,
-        `ownerUserId: ${wallet.ownerUserId || "n/a"}`,
-        `active: ${wallet.isActive}`,
-        `chain: ${wallet.chain || "solana"}`
-      ].join("\n");
-    })
-    .join("\n\n");
-}
-
 function shouldRespond(message) {
   const text = normalizeText(message.text);
   if (!text) return false;
@@ -977,6 +799,7 @@ async function handleProposalApprove(callbackQuery, proposalId) {
   await answerCallbackQuery(callbackQuery.id, "Trade executed");
 
   const publicPost = formatPublicBuyPost(proposal, execution);
+
   const sent = await sendTelegramMessage(FORCED_GROUP_CHAT_ID, publicPost);
 
   try {
@@ -1212,40 +1035,21 @@ async function handleAdminAndTradingCallback(callbackQuery) {
       return true;
     }
 
-    if (data === "trade:show_wallets") {
-      try {
-        await ensureLevel4Ready();
-        const walletsText = await getLevel4WalletsText();
-        await answerCallbackQuery(callbackQuery.id, "Wallets");
-        await sendTelegramMessage(
-          chatId,
-          walletsText
-            ? t(userId, "level4_wallets_title", walletsText)
-            : t(userId, "level4_wallets_empty"),
-          messageId,
-          { reply_markup: buildTradingPanelKeyboard() }
-        );
-        return true;
-      } catch (error) {
-        console.error("trade:show_wallets error:", error.message);
-        await answerCallbackQuery(callbackQuery.id, "Failed");
-        await sendTelegramMessage(chatId, error.message, messageId);
-        return true;
-      }
-    }
-
     if (data === "trade:show_status") {
       try {
-        await ensureLevel4Ready();
-        const level4Text = await getLevel4StatusText();
-        const classicText = formatTradingStatus();
+        const result = handleTradingAdminCallback(data);
+        const health = await level4Kernel.healthCheck();
 
-        await answerCallbackQuery(callbackQuery.id, "Status");
+        await answerCallbackQuery(callbackQuery.id, "Updated");
         await sendTelegramMessage(
           chatId,
-          `${classicText}
+          `${result.message}
 
-${t(userId, "level4_status_title", level4Text)}`,
+Level4:
+initialized: ${health.initialized}
+ok: ${health.ok}
+writable: ${health.storage?.writable}
+dir: ${health.storage?.dataDir || "n/a"}`,
           messageId,
           { reply_markup: buildTradingPanelKeyboard() }
         );
@@ -1253,7 +1057,35 @@ ${t(userId, "level4_status_title", level4Text)}`,
       } catch (error) {
         console.error("trade:show_status error:", error.message);
         await answerCallbackQuery(callbackQuery.id, "Failed");
-        await sendTelegramMessage(chatId, error.message, messageId);
+        return true;
+      }
+    }
+
+    if (data === "trade:show_wallets") {
+      try {
+        const wallets = await level4Kernel.wallets.listWallets();
+        const text = wallets.length
+          ? wallets.map((w, i) => {
+              return `${i + 1}. ${w.label || w.walletId}
+walletId: ${w.walletId}
+address: ${w.address}
+role: ${w.role || "n/a"}
+active: ${w.isActive}
+chain: ${w.chain || "solana"}`;
+            }).join("\n\n")
+          : "No Level 4 wallets yet.";
+
+        await answerCallbackQuery(callbackQuery.id, "Updated");
+        await sendTelegramMessage(
+          chatId,
+          text,
+          messageId,
+          { reply_markup: buildTradingPanelKeyboard() }
+        );
+        return true;
+      } catch (error) {
+        console.error("trade:show_wallets error:", error.message);
+        await answerCallbackQuery(callbackQuery.id, "Failed");
         return true;
       }
     }
@@ -1284,55 +1116,6 @@ ${t(userId, "level4_status_title", level4Text)}`,
       );
     }
 
-    return true;
-  }
-
-  if (data === "menu:ca") {
-    await answerCallbackQuery(callbackQuery.id, "CA");
-    await sendTelegramMessage(
-      chatId,
-      `CA
-${TOKEN_CA}
-
-Website
-${WEBSITE_URL}`,
-      messageId,
-      { reply_markup: buildCAKeyboard() }
-    );
-    return true;
-  }
-
-  if (data === "menu:website") {
-    await answerCallbackQuery(callbackQuery.id, "Website");
-    await sendTelegramMessage(chatId, WEBSITE_URL, messageId);
-    return true;
-  }
-
-  if (data === "menu:status") {
-    const cfg = await getRuntimeConfig();
-    const trading = getTradingRuntime();
-    await answerCallbackQuery(callbackQuery.id, "Status");
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "runtime_status", cfg, trading),
-      messageId
-    );
-    return true;
-  }
-
-  if (data === "menu:admin") {
-    if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-      await answerCallbackQuery(callbackQuery.id, "Private chat only");
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
-      return true;
-    }
-
-    await answerCallbackQuery(callbackQuery.id, "Admin");
-    await sendAdminPanel(chatId, messageId, userId);
     return true;
   }
 
@@ -1441,40 +1224,49 @@ async function handleCommand(message) {
 
     if (text.startsWith("/wallets")) {
       try {
-        await ensureLevel4Ready();
-        const walletsText = await getLevel4WalletsText();
+        const wallets = await level4Kernel.wallets.listWallets();
+        const response = wallets.length
+          ? wallets.map((w, i) => {
+              return `${i + 1}. ${w.label || w.walletId}
+walletId: ${w.walletId}
+address: ${w.address}
+role: ${w.role || "n/a"}
+active: ${w.isActive}
+chain: ${w.chain || "solana"}`;
+            }).join("\n\n")
+          : "No Level 4 wallets yet.";
 
         await sendTelegramMessage(
           chatId,
-          walletsText
-            ? t(userId, "level4_wallets_title", walletsText)
-            : t(userId, "level4_wallets_empty"),
+          response,
           messageId,
           { reply_markup: buildTradingPanelKeyboard() }
         );
         return true;
       } catch (error) {
-        await sendTelegramMessage(chatId, error.message, messageId);
+        await sendTelegramMessage(chatId, `Wallets error: ${error.message}`, messageId);
         return true;
       }
     }
 
     if (text.startsWith("/trade_status")) {
       try {
-        await ensureLevel4Ready();
-        const level4Text = await getLevel4StatusText();
-
+        const health = await level4Kernel.healthCheck();
         await sendTelegramMessage(
           chatId,
           `${formatTradingStatus()}
 
-${t(userId, "level4_status_title", level4Text)}`,
+Level4:
+initialized: ${health.initialized}
+ok: ${health.ok}
+writable: ${health.storage?.writable}
+dir: ${health.storage?.dataDir || "n/a"}`,
           messageId,
           { reply_markup: buildTradingPanelKeyboard() }
         );
         return true;
       } catch (error) {
-        await sendTelegramMessage(chatId, error.message, messageId);
+        await sendTelegramMessage(chatId, `Status error: ${error.message}`, messageId);
         return true;
       }
     }
@@ -1631,22 +1423,22 @@ ${t(userId, "level4_status_title", level4Text)}`,
     }
 
     try {
-      await ensureLevel4Ready();
-      const level4Text = await getLevel4StatusText();
-
+      const health = await level4Kernel.healthCheck();
       await sendTelegramMessage(
         chatId,
         `${formatTradingStatus()}
 
-${t(userId, "level4_status_title", level4Text)}`,
+Level4:
+initialized: ${health.initialized}
+ok: ${health.ok}
+writable: ${health.storage?.writable}
+dir: ${health.storage?.dataDir || "n/a"}`,
         messageId,
-        {
-          reply_markup: buildTradingPanelKeyboard()
-        }
+        { reply_markup: buildTradingPanelKeyboard() }
       );
       return true;
     } catch (error) {
-      await sendTelegramMessage(chatId, error.message, messageId);
+      await sendTelegramMessage(chatId, `Status error: ${error.message}`, messageId);
       return true;
     }
   }
@@ -1795,17 +1587,6 @@ async function handleMessage(message) {
   }
 }
 
-async function bootstrapLevel4() {
-  try {
-    await ensureLevel4Ready();
-    const health = await level4Kernel.healthCheck();
-    console.log("Level4 kernel ready:", health);
-  } catch (error) {
-    console.error("Level4 bootstrap error:", error.message);
-    throw error;
-  }
-}
-
 async function bootstrap() {
   try {
     await tg("deleteWebhook", { drop_pending_updates: false });
@@ -1818,13 +1599,16 @@ async function bootstrap() {
   botUsername = me.username || null;
   botId = me.id || null;
 
+  console.log("Initializing Level 4 Trading Kernel...");
+  await level4Kernel.init();
+  const level4Health = await level4Kernel.healthCheck();
+  console.log("Level4 Health:", level4Health);
+
   await setTelegramCommands();
-  await bootstrapLevel4();
 
   console.log(`Telegram bot started as @${botUsername || "unknown_bot"}`);
   console.log(`Using backend: ${CHIIKAWA_AI_URL}`);
   console.log(`Forced group scope: ${FORCED_GROUP_CHAT_ID}`);
-  console.log(`Level4 storage dir: ${LEVEL4_STORAGE_DIR}`);
 }
 
 async function setTelegramCommands() {
@@ -1905,6 +1689,102 @@ async function pollLoop() {
       await sleep(3000);
     }
   }
+}
+
+function normalizeText(value) {
+  return String(value || "").trim();
+}
+
+function cleanLower(value) {
+  return normalizeText(value).toLowerCase();
+}
+
+function isPrivateChat(message) {
+  return message?.chat?.type === "private";
+}
+
+function isGroupChat(message) {
+  return message?.chat?.type === "group" || message?.chat?.type === "supergroup";
+}
+
+function mentionsBotUsername(text) {
+  if (!botUsername) return false;
+  return cleanLower(text).includes(`@${String(botUsername).toLowerCase()}`);
+}
+
+function mentionsBotByName(text) {
+  const lower = cleanLower(text);
+  return lower.includes("chiikawa");
+}
+
+function isReplyToBot(message) {
+  return Number(message?.reply_to_message?.from?.id || 0) === Number(botId || 0);
+}
+
+function getDisplayName(user) {
+  if (!user) return "friend";
+  return (
+    user.first_name ||
+    user.username ||
+    `${user.last_name || ""}`.trim() ||
+    "friend"
+  );
+}
+
+function markChatActive(chatId) {
+  activeChatUntil.set(String(chatId), Date.now() + ACTIVE_CONVERSATION_MS);
+}
+
+function isChatActive(chatId) {
+  const until = activeChatUntil.get(String(chatId)) || 0;
+  return until > Date.now();
+}
+
+function countTraffic(chatId) {
+  const key = String(chatId);
+  const now = Date.now();
+  const current = chatTraffic.get(key) || [];
+  const filtered = current.filter(ts => now - ts < 60_000);
+  filtered.push(now);
+  chatTraffic.set(key, filtered);
+  return filtered.length;
+}
+
+function setPendingAdminAction(userId, action) {
+  pendingAdminActions.set(String(userId), action);
+}
+
+function getPendingAdminAction(userId) {
+  return pendingAdminActions.get(String(userId)) || null;
+}
+
+function clearPendingAdminAction(userId) {
+  pendingAdminActions.delete(String(userId));
+}
+
+function setLatestScan(userId, dossier) {
+  latestScans.set(String(userId), { dossier, at: Date.now() });
+}
+
+function getLatestScan(userId) {
+  return latestScans.get(String(userId)) || null;
+}
+
+function clearLatestScan(userId) {
+  latestScans.delete(String(userId));
+}
+
+function isProbablySolanaAddress(value) {
+  const text = String(value || "").trim();
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isAdmin(userId) {
+  return ADMIN_IDS.includes(Number(userId));
 }
 
 (async () => {
