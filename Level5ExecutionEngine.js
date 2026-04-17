@@ -22,10 +22,22 @@ export default class Level5ExecutionEngine {
       apiKey: options.jupiterApiKey,
       defaultTimeoutMs: options.jupiterTimeoutMs ?? 15000
     });
+
+    this.isDryRun = options.isDryRun ?? true;
+    this.initializedAt = new Date().toISOString();
   }
 
   getWalletAddress() {
     return this.signer.getPublicKeyBase58();
+  }
+
+  getHealth() {
+    return {
+      ok: true,
+      initializedAt: this.initializedAt,
+      wallet: this.getWalletAddress(),
+      dryRun: this.isDryRun
+    };
   }
 
   async buildExecutionPlan(trade = {}) {
@@ -60,6 +72,21 @@ export default class Level5ExecutionEngine {
   async executeTrade(trade = {}) {
     const plan = await this.buildExecutionPlan(trade);
     if (!plan.ok) return plan;
+
+    if (this.isDryRun) {
+      return {
+        ok: true,
+        stage: "dry_run",
+        wallet: this.getWalletAddress(),
+        simulated: true,
+        requestId: plan.order?.requestId || null,
+        execution: {
+          signature: `dryrun_${Date.now()}`,
+          txid: `dryrun_${Date.now()}`
+        },
+        plan
+      };
+    }
 
     const requestId = plan.order?.requestId;
     const transaction = plan.order?.transaction;
