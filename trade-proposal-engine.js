@@ -1,54 +1,79 @@
 import fs from "fs";
 import path from "path";
 
-const STORE = path.resolve("./trade-proposals.json");
+const STORE_FILE = path.resolve("./trade-proposals.json");
 
-let state = {
+const DEFAULT_STATE = {
   proposals: []
 };
 
-function load() {
+function loadState() {
   try {
-    if (fs.existsSync(STORE)) {
-      state = JSON.parse(fs.readFileSync(STORE, "utf8"));
+    if (!fs.existsSync(STORE_FILE)) {
+      return { ...DEFAULT_STATE };
     }
-  } catch (e) {
-    console.error("proposal load error", e.message);
+
+    const raw = fs.readFileSync(STORE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    return {
+      proposals: Array.isArray(parsed.proposals) ? parsed.proposals : []
+    };
+  } catch (error) {
+    console.error("trade-proposal-engine load error:", error.message);
+    return { ...DEFAULT_STATE };
   }
 }
 
-function save() {
-  fs.writeFileSync(STORE, JSON.stringify(state, null, 2));
+function saveState() {
+  try {
+    fs.writeFileSync(STORE_FILE, JSON.stringify(state, null, 2), "utf8");
+  } catch (error) {
+    console.error("trade-proposal-engine save error:", error.message);
+  }
 }
 
-load();
+const state = loadState();
 
-export function createProposal(data) {
+function makeId() {
+  return `proposal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function createProposal(data = {}) {
   const proposal = {
-    id: "p_" + Date.now(),
-    token: data.token,
-    ca: data.ca,
-    reason: data.reason,
-    score: data.score || 70,
+    id: makeId(),
+    token: data.token || "Unknown",
+    ca: data.ca || "",
+    reason: data.reason || "No reason",
+    score: Number(data.score || 0),
+    dossier: data.dossier || null,
+    createdBy: data.createdBy || "admin",
     createdAt: Date.now(),
-    status: "pending"
+    status: "pending",
+    execution: null
   };
 
   state.proposals.push(proposal);
-  save();
+  saveState();
 
   return proposal;
 }
 
 export function getProposal(id) {
-  return state.proposals.find(p => p.id === id);
+  return state.proposals.find(p => p.id === id) || null;
 }
 
-export function updateProposal(id, patch) {
-  const p = getProposal(id);
-  if (!p) return null;
+export function updateProposal(id, patch = {}) {
+  const proposal = getProposal(id);
+  if (!proposal) return null;
 
-  Object.assign(p, patch);
-  save();
-  return p;
+  Object.assign(proposal, patch);
+  saveState();
+  return proposal;
+}
+
+export function listRecentProposals(limit = 10) {
+  return [...state.proposals]
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+    .slice(0, limit);
 }
