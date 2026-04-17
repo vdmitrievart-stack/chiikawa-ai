@@ -34,20 +34,25 @@ export default class Level5AutoCopyTrader {
 
     this.stateFile = path.join(this.stateDir, "autocopy-state.json");
 
+    this.pollLimit = Number.isFinite(options.pollLimit) ? options.pollLimit : 5;
+    this.copyCooldownMs = Number.isFinite(options.copyCooldownMs) ? options.copyCooldownMs : 15_000;
+    this.maxProcessed = Number.isFinite(options.maxProcessed) ? options.maxProcessed : 2000;
+    this.pruneKeep = Number.isFinite(options.pruneKeep) ? options.pruneKeep : 1500;
+    this.defaultDetectMint = options.defaultDetectMint || "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
     this.state = this.#loadState();
 
     this._walletSubs = new Map();
     this._running = false;
+    this._pollInFlight = new Set();
+    this._copyLocks = new Map();
+    this.initializedAt = new Date().toISOString();
   }
 
   #deriveWsUrl(rpcUrl) {
     if (!rpcUrl) return undefined;
-    if (rpcUrl.startsWith("https://")) {
-      return rpcUrl.replace(/^https:\/\//, "wss://");
-    }
-    if (rpcUrl.startsWith("http://")) {
-      return rpcUrl.replace(/^http:\/\//, "ws://");
-    }
+    if (rpcUrl.startsWith("https://")) return rpcUrl.replace(/^https:\/\//, "wss://");
+    if (rpcUrl.startsWith("http://")) return rpcUrl.replace(/^http:\/\//, "ws://");
     return undefined;
   }
 
@@ -59,6 +64,15 @@ export default class Level5AutoCopyTrader {
         const initial = {
           watchedLeaders: {},
           processedSignatures: {},
+          lastCopyAtByLeader: {},
+          stats: {
+            signalsSeen: 0,
+            signalsParsed: 0,
+            copyRuns: 0,
+            executionAttempts: 0,
+            executionSuccess: 0,
+            executionFail: 0
+          },
           updatedAt: new Date().toISOString()
         };
         fs.writeFileSync(this.stateFile, JSON.stringify(initial, null, 2), "utf8");
@@ -75,6 +89,19 @@ export default class Level5AutoCopyTrader {
         processedSignatures: parsed?.processedSignatures && typeof parsed.processedSignatures === "object"
           ? parsed.processedSignatures
           : {},
+        lastCopyAtByLeader: parsed?.lastCopyAtByLeader && typeof parsed.lastCopyAtByLeader === "object"
+          ? parsed.lastCopyAtByLeader
+          : {},
+        stats: parsed?.stats && typeof parsed.stats === "object"
+          ? parsed.stats
+          : {
+              signalsSeen: 0,
+              signalsParsed: 0,
+              copyRuns: 0,
+              executionAttempts: 0,
+              executionSuccess: 0,
+              executionFail: 0
+            },
         updatedAt: parsed?.updatedAt || new Date().toISOString()
       };
     } catch (error) {
@@ -82,6 +109,15 @@ export default class Level5AutoCopyTrader {
       return {
         watchedLeaders: {},
         processedSignatures: {},
+        lastCopyAtByLeader: {},
+        stats: {
+          signalsSeen: 0,
+          signalsParsed: 0,
+          copyRuns: 0,
+          executionAttempts: 0,
+          executionSuccess: 0,
+          executionFail: 0
+        },
         updatedAt: new Date().toISOString()
       };
     }
@@ -97,8 +133,24 @@ export default class Level5AutoCopyTrader {
     }
   }
 
+  #incStat(key, amount = 1) {
+    this.state.stats[key] = Number(this.state.stats[key] || 0) + amount;
+  }
+
   isRunning() {
     return this._running;
+  }
+
+  getHealth() {
+    return {
+      ok: true,
+      initializedAt: this.initializedAt,
+      running: this._running,
+      watchedLeaders: this._walletSubs.size,
+      dryRun: this.executionEngine?.isDryRun ?? true,
+      rpcUrl: this.rpcUrl,
+      stats: { ...(this.state.stats || {}) }
+    };
   }
 
   async start() {
@@ -135,9 +187,7 @@ export default class Level5AutoCopyTrader {
 
   async syncLeaderSubscriptions() {
     const copyState = await this.#getCopyState();
-
     const activeLeaders = Object.values(copyState.leaders || {}).filter(x => x.isActive);
-
     const activeLeaderIds = new Set(activeLeaders.map(x => x.leaderId));
 
     for (const [leaderId, sub] of this._walletSubs.entries()) {
@@ -181,10 +231,16 @@ export default class Level5AutoCopyTrader {
     const subscriptionId = this.connection.onAccountChange(
       publicKey,
       async () => {
+        if (!this._running) return;
+        if (this._pollInFlight.has(leaderId)) return;
+
+        this._pollInFlight.add(leaderId);
         try {
           await this.pollLeaderRecentTransactions(leaderId, walletAddress);
         } catch (error) {
           this.logger.error(`pollLeaderRecentTransactions failed for ${leaderId}:`, error.message);
+        } finally {
+          this._pollInFlight.delete(leaderId);
         }
       },
       "confirmed"
@@ -211,11 +267,17 @@ export default class Level5AutoCopyTrader {
 
   async pollLeaderRecentTransactions(leaderId, walletAddress) {
     const publicKey = new PublicKey(walletAddress);
-    const signatures = await this.connection.getSignaturesForAddress(publicKey, { limit: 5 }, "confirmed");
+    const signatures = await this.connection.getSignaturesForAddress(
+      publicKey,
+      { limit: this.pollLimit },
+      "confirmed"
+    );
 
     for (const sigInfo of signatures) {
       const signature = sigInfo.signature;
       if (this.state.processedSignatures[signature]) continue;
+
+      this.#incStat("signalsSeen", 1);
 
       this.state.processedSignatures[signature] = {
         leaderId,
@@ -233,6 +295,7 @@ export default class Level5AutoCopyTrader {
       const parsed = await this.tryBuildLeaderTradeEvent(leaderId, walletAddress, tx, signature);
       if (!parsed.ok) continue;
 
+      this.#incStat("signalsParsed", 1);
       await this.processLeaderTrade(parsed.trade);
     }
 
@@ -241,7 +304,7 @@ export default class Level5AutoCopyTrader {
 
   #pruneProcessedSignatures() {
     const entries = Object.entries(this.state.processedSignatures);
-    if (entries.length <= 2000) return;
+    if (entries.length <= this.maxProcessed) return;
 
     entries.sort((a, b) => {
       const ta = Date.parse(a[1]?.at || 0);
@@ -249,7 +312,7 @@ export default class Level5AutoCopyTrader {
       return tb - ta;
     });
 
-    const keep = entries.slice(0, 1500);
+    const keep = entries.slice(0, this.pruneKeep);
     this.state.processedSignatures = Object.fromEntries(keep);
     this.#saveState();
   }
@@ -265,18 +328,16 @@ export default class Level5AutoCopyTrader {
 
       const accountKeys = message.staticAccountKeys || message.accountKeys || [];
       const keyStrings = accountKeys.map(k => k.toBase58());
-
       const ownerIndex = keyStrings.findIndex(x => x === walletAddress);
+
       if (ownerIndex === -1) {
         return { ok: false, reason: "wallet_not_in_accounts" };
       }
 
       const preBalances = meta.preBalances || [];
       const postBalances = meta.postBalances || [];
-
       const preLamports = Number(preBalances[ownerIndex] || 0);
       const postLamports = Number(postBalances[ownerIndex] || 0);
-
       const deltaLamports = postLamports - preLamports;
 
       if (deltaLamports === 0) {
@@ -293,7 +354,7 @@ export default class Level5AutoCopyTrader {
         sizeLamportsAbs: Math.abs(deltaLamports),
         sizeSolAbs: Math.abs(deltaLamports) / 1_000_000_000,
         inputMint: "So11111111111111111111111111111111111111112",
-        outputMint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        outputMint: this.defaultDetectMint,
         amountAtomic: Math.max(1, Math.floor(Math.abs(deltaLamports))),
         sizeUsd: 0,
         raw: {
@@ -314,57 +375,99 @@ export default class Level5AutoCopyTrader {
     }
   }
 
+  #isLeaderCooldownActive(leaderId) {
+    const last = Number(this.state.lastCopyAtByLeader[leaderId] || 0);
+    return Date.now() - last < this.copyCooldownMs;
+  }
+
+  #markLeaderCopied(leaderId) {
+    this.state.lastCopyAtByLeader[leaderId] = Date.now();
+    this.#saveState();
+  }
+
   async processLeaderTrade(leaderTrade) {
-    const copyPlan = await this.kernel.buildCopyPlan({
-      leaderId: leaderTrade.leaderId,
-      trade: {
-        action: leaderTrade.side,
-        symbol: "AUTO",
-        ca: null,
-        chain: "solana",
-        sizeUsd: leaderTrade.sizeUsd || 0
-      }
-    });
-
-    if (!copyPlan.ok || !Array.isArray(copyPlan.plans) || !copyPlan.plans.length) {
-      return {
-        ok: false,
-        reason: "no_copy_plans"
-      };
+    if (!this._running) {
+      return { ok: false, reason: "autocopy_not_running" };
     }
 
-    const executions = [];
+    if (this._copyLocks.get(leaderTrade.leaderId)) {
+      return { ok: false, reason: "leader_copy_locked" };
+    }
 
-    for (const plan of copyPlan.plans) {
-      try {
-        const result = await this.executionEngine.executeTrade({
-          side: plan.action,
-          inputMint: leaderTrade.inputMint,
-          outputMint: leaderTrade.outputMint,
-          amountAtomic: leaderTrade.amountAtomic,
-          sizeUsd: plan.sizeUsd || 0,
-          slippageBps: plan.slippageBps || 100
-        });
+    if (this.#isLeaderCooldownActive(leaderTrade.leaderId)) {
+      return { ok: false, reason: "leader_cooldown_active" };
+    }
 
-        executions.push({
-          followerId: plan.followerId,
-          ok: Boolean(result.ok),
-          result
-        });
-      } catch (error) {
-        executions.push({
-          followerId: plan.followerId,
+    this._copyLocks.set(leaderTrade.leaderId, true);
+
+    try {
+      const copyPlan = await this.kernel.buildCopyPlan({
+        leaderId: leaderTrade.leaderId,
+        trade: {
+          action: leaderTrade.side,
+          symbol: "AUTO",
+          ca: null,
+          chain: "solana",
+          sizeUsd: leaderTrade.sizeUsd || 0
+        }
+      });
+
+      if (!copyPlan.ok || !Array.isArray(copyPlan.plans) || !copyPlan.plans.length) {
+        return {
           ok: false,
-          error: error.message
-        });
+          reason: "no_copy_plans"
+        };
       }
-    }
 
-    return {
-      ok: true,
-      leaderTrade,
-      executions
-    };
+      this.#incStat("copyRuns", 1);
+      this.#markLeaderCopied(leaderTrade.leaderId);
+
+      const executions = [];
+
+      for (const plan of copyPlan.plans) {
+        this.#incStat("executionAttempts", 1);
+
+        try {
+          const result = await this.executionEngine.executeTrade({
+            side: plan.action,
+            inputMint: leaderTrade.inputMint,
+            outputMint: leaderTrade.outputMint,
+            amountAtomic: leaderTrade.amountAtomic,
+            sizeUsd: plan.sizeUsd || 0,
+            slippageBps: plan.slippageBps || 100
+          });
+
+          if (result?.ok) {
+            this.#incStat("executionSuccess", 1);
+          } else {
+            this.#incStat("executionFail", 1);
+          }
+
+          executions.push({
+            followerId: plan.followerId,
+            ok: Boolean(result.ok),
+            result
+          });
+        } catch (error) {
+          this.#incStat("executionFail", 1);
+          executions.push({
+            followerId: plan.followerId,
+            ok: false,
+            error: error.message
+          });
+        }
+      }
+
+      this.#saveState();
+
+      return {
+        ok: true,
+        leaderTrade,
+        executions
+      };
+    } finally {
+      this._copyLocks.delete(leaderTrade.leaderId);
+    }
   }
 
   async manualCopyNow({
@@ -392,6 +495,8 @@ export default class Level5AutoCopyTrader {
     const results = [];
 
     for (const plan of copyPlan.plans || []) {
+      this.#incStat("executionAttempts", 1);
+
       try {
         const result = await this.executionEngine.executeTrade({
           side,
@@ -402,12 +507,19 @@ export default class Level5AutoCopyTrader {
           slippageBps: plan.slippageBps || slippageBps
         });
 
+        if (result?.ok) {
+          this.#incStat("executionSuccess", 1);
+        } else {
+          this.#incStat("executionFail", 1);
+        }
+
         results.push({
           followerId: plan.followerId,
           ok: Boolean(result.ok),
           result
         });
       } catch (error) {
+        this.#incStat("executionFail", 1);
         results.push({
           followerId: plan.followerId,
           ok: false,
@@ -416,9 +528,12 @@ export default class Level5AutoCopyTrader {
       }
     }
 
+    this.#saveState();
+
     return {
       ok: true,
       leaderId,
+      dryRun: this.executionEngine?.isDryRun ?? true,
       results
     };
   }
