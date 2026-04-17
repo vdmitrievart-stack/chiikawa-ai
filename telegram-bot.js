@@ -552,6 +552,246 @@ function t(userId, key, ...args) {
   return value;
 }
 
+function normalizeText(value) {
+  return String(value || "").trim();
+}
+
+function cleanLower(value) {
+  return normalizeText(value).toLowerCase();
+}
+
+function isPrivateChat(message) {
+  return message?.chat?.type === "private";
+}
+
+function isGroupChat(message) {
+  return message?.chat?.type === "group" || message?.chat?.type === "supergroup";
+}
+
+function mentionsBotUsername(text) {
+  if (!botUsername) return false;
+  return cleanLower(text).includes(`@${String(botUsername).toLowerCase()}`);
+}
+
+function mentionsBotByName(text) {
+  return cleanLower(text).includes("chiikawa");
+}
+
+function isReplyToBot(message) {
+  return Number(message?.reply_to_message?.from?.id || 0) === Number(botId || 0);
+}
+
+function getDisplayName(user) {
+  if (!user) return "friend";
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  return fullName || user.username || "friend";
+}
+
+function markChatActive(chatId) {
+  activeChatUntil.set(String(chatId), Date.now() + ACTIVE_CONVERSATION_MS);
+}
+
+function isChatActive(chatId) {
+  const until = activeChatUntil.get(String(chatId)) || 0;
+  return until > Date.now();
+}
+
+function countTraffic(chatId) {
+  const key = String(chatId);
+  const now = Date.now();
+  const current = chatTraffic.get(key) || [];
+  const filtered = current.filter(ts => now - ts < 60_000);
+  filtered.push(now);
+  chatTraffic.set(key, filtered);
+  return filtered.length;
+}
+
+function setPendingAdminAction(userId, action) {
+  pendingAdminActions.set(String(userId), action);
+}
+
+function getPendingAdminAction(userId) {
+  return pendingAdminActions.get(String(userId)) || null;
+}
+
+function clearPendingAdminAction(userId) {
+  pendingAdminActions.delete(String(userId));
+}
+
+function setLatestScan(userId, dossier) {
+  latestScans.set(String(userId), { dossier, at: Date.now() });
+}
+
+function getLatestScan(userId) {
+  return latestScans.get(String(userId)) || null;
+}
+
+function clearLatestScan(userId) {
+  latestScans.delete(String(userId));
+}
+
+function isProbablySolanaAddress(value) {
+  const text = String(value || "").trim();
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isAdmin(userId) {
+  return ADMIN_IDS.includes(Number(userId));
+}
+
+function tradingCommandContext() {
+  return { autoCopyTrader };
+}
+
+async function refreshTradingPanelMessage(chatId, messageId, userId) {
+  const trading = getTradingRuntime();
+  const l5 = getLevel5MiniStatus();
+
+  try {
+    return await editTelegramMessage(
+      chatId,
+      messageId,
+      t(userId, "trading_panel_title", trading, l5),
+      { reply_markup: buildTradingPanelKeyboard(userId) }
+    );
+  } catch (error) {
+    const msg = String(error?.message || "");
+    if (msg.includes("message is not modified")) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function handleTradingPanelActionResult(callbackQuery, result, successText) {
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+  const userId = callbackQuery.from?.id;
+
+  if (!chatId || !messageId) return true;
+
+  if (!result.ok) {
+    await answerCallbackQuery(callbackQuery.id, "Failed");
+    await sendTelegramMessage(chatId, result.error || "Action failed", messageId, {
+      reply_markup: buildTradingPanelKeyboard(userId)
+    });
+    return true;
+  }
+
+  await answerCallbackQuery(callbackQuery.id, successText);
+  await refreshTradingPanelMessage(chatId, messageId, userId);
+  return true;
+}
+
+async function tg(method, body = {}) {
+  const res = await fetch(`${TG_API}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  const data = await res.json();
+  if (!res.ok || !data.ok) {
+    const err = new Error(`Telegram API error in ${method}: ${JSON.stringify(data)}`);
+    err.telegram = data;
+    throw err;
+  }
+  return data.result;
+}
+
+async function sendTelegramMessage(chatId, text, replyToMessageId = null, extra = {}) {
+  const payload = {
+    chat_id: chatId,
+    text: String(text || "").slice(0, 4096),
+    allow_sending_without_reply: true,
+    ...extra
+  };
+
+  if (replyToMessageId) {
+    payload.reply_parameters = { message_id: replyToMessageId };
+  }
+
+  return tg("sendMessage", payload);
+}
+
+async function editTelegramMessage(chatId, messageId, text, extra = {}) {
+  const payload = {
+    chat_id: chatId,
+    message_id: messageId,
+    text: String(text || "").slice(0, 4096),
+    ...extra
+  };
+
+  return tg("editMessageText", payload);
+}
+
+async function sendTyping(chatId) {
+  return tg("sendChatAction", { chat_id: chatId, action: "typing" });
+}
+
+async function answerCallbackQuery(callbackQueryId, text = "") {
+  return tg("answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text: String(text || "").slice(0, 180)
+  });
+}
+
+async function getRuntimeConfig() {
+  try {
+    const res = await fetch(
+      `${AI_SERVER_BASE_URL}/runtime/config?secret=${encodeURIComponent(ADMIN_SECRET)}`
+    );
+    const data = await res.json();
+    if (data?.ok) return data.config;
+  } catch (error) {
+    console.error("getRuntimeConfig error:", error.message);
+  }
+
+  return {
+    quietMode: false,
+    xWatcherEnabled: true,
+    youtubeWatcherEnabled: true,
+    buybotEnabled: true,
+    buybotAlertMinUsd: 20,
+    autoSelfTuning: true
+  };
+}
+
+async function askChiikawa({
+  message,
+  userId = "anonymous",
+  userName = "",
+  username = "",
+  chatId = "",
+  chatType = "",
+  source = "telegram"
+}) {
+  const res = await fetch(CHIIKAWA_AI_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      message,
+      userId,
+      userName,
+      username,
+      chatId,
+      chatType,
+      source
+    })
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(`Chiikawa backend error: ${JSON.stringify(data)}`);
+  }
+
+  return data.reply || "Chiikawa got quiet... 🥺";
+}
+
 function buildLanguageKeyboard(userId) {
   const rows = [];
   for (let i = 0; i < SUPPORTED_LANGUAGES.length; i += 2) {
@@ -767,100 +1007,6 @@ async function sendLevel5InitWarning(chatId, messageId, userId, errorMessage) {
     messageId,
     { reply_markup: buildTradingPanelKeyboard(userId) }
   );
-}
-
-async function tg(method, body = {}) {
-  const res = await fetch(`${TG_API}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
-  });
-
-  const data = await res.json();
-  if (!res.ok || !data.ok) {
-    const err = new Error(`Telegram API error in ${method}: ${JSON.stringify(data)}`);
-    err.telegram = data;
-    throw err;
-  }
-  return data.result;
-}
-
-async function sendTelegramMessage(chatId, text, replyToMessageId = null, extra = {}) {
-  const payload = {
-    chat_id: chatId,
-    text: String(text || "").slice(0, 4096),
-    allow_sending_without_reply: true,
-    ...extra
-  };
-
-  if (replyToMessageId) {
-    payload.reply_parameters = { message_id: replyToMessageId };
-  }
-
-  return tg("sendMessage", payload);
-}
-
-async function sendTyping(chatId) {
-  return tg("sendChatAction", { chat_id: chatId, action: "typing" });
-}
-
-async function answerCallbackQuery(callbackQueryId, text = "") {
-  return tg("answerCallbackQuery", {
-    callback_query_id: callbackQueryId,
-    text: String(text || "").slice(0, 180)
-  });
-}
-
-async function getRuntimeConfig() {
-  try {
-    const res = await fetch(
-      `${AI_SERVER_BASE_URL}/runtime/config?secret=${encodeURIComponent(ADMIN_SECRET)}`
-    );
-    const data = await res.json();
-    if (data?.ok) return data.config;
-  } catch (error) {
-    console.error("getRuntimeConfig error:", error.message);
-  }
-
-  return {
-    quietMode: false,
-    xWatcherEnabled: true,
-    youtubeWatcherEnabled: true,
-    buybotEnabled: true,
-    buybotAlertMinUsd: 20,
-    autoSelfTuning: true
-  };
-}
-
-async function askChiikawa({
-  message,
-  userId = "anonymous",
-  userName = "",
-  username = "",
-  chatId = "",
-  chatType = "",
-  source = "telegram"
-}) {
-  const res = await fetch(CHIIKAWA_AI_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      message,
-      userId,
-      userName,
-      username,
-      chatId,
-      chatType,
-      source
-    })
-  });
-
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(`Chiikawa backend error: ${JSON.stringify(data)}`);
-  }
-
-  return data.reply || "Chiikawa got quiet... 🥺";
 }
 
 async function handleLanguageCallback(callbackQuery) {
@@ -1189,56 +1335,32 @@ async function handleLevel5InlineCallback(callbackQuery) {
 
   if (data === "level5:autocopy_on") {
     const result = await handleTradingCommand("/autocopy_on", userName, level4Kernel, tradingCommandContext());
-    await answerCallbackQuery(callbackQuery.id, result.ok ? "AutoCopy ON" : "Failed");
-    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
-      reply_markup: buildTradingPanelKeyboard(userId)
-    });
-    return true;
+    return handleTradingPanelActionResult(callbackQuery, result, "AutoCopy ON");
   }
 
   if (data === "level5:autocopy_off") {
     const result = await handleTradingCommand("/autocopy_off", userName, level4Kernel, tradingCommandContext());
-    await answerCallbackQuery(callbackQuery.id, result.ok ? "AutoCopy OFF" : "Failed");
-    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
-      reply_markup: buildTradingPanelKeyboard(userId)
-    });
-    return true;
+    return handleTradingPanelActionResult(callbackQuery, result, "AutoCopy OFF");
   }
 
   if (data === "level5:autocopy_status") {
     const result = await handleTradingCommand("/autocopy_status", userName, level4Kernel, tradingCommandContext());
-    await answerCallbackQuery(callbackQuery.id, result.ok ? "Status" : "Failed");
-    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
-      reply_markup: buildTradingPanelKeyboard(userId)
-    });
-    return true;
+    return handleTradingPanelActionResult(callbackQuery, result, "Status");
   }
 
   if (data === "level5:health") {
     const result = await handleTradingCommand("/level5_health", userName, level4Kernel, tradingCommandContext());
-    await answerCallbackQuery(callbackQuery.id, result.ok ? "Health" : "Failed");
-    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
-      reply_markup: buildTradingPanelKeyboard(userId)
-    });
-    return true;
+    return handleTradingPanelActionResult(callbackQuery, result, "Health");
   }
 
   if (data === "level5:dryrun_on") {
     const result = await handleTradingCommand("/level5_dryrun_on", userName, level4Kernel, tradingCommandContext());
-    await answerCallbackQuery(callbackQuery.id, result.ok ? "Dry Run ON" : "Failed");
-    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
-      reply_markup: buildTradingPanelKeyboard(userId)
-    });
-    return true;
+    return handleTradingPanelActionResult(callbackQuery, result, "Dry Run ON");
   }
 
   if (data === "level5:dryrun_off") {
     const result = await handleTradingCommand("/level5_dryrun_off", userName, level4Kernel, tradingCommandContext());
-    await answerCallbackQuery(callbackQuery.id, result.ok ? "Dry Run OFF" : "Failed");
-    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
-      reply_markup: buildTradingPanelKeyboard(userId)
-    });
-    return true;
+    return handleTradingPanelActionResult(callbackQuery, result, "Dry Run OFF");
   }
 
   if (data === "level5:execute_copy_now_prompt") {
@@ -1299,12 +1421,24 @@ async function handleTradeCallback(callbackQuery) {
     try {
       const result = handleTradingAdminCallback(data);
       const level4Text = await formatLevel4StatusText();
-      await answerCallbackQuery(callbackQuery.id, "Updated");
-      await sendTelegramMessage(chatId, `${result.message}
 
-${level4Text}`, messageId, {
-        reply_markup: buildTradingPanelKeyboard(userId)
-      });
+      if (!result.ok) {
+        await answerCallbackQuery(callbackQuery.id, "Failed");
+        await sendTelegramMessage(chatId, result.error || "Status failed", messageId, {
+          reply_markup: buildTradingPanelKeyboard(userId)
+        });
+        return true;
+      }
+
+      await answerCallbackQuery(callbackQuery.id, "Updated");
+      await editTelegramMessage(
+        chatId,
+        messageId,
+        `${result.message}
+
+${level4Text}`,
+        { reply_markup: buildTradingPanelKeyboard(userId) }
+      );
       return true;
     } catch (error) {
       await answerCallbackQuery(callbackQuery.id, "Failed");
@@ -1319,7 +1453,7 @@ ${level4Text}`, messageId, {
     try {
       const text = await formatLevel4WalletsText(userId);
       await answerCallbackQuery(callbackQuery.id, "Updated");
-      await sendTelegramMessage(chatId, text, messageId, {
+      await editTelegramMessage(chatId, messageId, text, {
         reply_markup: buildTradingPanelKeyboard(userId)
       });
       return true;
@@ -1333,14 +1467,7 @@ ${level4Text}`, messageId, {
   }
 
   const result = handleTradingAdminCallback(data);
-  if (!result.ok) {
-    await answerCallbackQuery(callbackQuery.id, "Failed");
-    return true;
-  }
-
-  await answerCallbackQuery(callbackQuery.id, "Updated");
-  await sendTradingPanel(chatId, messageId, userId);
-  return true;
+  return handleTradingPanelActionResult(callbackQuery, result, "Updated");
 }
 
 async function handleAdminCallback(callbackQuery) {
@@ -1509,6 +1636,187 @@ async function handlePendingAdminInput(message) {
     });
     return true;
   }
+
+  return false;
+}
+
+function isTradingCommand(text) {
+  const lower = cleanLower(text);
+  const prefixes = [
+    "/watch_wallet",
+    "/unwatch_wallet",
+    "/wallets",
+    "/wallet_score",
+    "/trade_status",
+    "/trade_mode",
+    "/kill_switch",
+    "/trading_on",
+    "/trading_off",
+    "/setbuy",
+    "/propose",
+    "/scan_ca",
+    "/tradepanel",
+    "/add_leader",
+    "/add_follower",
+    "/link_copy",
+    "/top_leaders",
+    "/copy_plan",
+    "/autocopy_on",
+    "/autocopy_off",
+    "/autocopy_status",
+    "/execute_copy_now",
+    "/level5_health",
+    "/level5_dryrun_on",
+    "/level5_dryrun_off"
+  ];
+  return prefixes.some(cmd => lower.startsWith(cmd));
+}
+
+async function maybeRejectTradingCommandInGroup(message) {
+  const text = normalizeText(message.text);
+  if (!text.startsWith("/")) return false;
+  if (!isTradingCommand(text)) return false;
+  if (isPrivateChat(message)) return false;
+
+  await sendTelegramMessage(
+    message.chat.id,
+    t(message.from?.id, "private_only_trading"),
+    message.message_id
+  );
+  return true;
+}
+
+function parseProposeCommand(text) {
+  const parts = String(text || "").trim().split(/\s+/);
+  if (parts.length < 3) {
+    return { ok: false, error: "Usage: /propose <token_name> <solana_ca>" };
+  }
+  return { ok: true, tokenName: parts[1], ca: parts[2] };
+}
+
+async function handleProposalApprove(callbackQuery, proposalId) {
+  const proposal = getProposal(proposalId);
+  const userId = callbackQuery.from?.id;
+
+  if (!proposal) {
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
+    return true;
+  }
+
+  if (proposal.status !== "pending") {
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_already_processed"));
+    return true;
+  }
+
+  const execution = await executeTradeMock(proposal);
+
+  if (!execution.ok) {
+    updateProposal(proposalId, { status: "failed", execution });
+    await answerCallbackQuery(callbackQuery.id, "Execution failed");
+    await sendTelegramMessage(
+      callbackQuery.message.chat.id,
+      t(userId, "execution_failed", proposalId),
+      callbackQuery.message.message_id
+    );
+    return true;
+  }
+
+  updateProposal(proposalId, { status: "approved", execution });
+  await answerCallbackQuery(callbackQuery.id, "Trade executed");
+
+  const publicPost = formatPublicBuyPost(proposal, execution);
+  const sent = await sendTelegramMessage(FORCED_GROUP_CHAT_ID, publicPost);
+
+  try {
+    await tg("pinChatMessage", {
+      chat_id: FORCED_GROUP_CHAT_ID,
+      message_id: sent.message_id,
+      disable_notification: true
+    });
+  } catch (error) {
+    console.error("pinChatMessage failed:", error.message);
+  }
+
+  await sendTelegramMessage(
+    callbackQuery.message.chat.id,
+    t(userId, "proposal_approved", proposal, execution),
+    callbackQuery.message.message_id,
+    { reply_markup: buildProposalKeyboard(proposalId, userId) }
+  );
+
+  return true;
+}
+
+async function handleProposalReject(callbackQuery, proposalId) {
+  const proposal = getProposal(proposalId);
+  const userId = callbackQuery.from?.id;
+
+  if (!proposal) {
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
+    return true;
+  }
+
+  updateProposal(proposalId, { status: "rejected" });
+  await answerCallbackQuery(callbackQuery.id, "Rejected");
+
+  await sendTelegramMessage(
+    callbackQuery.message.chat.id,
+    t(userId, "proposal_rejected", proposal),
+    callbackQuery.message.message_id,
+    { reply_markup: buildMainMenuKeyboard(userId) }
+  );
+
+  return true;
+}
+
+function shouldRespond(message) {
+  const text = normalizeText(message.text);
+  if (!text) return false;
+
+  const commands = [
+    "/start",
+    "/help",
+    "/menu",
+    "/admin",
+    "/tradepanel",
+    "/status",
+    "/trade_status",
+    "/trade_mode",
+    "/watch_wallet",
+    "/unwatch_wallet",
+    "/wallets",
+    "/wallet_score",
+    "/kill_switch",
+    "/trading_on",
+    "/trading_off",
+    "/setbuy",
+    "/propose",
+    "/scan_ca",
+    "/language",
+    "/ca",
+    "/website",
+    "/add_leader",
+    "/add_follower",
+    "/link_copy",
+    "/top_leaders",
+    "/copy_plan",
+    "/autocopy_on",
+    "/autocopy_off",
+    "/autocopy_status",
+    "/execute_copy_now",
+    "/level5_health",
+    "/level5_dryrun_on",
+    "/level5_dryrun_off"
+  ];
+
+  if (commands.some(cmd => text.startsWith(cmd))) return true;
+  if (isCARequest(text)) return true;
+  if (isWebsiteRequest(text)) return true;
+  if (isPrivateChat(message)) return true;
+  if (mentionsBotUsername(text)) return true;
+  if (mentionsBotByName(text)) return true;
+  if (isReplyToBot(message)) return true;
+  if (message.chat?.id && isChatActive(message.chat.id)) return true;
 
   return false;
 }
