@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
+import Level4TradingKernel from "./Level4TradingKernel.js";
 import {
   getTradingRuntime,
   handleTradingAdminCallback,
@@ -51,6 +52,15 @@ const latestScans = new Map();
 
 const LANG_FILE = path.resolve("./bot-language-settings.json");
 const DEFAULT_LANG = "en";
+
+const tradingKernel = new Level4TradingKernel({
+  baseDir: path.join(process.cwd(), "data", "trading"),
+  logger: console
+});
+
+let level4Ready = false;
+let level4HealthCache = null;
+let level4HealthCheckedAt = 0;
 
 const SUPPORTED_LANGUAGES = [
   { code: "en", label: "English" },
@@ -200,7 +210,15 @@ killSwitch: ${trading.killSwitch}`,
     language_prompt: "🌐 Choose your language:",
     language_set: label => `Language set to: ${label}`,
     close_panel: "Closed",
-    trading_panel_closed: "Trading panel closed."
+    trading_panel_closed: "Trading panel closed.",
+    level4_status: health => `🧠 Level 4 Trading
+
+ready: ${health.ready}
+ok: ${health.ok}
+initialized: ${health.initialized}
+dataDir: ${health.dataDir}
+checkedAt: ${health.checkedAt}`,
+    level4_failed: "Level 4 Trading is not ready."
   },
   ru: {
     commands_help: `Команды:
@@ -300,7 +318,15 @@ killSwitch: ${trading.killSwitch}`,
     language_prompt: "🌐 Выбери язык:",
     language_set: label => `Язык установлен: ${label}`,
     close_panel: "Закрыто",
-    trading_panel_closed: "Торговая панель закрыта."
+    trading_panel_closed: "Торговая панель закрыта.",
+    level4_status: health => `🧠 Level 4 Trading
+
+ready: ${health.ready}
+ok: ${health.ok}
+initialized: ${health.initialized}
+dataDir: ${health.dataDir}
+checkedAt: ${health.checkedAt}`,
+    level4_failed: "Level 4 Trading не готов."
   }
 };
 
@@ -432,6 +458,115 @@ async function askChiikawa({
   }
 
   return data.reply || "Chiikawa got quiet... 🥺";
+}
+
+function normalizeText(text) {
+  return String(text || "").trim();
+}
+
+function cleanLower(text) {
+  return normalizeText(text).toLowerCase();
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isAdmin(userId) {
+  return ADMIN_IDS.includes(Number(userId));
+}
+
+function isPrivateChat(message) {
+  return message?.chat?.type === "private";
+}
+
+function isGroupChat(message) {
+  const type = message?.chat?.type;
+  return type === "group" || type === "supergroup";
+}
+
+function mentionsBotUsername(text) {
+  const lower = cleanLower(text);
+  if (!botUsername) return false;
+  return lower.includes(`@${String(botUsername).toLowerCase()}`);
+}
+
+function mentionsBotByName(text) {
+  const lower = cleanLower(text);
+  return lower.includes("chiikawa");
+}
+
+function isReplyToBot(message) {
+  const reply = message?.reply_to_message;
+  if (!reply?.from) return false;
+  if (botId && reply.from.id === botId) return true;
+  if (botUsername && String(reply.from.username || "").toLowerCase() === String(botUsername).toLowerCase()) {
+    return true;
+  }
+  return false;
+}
+
+function markChatActive(chatId) {
+  activeChatUntil.set(String(chatId), Date.now() + ACTIVE_CONVERSATION_MS);
+}
+
+function isChatActive(chatId) {
+  const expires = activeChatUntil.get(String(chatId));
+  return typeof expires === "number" && expires > Date.now();
+}
+
+function countTraffic(chatId) {
+  const key = String(chatId);
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  const arr = chatTraffic.get(key) || [];
+  const filtered = arr.filter(ts => now - ts < windowMs);
+  filtered.push(now);
+  chatTraffic.set(key, filtered);
+  return filtered.length;
+}
+
+function getDisplayName(user) {
+  if (!user) return "Unknown";
+  const full = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  if (full) return full;
+  if (user.username) return `@${user.username}`;
+  return String(user.id || "Unknown");
+}
+
+function isProbablySolanaAddress(value) {
+  const text = normalizeText(value);
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+}
+
+function setPendingAdminAction(userId, value) {
+  pendingAdminActions.set(String(userId), {
+    ...value,
+    createdAt: Date.now()
+  });
+}
+
+function getPendingAdminAction(userId) {
+  return pendingAdminActions.get(String(userId)) || null;
+}
+
+function clearPendingAdminAction(userId) {
+  pendingAdminActions.delete(String(userId));
+}
+
+function setLatestScan(userId, dossier) {
+  latestScans.set(String(userId), {
+    dossier,
+    createdAt: Date.now()
+  });
+}
+
+function getLatestScan(userId) {
+  return latestScans.get(String(userId)) || null;
+}
+
+function clearLatestScan(userId) {
+  latestScans.delete(String(userId));
 }
 
 function isCARequest(text) {
@@ -628,6 +763,48 @@ async function sendTradingPanel(chatId, replyToMessageId = null, userId = null) 
     replyToMessageId,
     { reply_markup: buildTradingPanelKeyboard() }
   );
+}
+
+async function getLevel4Health(force = false) {
+  const now = Date.now();
+  if (!force && level4HealthCache && now - level4HealthCheckedAt < 15000) {
+    return level4HealthCache;
+  }
+
+  if (!level4Ready) {
+    level4HealthCache = {
+      ready: false,
+      ok: false,
+      initialized: false,
+      dataDir: path.join(process.cwd(), "data", "trading"),
+      checkedAt: new Date().toISOString()
+    };
+    level4HealthCheckedAt = now;
+    return level4HealthCache;
+  }
+
+  try {
+    const health = await tradingKernel.healthCheck();
+    level4HealthCache = {
+      ready: true,
+      ok: Boolean(health?.ok),
+      initialized: Boolean(health?.initialized),
+      dataDir: health?.storage?.dataDir || "",
+      checkedAt: health?.checkedAt || new Date().toISOString()
+    };
+  } catch (error) {
+    level4HealthCache = {
+      ready: false,
+      ok: false,
+      initialized: false,
+      dataDir: path.join(process.cwd(), "data", "trading"),
+      checkedAt: new Date().toISOString(),
+      error: error.message
+    };
+  }
+
+  level4HealthCheckedAt = now;
+  return level4HealthCache;
 }
 
 function shouldRespond(message) {
@@ -1306,7 +1483,14 @@ async function handleCommand(message) {
       return true;
     }
 
-    await sendTelegramMessage(chatId, formatTradingStatus(), messageId, {
+    const health = await getLevel4Health();
+    const statusParts = [
+      formatTradingStatus(),
+      "",
+      health.ready ? t(userId, "level4_status", health) : t(userId, "level4_failed")
+    ];
+
+    await sendTelegramMessage(chatId, statusParts.join("\n"), messageId, {
       reply_markup: buildTradingPanelKeyboard()
     });
     return true;
@@ -1462,6 +1646,16 @@ async function bootstrap() {
   } catch (error) {
     const code = error?.telegram?.error_code;
     if (code !== 404) throw error;
+  }
+
+  try {
+    await tradingKernel.init();
+    level4Ready = true;
+    level4HealthCache = await getLevel4Health(true);
+    console.log("[Level4] Trading kernel initialized");
+  } catch (error) {
+    level4Ready = false;
+    console.error("[Level4] init failed:", error.message);
   }
 
   const me = await tg("getMe");
