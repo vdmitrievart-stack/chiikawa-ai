@@ -143,7 +143,10 @@ const I18N = {
 /autocopy_on
 /autocopy_off
 /autocopy_status
-/execute_copy_now`,
+/execute_copy_now
+/level5_health
+/level5_dryrun_on
+/level5_dryrun_off`,
     menu_title: `✨ Chiikawa Menu ✨
 
 Choose what you want to explore:
@@ -163,13 +166,15 @@ buybotAlertMinUsd: ${config.buybotAlertMinUsd}
 tradingEnabled: ${trading.enabled}
 tradeMode: ${trading.mode}
 killSwitch: ${trading.killSwitch}
-autoCopyEnabled: ${trading.autoCopyEnabled}`,
+autoCopyEnabled: ${trading.autoCopyEnabled}
+level5DryRun: ${trading.level5DryRun}`,
     trading_panel_title: trading => `🎛 Trading Panel
 
 enabled: ${trading.enabled}
 mode: ${trading.mode}
 killSwitch: ${trading.killSwitch}
 autoCopyEnabled: ${trading.autoCopyEnabled}
+level5DryRun: ${trading.level5DryRun}
 buybotAlertMinUsd: ${trading.buybotAlertMinUsd}
 trackedWallets: ${Array.isArray(trading.trackedWallets) ? trading.trackedWallets.length : 0}`,
     private_only_trading: "Trading tools are available only in private chat with the bot.",
@@ -226,7 +231,8 @@ buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}
 tradingEnabled: ${trading.enabled}
 tradeMode: ${trading.mode}
 killSwitch: ${trading.killSwitch}
-autoCopyEnabled: ${trading.autoCopyEnabled}`,
+autoCopyEnabled: ${trading.autoCopyEnabled}
+level5DryRun: ${trading.level5DryRun}`,
     stumble: "Chiikawa stumbled a little... 🥺 Please try again.",
     language_prompt: "🌐 Choose your language:",
     language_set: label => `Language set to: ${label}`,
@@ -258,6 +264,9 @@ autoCopyEnabled: ${trading.autoCopyEnabled}`,
     btn_autocopy_on: "🤖 AutoCopy ON",
     btn_autocopy_off: "🤖 AutoCopy OFF",
     btn_autocopy_status: "🧾 AutoCopy Status",
+    btn_level5_health: "🩺 Level5 Health",
+    btn_dryrun_on: "🟢 Dry Run ON",
+    btn_dryrun_off: "🔴 Dry Run OFF",
     btn_trading_on: "⚙️ Trading ON",
     btn_trading_off: "⚙️ Trading OFF",
     btn_kill_on: "🛑 Kill ON",
@@ -326,7 +335,10 @@ leader_main So11111111111111111111111111111111111111112 EPjFWdd5AufqSSqeM2qN1xzy
 /autocopy_on
 /autocopy_off
 /autocopy_status
-/execute_copy_now`,
+/execute_copy_now
+/level5_health
+/level5_dryrun_on
+/level5_dryrun_off`,
     menu_title: `✨ Меню Chiikawa ✨
 
 Выбери, что открыть:
@@ -346,13 +358,15 @@ buybotAlertMinUsd: ${config.buybotAlertMinUsd}
 tradingEnabled: ${trading.enabled}
 tradeMode: ${trading.mode}
 killSwitch: ${trading.killSwitch}
-autoCopyEnabled: ${trading.autoCopyEnabled}`,
+autoCopyEnabled: ${trading.autoCopyEnabled}
+level5DryRun: ${trading.level5DryRun}`,
     trading_panel_title: trading => `🎛 Торговая панель
 
 enabled: ${trading.enabled}
 mode: ${trading.mode}
 killSwitch: ${trading.killSwitch}
 autoCopyEnabled: ${trading.autoCopyEnabled}
+level5DryRun: ${trading.level5DryRun}
 buybotAlertMinUsd: ${trading.buybotAlertMinUsd}
 trackedWallets: ${Array.isArray(trading.trackedWallets) ? trading.trackedWallets.length : 0}`,
     private_only_trading: "Торговые инструменты доступны только в личном чате с ботом.",
@@ -409,7 +423,8 @@ buybotAlertMinUsd: ${cfg.buybotAlertMinUsd}
 tradingEnabled: ${trading.enabled}
 tradeMode: ${trading.mode}
 killSwitch: ${trading.killSwitch}
-autoCopyEnabled: ${trading.autoCopyEnabled}`,
+autoCopyEnabled: ${trading.autoCopyEnabled}
+level5DryRun: ${trading.level5DryRun}`,
     stumble: "Chiikawa немного споткнулся... 🥺 Попробуй ещё раз.",
     language_prompt: "🌐 Выбери язык:",
     language_set: label => `Язык установлен: ${label}`,
@@ -441,6 +456,9 @@ autoCopyEnabled: ${trading.autoCopyEnabled}`,
     btn_autocopy_on: "🤖 AutoCopy ON",
     btn_autocopy_off: "🤖 AutoCopy OFF",
     btn_autocopy_status: "🧾 Статус AutoCopy",
+    btn_level5_health: "🩺 Level5 Health",
+    btn_dryrun_on: "🟢 Dry Run ON",
+    btn_dryrun_off: "🔴 Dry Run OFF",
     btn_trading_on: "⚙️ Торговля ON",
     btn_trading_off: "⚙️ Торговля OFF",
     btn_kill_on: "🛑 Kill ON",
@@ -495,6 +513,101 @@ function t(userId, key, ...args) {
   const value = dict[key] ?? fallback;
   if (typeof value === "function") return value(...args);
   return value;
+}
+
+function getLanguageLabel(code) {
+  return SUPPORTED_LANGUAGES.find(x => x.code === code)?.label || code;
+}
+
+function normalizeText(value) {
+  return String(value || "").trim();
+}
+
+function cleanLower(value) {
+  return normalizeText(value).toLowerCase();
+}
+
+function isPrivateChat(message) {
+  return message?.chat?.type === "private";
+}
+
+function isGroupChat(message) {
+  return message?.chat?.type === "group" || message?.chat?.type === "supergroup";
+}
+
+function mentionsBotUsername(text) {
+  if (!botUsername) return false;
+  return cleanLower(text).includes(`@${String(botUsername).toLowerCase()}`);
+}
+
+function mentionsBotByName(text) {
+  return cleanLower(text).includes("chiikawa");
+}
+
+function isReplyToBot(message) {
+  return Number(message?.reply_to_message?.from?.id || 0) === Number(botId || 0);
+}
+
+function getDisplayName(user) {
+  if (!user) return "friend";
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  return fullName || user.username || "friend";
+}
+
+function markChatActive(chatId) {
+  activeChatUntil.set(String(chatId), Date.now() + ACTIVE_CONVERSATION_MS);
+}
+
+function isChatActive(chatId) {
+  const until = activeChatUntil.get(String(chatId)) || 0;
+  return until > Date.now();
+}
+
+function countTraffic(chatId) {
+  const key = String(chatId);
+  const now = Date.now();
+  const current = chatTraffic.get(key) || [];
+  const filtered = current.filter(ts => now - ts < 60_000);
+  filtered.push(now);
+  chatTraffic.set(key, filtered);
+  return filtered.length;
+}
+
+function setPendingAdminAction(userId, action) {
+  pendingAdminActions.set(String(userId), action);
+}
+
+function getPendingAdminAction(userId) {
+  return pendingAdminActions.get(String(userId)) || null;
+}
+
+function clearPendingAdminAction(userId) {
+  pendingAdminActions.delete(String(userId));
+}
+
+function setLatestScan(userId, dossier) {
+  latestScans.set(String(userId), { dossier, at: Date.now() });
+}
+
+function getLatestScan(userId) {
+  return latestScans.get(String(userId)) || null;
+}
+
+function clearLatestScan(userId) {
+  latestScans.delete(String(userId));
+}
+
+function isProbablySolanaAddress(value) {
+  const text = String(value || "").trim();
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isAdmin(userId) {
+  return ADMIN_IDS.includes(Number(userId));
 }
 
 function tradingCommandContext() {
@@ -574,6 +687,11 @@ function buildTradingPanelKeyboard(userId) {
         { text: t(userId, "btn_autocopy_status"), callback_data: "level5:autocopy_status" }
       ],
       [{ text: t(userId, "btn_exec_copy_now"), callback_data: "level5:execute_copy_now_prompt" }],
+      [
+        { text: t(userId, "btn_level5_health"), callback_data: "level5:health" },
+        { text: t(userId, "btn_dryrun_on"), callback_data: "level5:dryrun_on" }
+      ],
+      [{ text: t(userId, "btn_dryrun_off"), callback_data: "level5:dryrun_off" }],
       [
         {
           text: trading.enabled ? t(userId, "btn_trading_on") : t(userId, "btn_trading_off"),
@@ -804,6 +922,151 @@ async function askChiikawa({
   }
 
   return data.reply || "Chiikawa got quiet... 🥺";
+}
+
+function isCARequest(text) {
+  const lower = cleanLower(text);
+  return lower === "ca" || lower === "ca?" || lower.includes("contract") || lower.includes("контракт");
+}
+
+function isWebsiteRequest(text) {
+  const lower = cleanLower(text);
+  return lower === "website" || lower.includes("site") || lower.includes("сайт") || lower.includes("ссылка");
+}
+
+function shouldRespond(message) {
+  const text = normalizeText(message.text);
+  if (!text) return false;
+
+  const commands = [
+    "/start", "/help", "/menu", "/admin", "/tradepanel", "/status", "/trade_status",
+    "/trade_mode", "/watch_wallet", "/unwatch_wallet", "/wallets", "/wallet_score",
+    "/kill_switch", "/trading_on", "/trading_off", "/setbuy", "/propose", "/scan_ca",
+    "/language", "/ca", "/website", "/add_leader", "/add_follower", "/link_copy",
+    "/top_leaders", "/copy_plan", "/autocopy_on", "/autocopy_off", "/autocopy_status",
+    "/execute_copy_now", "/level5_health", "/level5_dryrun_on", "/level5_dryrun_off"
+  ];
+
+  if (commands.some(cmd => text.startsWith(cmd))) return true;
+  if (isCARequest(text)) return true;
+  if (isWebsiteRequest(text)) return true;
+  if (isPrivateChat(message)) return true;
+  if (mentionsBotUsername(text)) return true;
+  if (mentionsBotByName(text)) return true;
+  if (isReplyToBot(message)) return true;
+  if (message.chat?.id && isChatActive(message.chat.id)) return true;
+
+  return false;
+}
+
+function isTradingCommand(text) {
+  const lower = cleanLower(text);
+  const prefixes = [
+    "/watch_wallet", "/unwatch_wallet", "/wallets", "/wallet_score", "/trade_status",
+    "/trade_mode", "/kill_switch", "/trading_on", "/trading_off", "/setbuy",
+    "/propose", "/scan_ca", "/tradepanel", "/add_leader", "/add_follower",
+    "/link_copy", "/top_leaders", "/copy_plan", "/autocopy_on", "/autocopy_off",
+    "/autocopy_status", "/execute_copy_now", "/level5_health", "/level5_dryrun_on",
+    "/level5_dryrun_off"
+  ];
+  return prefixes.some(cmd => lower.startsWith(cmd));
+}
+
+async function maybeRejectTradingCommandInGroup(message) {
+  const text = normalizeText(message.text);
+  if (!text.startsWith("/")) return false;
+  if (!isTradingCommand(text)) return false;
+  if (isPrivateChat(message)) return false;
+
+  await sendTelegramMessage(
+    message.chat.id,
+    t(message.from?.id, "private_only_trading"),
+    message.message_id
+  );
+  return true;
+}
+
+function parseProposeCommand(text) {
+  const parts = String(text || "").trim().split(/\s+/);
+  if (parts.length < 3) {
+    return { ok: false, error: "Usage: /propose <token_name> <solana_ca>" };
+  }
+  return { ok: true, tokenName: parts[1], ca: parts[2] };
+}
+
+async function handleProposalApprove(callbackQuery, proposalId) {
+  const proposal = getProposal(proposalId);
+  const userId = callbackQuery.from?.id;
+
+  if (!proposal) {
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
+    return true;
+  }
+
+  if (proposal.status !== "pending") {
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_already_processed"));
+    return true;
+  }
+
+  const execution = await executeTradeMock(proposal);
+
+  if (!execution.ok) {
+    updateProposal(proposalId, { status: "failed", execution });
+    await answerCallbackQuery(callbackQuery.id, "Execution failed");
+    await sendTelegramMessage(
+      callbackQuery.message.chat.id,
+      t(userId, "execution_failed", proposalId),
+      callbackQuery.message.message_id
+    );
+    return true;
+  }
+
+  updateProposal(proposalId, { status: "approved", execution });
+  await answerCallbackQuery(callbackQuery.id, "Trade executed");
+
+  const publicPost = formatPublicBuyPost(proposal, execution);
+  const sent = await sendTelegramMessage(FORCED_GROUP_CHAT_ID, publicPost);
+
+  try {
+    await tg("pinChatMessage", {
+      chat_id: FORCED_GROUP_CHAT_ID,
+      message_id: sent.message_id,
+      disable_notification: true
+    });
+  } catch (error) {
+    console.error("pinChatMessage failed:", error.message);
+  }
+
+  await sendTelegramMessage(
+    callbackQuery.message.chat.id,
+    t(userId, "proposal_approved", proposal, execution),
+    callbackQuery.message.message_id,
+    { reply_markup: buildProposalKeyboard(proposalId, userId) }
+  );
+
+  return true;
+}
+
+async function handleProposalReject(callbackQuery, proposalId) {
+  const proposal = getProposal(proposalId);
+  const userId = callbackQuery.from?.id;
+
+  if (!proposal) {
+    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
+    return true;
+  }
+
+  updateProposal(proposalId, { status: "rejected" });
+  await answerCallbackQuery(callbackQuery.id, "Rejected");
+
+  await sendTelegramMessage(
+    callbackQuery.message.chat.id,
+    t(userId, "proposal_rejected", proposal),
+    callbackQuery.message.message_id,
+    { reply_markup: buildMainMenuKeyboard(userId) }
+  );
+
+  return true;
 }
 
 async function handleLanguageCallback(callbackQuery) {
@@ -1151,6 +1414,33 @@ async function handleLevel5InlineCallback(callbackQuery) {
   if (data === "level5:autocopy_status") {
     const result = await handleTradingCommand("/autocopy_status", userName, level4Kernel, tradingCommandContext());
     await answerCallbackQuery(callbackQuery.id, result.ok ? "Status" : "Failed");
+    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
+      reply_markup: buildTradingPanelKeyboard(userId)
+    });
+    return true;
+  }
+
+  if (data === "level5:health") {
+    const result = await handleTradingCommand("/level5_health", userName, level4Kernel, tradingCommandContext());
+    await answerCallbackQuery(callbackQuery.id, result.ok ? "Health" : "Failed");
+    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
+      reply_markup: buildTradingPanelKeyboard(userId)
+    });
+    return true;
+  }
+
+  if (data === "level5:dryrun_on") {
+    const result = await handleTradingCommand("/level5_dryrun_on", userName, level4Kernel, tradingCommandContext());
+    await answerCallbackQuery(callbackQuery.id, result.ok ? "Dry Run ON" : "Failed");
+    await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
+      reply_markup: buildTradingPanelKeyboard(userId)
+    });
+    return true;
+  }
+
+  if (data === "level5:dryrun_off") {
+    const result = await handleTradingCommand("/level5_dryrun_off", userName, level4Kernel, tradingCommandContext());
+    await answerCallbackQuery(callbackQuery.id, result.ok ? "Dry Run OFF" : "Failed");
     await sendTelegramMessage(chatId, result.ok ? result.message : result.error, messageId, {
       reply_markup: buildTradingPanelKeyboard(userId)
     });
@@ -1779,6 +2069,11 @@ async function bootstrapLevel5() {
       executionEngine: level5ExecutionEngine,
       logger: console
     });
+
+    const runtime = getTradingRuntime();
+    if (typeof runtime.level5DryRun === "boolean") {
+      level5ExecutionEngine.isDryRun = runtime.level5DryRun;
+    }
 
     console.log("Level5 initialized");
   } catch (error) {
