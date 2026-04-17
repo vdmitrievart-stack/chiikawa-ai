@@ -1,10 +1,8 @@
-'use strict';
-
-const path = require('path');
-const Level4JsonStorage = require('./Level4JsonStorage');
-const Level4WalletRegistry = require('./Level4WalletRegistry');
-const Level4CopyTradingEngine = require('./Level4CopyTradingEngine');
-const Level4ScoringEngine = require('./Level4ScoringEngine');
+import path from "path";
+import Level4JsonStorage from "./Level4JsonStorage.js";
+import Level4WalletRegistry from "./Level4WalletRegistry.js";
+import Level4CopyTradingEngine from "./Level4CopyTradingEngine.js";
+import Level4ScoringEngine from "./Level4ScoringEngine.js";
 
 class Level4TradingKernel {
   /**
@@ -14,28 +12,28 @@ class Level4TradingKernel {
    */
   constructor(options = {}) {
     this.logger = options.logger || console;
-    this.baseDir = options.baseDir || path.join(process.cwd(), 'data', 'trading');
+    this.baseDir = options.baseDir || path.join(process.cwd(), "data", "trading");
 
     this.storage = new Level4JsonStorage({
       baseDir: this.baseDir,
-      namespace: 'level4',
+      namespace: "level4",
       enableBackups: true,
       backupLimit: 25,
       pretty: true,
-      logger: this.logger,
+      logger: this.logger
     });
 
     this.wallets = new Level4WalletRegistry({
-      storage: this.storage,
+      storage: this.storage
     });
 
     this.copytrading = new Level4CopyTradingEngine({
       storage: this.storage,
-      logger: this.logger,
+      logger: this.logger
     });
 
     this.scoring = new Level4ScoringEngine({
-      storage: this.storage,
+      storage: this.storage
     });
 
     this._initialized = false;
@@ -50,7 +48,7 @@ class Level4TradingKernel {
     await this.scoring.init();
 
     this._initialized = true;
-    this._safeLog('info', '[Level4TradingKernel] initialized');
+    this._safeLog("info", "[Level4TradingKernel] initialized");
 
     return this;
   }
@@ -60,10 +58,10 @@ class Level4TradingKernel {
 
     return {
       ok: Boolean(storageHealth.ok),
-      kernel: 'level4-trading',
+      kernel: "level4-trading",
       initialized: this._initialized,
       checkedAt: new Date().toISOString(),
-      storage: storageHealth,
+      storage: storageHealth
     };
   }
 
@@ -73,7 +71,7 @@ class Level4TradingKernel {
     address,
     label,
     ownerUserId = null,
-    chain = 'solana',
+    chain = "solana"
   }) {
     await this.init();
 
@@ -83,9 +81,9 @@ class Level4TradingKernel {
       label,
       ownerUserId,
       chain,
-      role: 'leader',
-      visibility: 'private',
-      isActive: true,
+      role: "leader",
+      visibility: "private",
+      isActive: true
     });
 
     const leader = await this.copytrading.registerLeader({
@@ -93,7 +91,7 @@ class Level4TradingKernel {
       walletId: wallet.walletId,
       label,
       chain,
-      isActive: true,
+      isActive: true
     });
 
     return { wallet, leader };
@@ -105,10 +103,10 @@ class Level4TradingKernel {
     address,
     label,
     ownerUserId,
-    chain = 'solana',
+    chain = "solana",
     maxAllocationUsd = 0,
     maxOpenPositions = 3,
-    slippageBps = 150,
+    slippageBps = 150
   }) {
     await this.init();
 
@@ -118,9 +116,9 @@ class Level4TradingKernel {
       label,
       ownerUserId,
       chain,
-      role: 'follower',
-      visibility: 'private',
-      isActive: true,
+      role: "follower",
+      visibility: "private",
+      isActive: true
     });
 
     const follower = await this.copytrading.registerFollower({
@@ -130,10 +128,10 @@ class Level4TradingKernel {
       label,
       chain,
       isActive: true,
-      copyMode: 'proportional',
+      copyMode: "proportional",
       maxAllocationUsd,
       maxOpenPositions,
-      slippageBps,
+      slippageBps
     });
 
     return { wallet, follower };
@@ -145,7 +143,7 @@ class Level4TradingKernel {
     multiplier = 1,
     maxTradeUsd = 0,
     minLeaderScore = 0,
-    mode = 'mirror',
+    mode = "mirror"
   }) {
     await this.init();
 
@@ -156,7 +154,7 @@ class Level4TradingKernel {
       maxTradeUsd,
       minLeaderScore,
       mode,
-      isActive: true,
+      isActive: true
     });
   }
 
@@ -177,7 +175,7 @@ class Level4TradingKernel {
 
   _safeLog(method, message) {
     try {
-      if (this.logger && typeof this.logger[method] === 'function') {
+      if (this.logger && typeof this.logger[method] === "function") {
         this.logger[method](message);
       } else {
         console.log(message);
@@ -188,4 +186,4 @@ class Level4TradingKernel {
   }
 }
 
-module.exports = Level4TradingKernel;
+export default Level4TradingKernel;
