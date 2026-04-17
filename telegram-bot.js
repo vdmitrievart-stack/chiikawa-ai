@@ -129,7 +129,12 @@ const I18N = {
 /propose <token_name> <solana_ca>
 /language
 /ca
-/website`,
+/website
+/add_leader
+/add_follower
+/link_copy
+/top_leaders
+/copy_plan`,
     menu_title: `✨ Chiikawa Menu ✨
 
 Choose what you want to explore:
@@ -218,10 +223,64 @@ killSwitch: ${trading.killSwitch}`,
     level4_wallets_empty: "No Level 4 wallets yet.",
     level4_status_error: error => `Level 4 status error: ${error}`,
     level4_wallets_error: error => `Level 4 wallets error: ${error}`,
-    menu_closed: "Menu closed.",
-    open_menu: "Open menu",
-    back_to_menu: "Back to menu"
+    unknown_language: "Unknown language",
+    private_chat_only: "Private chat only",
+    pending_cancelled: "Pending action cancelled.",
+
+    btn_ca: "CA",
+    btn_website: "Website",
+    btn_status: "Status",
+    btn_admin: "Admin",
+    btn_trading: "🎛 Trading",
+    btn_language: "🌐 Language",
+    btn_scan_ca: "🔍 Scan CA",
+    btn_trade_status: "📊 Trade Status",
+    btn_wallets: "👛 Wallets",
+    btn_add_leader: "🧠 Add Leader",
+    btn_add_follower: "🪞 Add Follower",
+    btn_link_copy: "🔗 Link Copy",
+    btn_top_leaders: "🏆 Top Leaders",
+    btn_copy_plan: "📋 Copy Plan",
+    btn_trading_on: "⚙️ Trading ON",
+    btn_trading_off: "⚙️ Trading OFF",
+    btn_kill_on: "🛑 Kill ON",
+    btn_kill_off: "🛑 Kill OFF",
+    btn_mode: mode => `🔁 Mode: ${mode}`,
+    btn_buy_min: value => `💰 Buy Min: $${value}`,
+    btn_close: "❎ Close",
+    btn_approve: "✅ Approve",
+    btn_reject: "❌ Reject",
+    btn_create_proposal: "✅ Create proposal",
+    btn_cancel: "❌ Cancel",
+    btn_back: "⬅️ Back",
+    btn_menu: "📋 Menu",
+
+    prompt_add_leader: `Send leader data in one message:
+
+<leaderId> <walletId> <address> [label]
+
+Example:
+leader_main wallet_leader_1 So11111111111111111111111111111111111111112 MainLeader`,
+    prompt_add_follower: `Send follower data in one message:
+
+<followerId> <walletId> <address> <ownerUserId> [label]
+
+Example:
+follower_main wallet_follower_1 So11111111111111111111111111111111111111113 617743971 MainFollower`,
+    prompt_link_copy: `Send link data in one message:
+
+<leaderId> <followerId> [multiplier] [maxTradeUsd] [minLeaderScore] [mode]
+
+Example:
+leader_main follower_main 0.5 80 20 mirror`,
+    prompt_copy_plan: `Send copy-plan data in one message:
+
+<leaderId> <buy|sell> <symbol> <ca> <sizeUsd>
+
+Example:
+leader_main buy CHII 2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu 120`
   },
+
   ru: {
     commands_help: `Команды:
 /start
@@ -235,7 +294,12 @@ killSwitch: ${trading.killSwitch}`,
 /propose <имя_токена> <solana_ca>
 /language
 /ca
-/website`,
+/website
+/add_leader
+/add_follower
+/link_copy
+/top_leaders
+/copy_plan`,
     menu_title: `✨ Меню Chiikawa ✨
 
 Выбери, что открыть:
@@ -324,9 +388,62 @@ killSwitch: ${trading.killSwitch}`,
     level4_wallets_empty: "В Level 4 пока нет кошельков.",
     level4_status_error: error => `Ошибка статуса Level 4: ${error}`,
     level4_wallets_error: error => `Ошибка кошельков Level 4: ${error}`,
-    menu_closed: "Меню закрыто.",
-    open_menu: "Открыть меню",
-    back_to_menu: "Назад в меню"
+    unknown_language: "Неизвестный язык",
+    private_chat_only: "Только в личном чате",
+    pending_cancelled: "Ожидающее действие отменено.",
+
+    btn_ca: "CA",
+    btn_website: "Сайт",
+    btn_status: "Статус",
+    btn_admin: "Админ",
+    btn_trading: "🎛 Торговля",
+    btn_language: "🌐 Язык",
+    btn_scan_ca: "🔍 Скан CA",
+    btn_trade_status: "📊 Статус трейда",
+    btn_wallets: "👛 Кошельки",
+    btn_add_leader: "🧠 Добавить лидера",
+    btn_add_follower: "🪞 Добавить фолловера",
+    btn_link_copy: "🔗 Связать copy",
+    btn_top_leaders: "🏆 Топ лидеров",
+    btn_copy_plan: "📋 Copy Plan",
+    btn_trading_on: "⚙️ Торговля ON",
+    btn_trading_off: "⚙️ Торговля OFF",
+    btn_kill_on: "🛑 Kill ON",
+    btn_kill_off: "🛑 Kill OFF",
+    btn_mode: mode => `🔁 Режим: ${mode}`,
+    btn_buy_min: value => `💰 Мин. buy: $${value}`,
+    btn_close: "❎ Закрыть",
+    btn_approve: "✅ Одобрить",
+    btn_reject: "❌ Отклонить",
+    btn_create_proposal: "✅ Создать proposal",
+    btn_cancel: "❌ Отмена",
+    btn_back: "⬅️ Назад",
+    btn_menu: "📋 Меню",
+
+    prompt_add_leader: `Отправь данные лидера одним сообщением:
+
+<leaderId> <walletId> <address> [label]
+
+Пример:
+leader_main wallet_leader_1 So11111111111111111111111111111111111111112 MainLeader`,
+    prompt_add_follower: `Отправь данные фолловера одним сообщением:
+
+<followerId> <walletId> <address> <ownerUserId> [label]
+
+Пример:
+follower_main wallet_follower_1 So11111111111111111111111111111111111111113 617743971 MainFollower`,
+    prompt_link_copy: `Отправь данные связки одним сообщением:
+
+<leaderId> <followerId> [multiplier] [maxTradeUsd] [minLeaderScore] [mode]
+
+Пример:
+leader_main follower_main 0.5 80 20 mirror`,
+    prompt_copy_plan: `Отправь данные для copy plan одним сообщением:
+
+<leaderId> <buy|sell> <symbol> <ca> <sizeUsd>
+
+Пример:
+leader_main buy CHII 2c1KjiyQow66QfsnCtoyuqfo3AuxgpBMEoAq5oiiXqdu 120`
   }
 };
 
@@ -343,7 +460,7 @@ function getLanguageLabel(code) {
   return SUPPORTED_LANGUAGES.find(x => x.code === code)?.label || code;
 }
 
-function buildLanguageKeyboard() {
+function buildLanguageKeyboard(userId) {
   const rows = [];
   for (let i = 0; i < SUPPORTED_LANGUAGES.length; i += 2) {
     rows.push(
@@ -353,12 +470,162 @@ function buildLanguageKeyboard() {
       }))
     );
   }
-
-  rows.push([
-    { text: "⬅️ Back", callback_data: "menu:open" }
-  ]);
-
+  rows.push([{ text: t(userId, "btn_back"), callback_data: "menu:open" }]);
   return { inline_keyboard: rows };
+}
+
+function buildCAKeyboard(userId) {
+  return {
+    inline_keyboard: [
+      [{ text: "Copy CA", copy_text: { text: TOKEN_CA } }],
+      [{ text: t(userId, "btn_website"), url: WEBSITE_URL }],
+      [
+        { text: t(userId, "btn_language"), callback_data: "lang:open" },
+        { text: t(userId, "btn_menu"), callback_data: "menu:open" }
+      ]
+    ]
+  };
+}
+
+function buildMainMenuKeyboard(userId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: t(userId, "btn_ca"), callback_data: "menu:ca" },
+        { text: t(userId, "btn_website"), callback_data: "menu:website" }
+      ],
+      [
+        { text: t(userId, "btn_status"), callback_data: "menu:status" },
+        { text: t(userId, "btn_admin"), callback_data: "menu:admin" }
+      ],
+      [
+        { text: t(userId, "btn_trading"), callback_data: "tradepanel:open" },
+        { text: t(userId, "btn_language"), callback_data: "lang:open" }
+      ]
+    ]
+  };
+}
+
+function buildTradingPanelKeyboard(userId) {
+  const trading = getTradingRuntime();
+
+  return {
+    inline_keyboard: [
+      [{ text: t(userId, "btn_scan_ca"), callback_data: "scan:start" }],
+      [
+        { text: t(userId, "btn_trade_status"), callback_data: "trade:show_status" },
+        { text: t(userId, "btn_wallets"), callback_data: "trade:show_wallets" }
+      ],
+      [
+        { text: t(userId, "btn_add_leader"), callback_data: "level4:add_leader_prompt" },
+        { text: t(userId, "btn_add_follower"), callback_data: "level4:add_follower_prompt" }
+      ],
+      [
+        { text: t(userId, "btn_link_copy"), callback_data: "level4:link_copy_prompt" },
+        { text: t(userId, "btn_top_leaders"), callback_data: "level4:top_leaders" }
+      ],
+      [{ text: t(userId, "btn_copy_plan"), callback_data: "level4:copy_plan_prompt" }],
+      [
+        {
+          text: trading.enabled ? t(userId, "btn_trading_on") : t(userId, "btn_trading_off"),
+          callback_data: "trade:toggle_enabled"
+        },
+        {
+          text: trading.killSwitch ? t(userId, "btn_kill_on") : t(userId, "btn_kill_off"),
+          callback_data: "trade:toggle_kill"
+        }
+      ],
+      [
+        { text: t(userId, "btn_mode", trading.mode), callback_data: "trade:cycle_mode" },
+        { text: t(userId, "btn_buy_min", trading.buybotAlertMinUsd), callback_data: "trade:buymin_up" }
+      ],
+      [
+        { text: t(userId, "btn_language"), callback_data: "lang:open" },
+        { text: t(userId, "btn_menu"), callback_data: "menu:open" }
+      ],
+      [{ text: t(userId, "btn_close"), callback_data: "tradepanel:close" }]
+    ]
+  };
+}
+
+function buildAdminKeyboard(config, userId) {
+  const trading = getTradingRuntime();
+
+  return {
+    inline_keyboard: [
+      [
+        { text: t(userId, "btn_trading"), callback_data: "tradepanel:open" },
+        { text: t(userId, "btn_language"), callback_data: "lang:open" }
+      ],
+      [
+        {
+          text: config.quietMode ? "Quiet: ON" : "Quiet: OFF",
+          callback_data: "admin:toggle_quiet"
+        },
+        {
+          text: config.autoSelfTuning ? "Self-tuning: ON" : "Self-tuning: OFF",
+          callback_data: "admin:toggle_self_tuning"
+        }
+      ],
+      [
+        {
+          text: config.xWatcherEnabled ? "X watcher: ON" : "X watcher: OFF",
+          callback_data: "admin:toggle_x"
+        },
+        {
+          text: config.youtubeWatcherEnabled ? "YT watcher: ON" : "YT watcher: OFF",
+          callback_data: "admin:toggle_youtube"
+        }
+      ],
+      [
+        {
+          text: config.buybotEnabled ? "Buybot: ON" : "Buybot: OFF",
+          callback_data: "admin:toggle_buybot"
+        }
+      ],
+      [
+        {
+          text: trading.enabled ? "Trading: ON" : "Trading: OFF",
+          callback_data: "trade:toggle_enabled"
+        },
+        {
+          text: trading.killSwitch ? "Kill switch: ON" : "Kill switch: OFF",
+          callback_data: "trade:toggle_kill"
+        }
+      ],
+      [{ text: t(userId, "btn_menu"), callback_data: "menu:open" }]
+    ]
+  };
+}
+
+function buildProposalKeyboard(proposalId, userId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: t(userId, "btn_approve"), callback_data: `proposal:approve:${proposalId}` },
+        { text: t(userId, "btn_reject"), callback_data: `proposal:reject:${proposalId}` }
+      ],
+      [
+        { text: t(userId, "btn_language"), callback_data: "lang:open" },
+        { text: t(userId, "btn_menu"), callback_data: "menu:open" }
+      ]
+    ]
+  };
+}
+
+function buildScanResultKeyboard(userId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: t(userId, "btn_create_proposal"), callback_data: "scan:create_proposal" },
+        { text: t(userId, "btn_cancel"), callback_data: "scan:cancel" }
+      ],
+      [
+        { text: t(userId, "btn_language"), callback_data: "lang:open" },
+        { text: t(userId, "btn_menu"), callback_data: "menu:open" }
+      ]
+    ]
+  };
 }
 
 async function tg(method, body = {}) {
@@ -442,9 +709,7 @@ async function askChiikawa({
 }) {
   const res = await fetch(CHIIKAWA_AI_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       message,
       userId,
@@ -463,1381 +728,6 @@ async function askChiikawa({
   }
 
   return data.reply || "Chiikawa got quiet... 🥺";
-}
-
-function isCARequest(text) {
-  const lower = cleanLower(text);
-  return (
-    lower === "ca" ||
-    lower === "ca?" ||
-    lower.includes("contract") ||
-    lower.includes("контракт")
-  );
-}
-
-function isWebsiteRequest(text) {
-  const lower = cleanLower(text);
-  return (
-    lower === "website" ||
-    lower.includes("site") ||
-    lower.includes("сайт") ||
-    lower.includes("ссылка")
-  );
-}
-
-function buildCAKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        {
-          text: "Copy CA",
-          copy_text: { text: TOKEN_CA }
-        }
-      ],
-      [
-        {
-          text: "Website",
-          url: WEBSITE_URL
-        }
-      ],
-      [
-        { text: "🌐 Language", callback_data: "lang:open" },
-        { text: "📋 Menu", callback_data: "menu:open" }
-      ]
-    ]
-  };
-}
-
-function buildMainMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "CA", callback_data: "menu:ca" },
-        { text: "Website", callback_data: "menu:website" }
-      ],
-      [
-        { text: "Status", callback_data: "menu:status" },
-        { text: "Admin", callback_data: "menu:admin" }
-      ],
-      [
-        { text: "🎛 Trading", callback_data: "tradepanel:open" },
-        { text: "🌐 Language", callback_data: "lang:open" }
-      ]
-    ]
-  };
-}
-
-function buildTradingPanelKeyboard() {
-  const trading = getTradingRuntime();
-
-  return {
-    inline_keyboard: [
-      [
-        { text: "🔍 Scan CA", callback_data: "scan:start" }
-      ],
-      [
-        { text: "📊 Trade Status", callback_data: "trade:show_status" },
-        { text: "👛 Wallets", callback_data: "trade:show_wallets" }
-      ],
-      [
-        {
-          text: trading.enabled ? "⚙️ Trading ON" : "⚙️ Trading OFF",
-          callback_data: "trade:toggle_enabled"
-        },
-        {
-          text: trading.killSwitch ? "🛑 Kill ON" : "🛑 Kill OFF",
-          callback_data: "trade:toggle_kill"
-        }
-      ],
-      [
-        {
-          text: `🔁 Mode: ${trading.mode}`,
-          callback_data: "trade:cycle_mode"
-        },
-        {
-          text: `💰 Buy Min: $${trading.buybotAlertMinUsd}`,
-          callback_data: "trade:buymin_up"
-        }
-      ],
-      [
-        { text: "🌐 Language", callback_data: "lang:open" },
-        { text: "📋 Menu", callback_data: "menu:open" }
-      ],
-      [
-        { text: "❎ Close", callback_data: "tradepanel:close" }
-      ]
-    ]
-  };
-}
-
-function buildAdminKeyboard(config) {
-  const trading = getTradingRuntime();
-
-  return {
-    inline_keyboard: [
-      [
-        { text: "🎛 Trading Panel", callback_data: "tradepanel:open" },
-        { text: "🌐 Language", callback_data: "lang:open" }
-      ],
-      [
-        {
-          text: config.quietMode ? "Quiet: ON" : "Quiet: OFF",
-          callback_data: "admin:toggle_quiet"
-        },
-        {
-          text: config.autoSelfTuning ? "Self-tuning: ON" : "Self-tuning: OFF",
-          callback_data: "admin:toggle_self_tuning"
-        }
-      ],
-      [
-        {
-          text: config.xWatcherEnabled ? "X watcher: ON" : "X watcher: OFF",
-          callback_data: "admin:toggle_x"
-        },
-        {
-          text: config.youtubeWatcherEnabled ? "YT watcher: ON" : "YT watcher: OFF",
-          callback_data: "admin:toggle_youtube"
-        }
-      ],
-      [
-        {
-          text: config.buybotEnabled ? "Buybot: ON" : "Buybot: OFF",
-          callback_data: "admin:toggle_buybot"
-        }
-      ],
-      [
-        {
-          text: trading.enabled ? "Trading: ON" : "Trading: OFF",
-          callback_data: "trade:toggle_enabled"
-        },
-        {
-          text: trading.killSwitch ? "Kill switch: ON" : "Kill switch: OFF",
-          callback_data: "trade:toggle_kill"
-        }
-      ],
-      [
-        { text: "📋 Menu", callback_data: "menu:open" }
-      ]
-    ]
-  };
-}
-
-function buildProposalKeyboard(proposalId) {
-  return {
-    inline_keyboard: [
-      [
-        { text: "✅ Approve", callback_data: `proposal:approve:${proposalId}` },
-        { text: "❌ Reject", callback_data: `proposal:reject:${proposalId}` }
-      ],
-      [
-        { text: "🌐 Language", callback_data: "lang:open" },
-        { text: "📋 Menu", callback_data: "menu:open" }
-      ]
-    ]
-  };
-}
-
-function buildScanResultKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "✅ Create proposal", callback_data: "scan:create_proposal" },
-        { text: "❌ Cancel", callback_data: "scan:cancel" }
-      ],
-      [
-        { text: "🌐 Language", callback_data: "lang:open" },
-        { text: "📋 Menu", callback_data: "menu:open" }
-      ]
-    ]
-  };
-}
-
-async function sendMainMenu(chatId, replyToMessageId = null, userId = null) {
-  return sendTelegramMessage(
-    chatId,
-    t(userId, "menu_title"),
-    replyToMessageId,
-    { reply_markup: buildMainMenuKeyboard() }
-  );
-}
-
-async function sendAdminPanel(chatId, replyToMessageId = null, userId = null) {
-  const config = await getRuntimeConfig();
-  const trading = getTradingRuntime();
-
-  return sendTelegramMessage(
-    chatId,
-    t(userId, "admin_panel_title", config, trading),
-    replyToMessageId,
-    { reply_markup: buildAdminKeyboard(config) }
-  );
-}
-
-async function sendTradingPanel(chatId, replyToMessageId = null, userId = null) {
-  const trading = getTradingRuntime();
-
-  return sendTelegramMessage(
-    chatId,
-    t(userId, "trading_panel_title", trading),
-    replyToMessageId,
-    { reply_markup: buildTradingPanelKeyboard() }
-  );
-}
-
-function shouldRespond(message) {
-  const text = normalizeText(message.text);
-  if (!text) return false;
-
-  if (text.startsWith("/start")) return true;
-  if (text.startsWith("/help")) return true;
-  if (text.startsWith("/menu")) return true;
-  if (text.startsWith("/admin")) return true;
-  if (text.startsWith("/tradepanel")) return true;
-  if (text.startsWith("/status")) return true;
-  if (text.startsWith("/trade_status")) return true;
-  if (text.startsWith("/trade_mode")) return true;
-  if (text.startsWith("/watch_wallet")) return true;
-  if (text.startsWith("/unwatch_wallet")) return true;
-  if (text.startsWith("/wallets")) return true;
-  if (text.startsWith("/wallet_score")) return true;
-  if (text.startsWith("/kill_switch")) return true;
-  if (text.startsWith("/trading_on")) return true;
-  if (text.startsWith("/trading_off")) return true;
-  if (text.startsWith("/setbuy")) return true;
-  if (text.startsWith("/propose")) return true;
-  if (text.startsWith("/scan_ca")) return true;
-  if (text.startsWith("/language")) return true;
-  if (text.startsWith("/ca")) return true;
-  if (text.startsWith("/website")) return true;
-  if (text.startsWith("/add_leader")) return true;
-  if (text.startsWith("/add_follower")) return true;
-  if (text.startsWith("/link_copy")) return true;
-  if (text.startsWith("/top_leaders")) return true;
-  if (text.startsWith("/copy_plan")) return true;
-
-  if (isCARequest(text)) return true;
-  if (isWebsiteRequest(text)) return true;
-
-  if (isPrivateChat(message)) return true;
-  if (mentionsBotUsername(text)) return true;
-  if (mentionsBotByName(text)) return true;
-  if (isReplyToBot(message)) return true;
-  if (message.chat?.id && isChatActive(message.chat.id)) return true;
-
-  return false;
-}
-
-function isTradingCommand(text) {
-  const lower = cleanLower(text);
-  const tradingPrefixes = [
-    "/watch_wallet",
-    "/unwatch_wallet",
-    "/wallets",
-    "/wallet_score",
-    "/trade_status",
-    "/trade_mode",
-    "/kill_switch",
-    "/trading_on",
-    "/trading_off",
-    "/setbuy",
-    "/propose",
-    "/scan_ca",
-    "/tradepanel",
-    "/add_leader",
-    "/add_follower",
-    "/link_copy",
-    "/top_leaders",
-    "/copy_plan"
-  ];
-
-  return tradingPrefixes.some(cmd => lower.startsWith(cmd));
-}
-
-async function maybeRejectTradingCommandInGroup(message) {
-  const text = normalizeText(message.text);
-  if (!text.startsWith("/")) return false;
-  if (!isTradingCommand(text)) return false;
-  if (isPrivateChat(message)) return false;
-
-  await sendTelegramMessage(
-    message.chat.id,
-    t(message.from?.id, "private_only_trading"),
-    message.message_id
-  );
-  return true;
-}
-
-function parseProposeCommand(text) {
-  const parts = String(text || "").trim().split(/\s+/);
-
-  if (parts.length < 3) {
-    return {
-      ok: false,
-      error: "Usage: /propose <token_name> <solana_ca>"
-    };
-  }
-
-  return {
-    ok: true,
-    tokenName: parts[1],
-    ca: parts[2]
-  };
-}
-
-async function handleScanByCA(chatId, userId, messageId, tokenNameHint, ca) {
-  await sendTyping(chatId);
-
-  const dossierResult = await buildTokenDossier(ca, tokenNameHint || "");
-
-  if (!dossierResult.ok) {
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "scan_failed", dossierResult.error),
-      messageId
-    );
-    return;
-  }
-
-  const dossier = dossierResult.dossier;
-  setLatestScan(userId, dossier);
-  clearPendingAdminAction(userId);
-
-  await sendTelegramMessage(
-    chatId,
-    t(userId, "scan_result_title", dossier),
-    messageId,
-    { reply_markup: buildScanResultKeyboard() }
-  );
-}
-
-async function handleProposalApprove(callbackQuery, proposalId) {
-  const proposal = getProposal(proposalId);
-  const userId = callbackQuery.from?.id;
-
-  if (!proposal) {
-    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
-    return true;
-  }
-
-  if (proposal.status !== "pending") {
-    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_already_processed"));
-    return true;
-  }
-
-  const execution = await executeTradeMock(proposal);
-
-  if (!execution.ok) {
-    updateProposal(proposalId, {
-      status: "failed",
-      execution
-    });
-
-    await answerCallbackQuery(callbackQuery.id, "Execution failed");
-    await sendTelegramMessage(
-      callbackQuery.message.chat.id,
-      t(userId, "execution_failed", proposalId),
-      callbackQuery.message.message_id
-    );
-    return true;
-  }
-
-  updateProposal(proposalId, {
-    status: "approved",
-    execution
-  });
-
-  await answerCallbackQuery(callbackQuery.id, "Trade executed");
-
-  const publicPost = formatPublicBuyPost(proposal, execution);
-
-  const sent = await sendTelegramMessage(FORCED_GROUP_CHAT_ID, publicPost);
-
-  try {
-    await tg("pinChatMessage", {
-      chat_id: FORCED_GROUP_CHAT_ID,
-      message_id: sent.message_id,
-      disable_notification: true
-    });
-  } catch (error) {
-    console.error("pinChatMessage failed:", error.message);
-  }
-
-  await sendTelegramMessage(
-    callbackQuery.message.chat.id,
-    t(userId, "proposal_approved", proposal, execution),
-    callbackQuery.message.message_id,
-    { reply_markup: buildProposalKeyboard(proposalId) }
-  );
-
-  return true;
-}
-
-async function handleProposalReject(callbackQuery, proposalId) {
-  const proposal = getProposal(proposalId);
-  const userId = callbackQuery.from?.id;
-
-  if (!proposal) {
-    await answerCallbackQuery(callbackQuery.id, t(userId, "proposal_not_found"));
-    return true;
-  }
-
-  updateProposal(proposalId, {
-    status: "rejected"
-  });
-
-  await answerCallbackQuery(callbackQuery.id, "Rejected");
-  await sendTelegramMessage(
-    callbackQuery.message.chat.id,
-    t(userId, "proposal_rejected", proposal),
-    callbackQuery.message.message_id,
-    { reply_markup: buildMainMenuKeyboard() }
-  );
-
-  return true;
-}
-
-async function handleLanguageCallback(callbackQuery) {
-  const data = callbackQuery.data || "";
-  const chatId = callbackQuery.message?.chat?.id;
-  const messageId = callbackQuery.message?.message_id;
-  const userId = callbackQuery.from?.id;
-
-  if (!chatId) return false;
-  if (!data.startsWith("lang:")) return false;
-
-  if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-    await answerCallbackQuery(callbackQuery.id, "Private chat only");
-    return true;
-  }
-
-  if (data === "lang:open") {
-    await answerCallbackQuery(callbackQuery.id, "Language");
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "language_prompt"),
-      messageId,
-      { reply_markup: buildLanguageKeyboard() }
-    );
-    return true;
-  }
-
-  if (data.startsWith("lang:set:")) {
-    const langCode = data.split(":")[2];
-    if (!SUPPORTED_LANGUAGES.find(x => x.code === langCode)) {
-      await answerCallbackQuery(callbackQuery.id, "Unknown language");
-      return true;
-    }
-
-    setUserLanguage(userId, langCode);
-    await answerCallbackQuery(callbackQuery.id, getLanguageLabel(langCode));
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "language_set", getLanguageLabel(langCode)),
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
-    );
-    return true;
-  }
-
-  return false;
-}
-
-async function handleTradePanelCallback(callbackQuery) {
-  const data = callbackQuery.data || "";
-  const chatId = callbackQuery.message?.chat?.id;
-  const messageId = callbackQuery.message?.message_id;
-  const userId = callbackQuery.from?.id;
-
-  if (!chatId) return false;
-  if (!data.startsWith("tradepanel:")) return false;
-
-  if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-    await answerCallbackQuery(callbackQuery.id, "Private chat only");
-    return true;
-  }
-
-  if (!isAdmin(userId)) {
-    await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
-    return true;
-  }
-
-  if (data === "tradepanel:open") {
-    await answerCallbackQuery(callbackQuery.id, "Opening trading panel");
-    await sendTradingPanel(chatId, messageId, userId);
-    return true;
-  }
-
-  if (data === "tradepanel:close") {
-    await answerCallbackQuery(callbackQuery.id, t(userId, "close_panel"));
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "trading_panel_closed"),
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
-    );
-    return true;
-  }
-
-  return true;
-}
-
-async function handleMenuCallback(callbackQuery) {
-  const data = callbackQuery.data || "";
-  const chatId = callbackQuery.message?.chat?.id;
-  const messageId = callbackQuery.message?.message_id;
-  const userId = callbackQuery.from?.id;
-
-  if (!chatId) return false;
-  if (!data.startsWith("menu:")) return false;
-
-  if (data === "menu:open") {
-    await answerCallbackQuery(callbackQuery.id, "Menu");
-    await sendMainMenu(chatId, messageId, userId);
-    return true;
-  }
-
-  if (data === "menu:ca") {
-    await answerCallbackQuery(callbackQuery.id, "CA");
-    await sendTelegramMessage(
-      chatId,
-      `CA
-${TOKEN_CA}
-
-Website
-${WEBSITE_URL}`,
-      messageId,
-      { reply_markup: buildCAKeyboard() }
-    );
-    return true;
-  }
-
-  if (data === "menu:website") {
-    await answerCallbackQuery(callbackQuery.id, "Website");
-    await sendTelegramMessage(
-      chatId,
-      WEBSITE_URL,
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
-    );
-    return true;
-  }
-
-  if (data === "menu:status") {
-    const cfg = await getRuntimeConfig();
-    const trading = getTradingRuntime();
-
-    await answerCallbackQuery(callbackQuery.id, "Status");
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "runtime_status", cfg, trading),
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
-    );
-    return true;
-  }
-
-  if (data === "menu:admin") {
-    if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-      await answerCallbackQuery(callbackQuery.id, "Private chat only");
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
-      return true;
-    }
-
-    await answerCallbackQuery(callbackQuery.id, "Admin");
-    await sendAdminPanel(chatId, messageId, userId);
-    return true;
-  }
-
-  return false;
-}
-
-async function handleScanCallback(callbackQuery) {
-  const data = callbackQuery.data || "";
-  const chatId = callbackQuery.message?.chat?.id;
-  const messageId = callbackQuery.message?.message_id;
-  const userId = callbackQuery.from?.id;
-  const userName = getDisplayName(callbackQuery.from);
-
-  if (!chatId) return false;
-  if (!data.startsWith("scan:")) return false;
-
-  if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-    await answerCallbackQuery(callbackQuery.id, "Private chat only");
-    return true;
-  }
-
-  if (!isAdmin(userId)) {
-    await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
-    return true;
-  }
-
-  if (data === "scan:start") {
-    setPendingAdminAction(userId, { type: "scan_ca" });
-    await answerCallbackQuery(callbackQuery.id, "Waiting for CA");
-    await sendTelegramMessage(chatId, t(userId, "waiting_for_ca"), messageId);
-    return true;
-  }
-
-  if (data === "scan:cancel") {
-    clearPendingAdminAction(userId);
-    clearLatestScan(userId);
-    await answerCallbackQuery(callbackQuery.id, "Cancelled");
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "scan_cancelled"),
-      messageId,
-      { reply_markup: buildTradingPanelKeyboard() }
-    );
-    return true;
-  }
-
-  if (data === "scan:create_proposal") {
-    const latest = getLatestScan(userId);
-
-    if (!latest?.dossier) {
-      await answerCallbackQuery(callbackQuery.id, "No scan data");
-      await sendTelegramMessage(chatId, t(userId, "no_scan_data"), messageId);
-      return true;
-    }
-
-    const dossier = latest.dossier;
-
-    const proposal = createProposal({
-      token: dossier.token,
-      ca: dossier.ca,
-      reason: `Scanned via admin panel. Confidence ${dossier.confidence}/95, liquidity ${Math.round(dossier.liquidityUsd).toLocaleString("en-US")} USD, volume ${Math.round(dossier.volumeH24).toLocaleString("en-US")} USD.`,
-      score: dossier.confidence,
-      dossier,
-      createdBy: userName
-    });
-
-    await answerCallbackQuery(callbackQuery.id, "Proposal created");
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "proposal_created", dossier, proposal),
-      messageId,
-      { reply_markup: buildProposalKeyboard(proposal.id) }
-    );
-
-    return true;
-  }
-
-  return false;
-}
-
-async function formatLevel4StatusText() {
-  const health = await level4Kernel.healthCheck();
-  return `Level4:
-initialized: ${health.initialized}
-ok: ${health.ok}
-writable: ${health.storage?.writable}
-dir: ${health.storage?.dataDir || "n/a"}`;
-}
-
-async function formatLevel4WalletsText(userId) {
-  const wallets = await level4Kernel.wallets.listWallets();
-  if (!wallets.length) return t(userId, "level4_wallets_empty");
-
-  return wallets.map((w, i) => {
-    return `${i + 1}. ${w.label || w.walletId}
-walletId: ${w.walletId}
-address: ${w.address}
-role: ${w.role || "n/a"}
-ownerUserId: ${w.ownerUserId || "n/a"}
-active: ${w.isActive}
-chain: ${w.chain || "solana"}`;
-  }).join("\n\n");
-}
-
-async function handleAdminAndTradingCallback(callbackQuery) {
-  const data = callbackQuery.data || "";
-  const chatId = callbackQuery.message?.chat?.id;
-  const messageId = callbackQuery.message?.message_id;
-  const userId = callbackQuery.from?.id;
-
-  if (!chatId) return false;
-
-  if (await handleLanguageCallback(callbackQuery)) return true;
-  if (await handleMenuCallback(callbackQuery)) return true;
-  if (await handleTradePanelCallback(callbackQuery)) return true;
-  if (await handleScanCallback(callbackQuery)) return true;
-
-  if (data.startsWith("proposal:")) {
-    if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-      await answerCallbackQuery(callbackQuery.id, "Private chat only");
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
-      return true;
-    }
-
-    const parts = data.split(":");
-    const action = parts[1];
-    const proposalId = parts[2];
-
-    if (action === "approve") return handleProposalApprove(callbackQuery, proposalId);
-    if (action === "reject") return handleProposalReject(callbackQuery, proposalId);
-    return true;
-  }
-
-  if (data.startsWith("trade:")) {
-    if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-      await answerCallbackQuery(callbackQuery.id, "Private chat only");
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
-      return true;
-    }
-
-    if (data === "trade:show_status") {
-      try {
-        const result = handleTradingAdminCallback(data);
-        const level4Text = await formatLevel4StatusText();
-
-        await answerCallbackQuery(callbackQuery.id, "Updated");
-        await sendTelegramMessage(
-          chatId,
-          `${result.message}
-
-${level4Text}`,
-          messageId,
-          { reply_markup: buildTradingPanelKeyboard() }
-        );
-        return true;
-      } catch (error) {
-        console.error("trade:show_status error:", error.message);
-        await answerCallbackQuery(callbackQuery.id, "Failed");
-        await sendTelegramMessage(
-          chatId,
-          t(userId, "level4_status_error", error.message),
-          messageId,
-          { reply_markup: buildTradingPanelKeyboard() }
-        );
-        return true;
-      }
-    }
-
-    if (data === "trade:show_wallets") {
-      try {
-        const text = await formatLevel4WalletsText(userId);
-        await answerCallbackQuery(callbackQuery.id, "Updated");
-        await sendTelegramMessage(
-          chatId,
-          text,
-          messageId,
-          { reply_markup: buildTradingPanelKeyboard() }
-        );
-        return true;
-      } catch (error) {
-        console.error("trade:show_wallets error:", error.message);
-        await answerCallbackQuery(callbackQuery.id, "Failed");
-        await sendTelegramMessage(
-          chatId,
-          t(userId, "level4_wallets_error", error.message),
-          messageId,
-          { reply_markup: buildTradingPanelKeyboard() }
-        );
-        return true;
-      }
-    }
-
-    const result = handleTradingAdminCallback(data);
-    if (!result.ok) {
-      await answerCallbackQuery(callbackQuery.id, "Failed");
-      return true;
-    }
-
-    const isTradingPanelAction =
-      data === "trade:toggle_enabled" ||
-      data === "trade:toggle_kill" ||
-      data === "trade:cycle_mode" ||
-      data === "trade:buymin_up";
-
-    await answerCallbackQuery(callbackQuery.id, "Updated");
-
-    if (isTradingPanelAction) {
-      await sendTradingPanel(chatId, messageId, userId);
-    } else {
-      const config = await getRuntimeConfig();
-      await sendTelegramMessage(
-        chatId,
-        result.message,
-        messageId,
-        { reply_markup: buildAdminKeyboard(config) }
-      );
-    }
-
-    return true;
-  }
-
-  if (!data.startsWith("admin:")) return false;
-
-  if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
-    await answerCallbackQuery(callbackQuery.id, "Private chat only");
-    return true;
-  }
-
-  if (!isAdmin(userId)) {
-    await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
-    return true;
-  }
-
-  try {
-    const current = await getRuntimeConfig();
-    let nextPatch = null;
-
-    if (data === "admin:toggle_quiet") {
-      nextPatch = { quietMode: !current.quietMode };
-    } else if (data === "admin:toggle_self_tuning") {
-      nextPatch = { autoSelfTuning: !current.autoSelfTuning };
-    } else if (data === "admin:toggle_x") {
-      nextPatch = { xWatcherEnabled: !current.xWatcherEnabled };
-    } else if (data === "admin:toggle_youtube") {
-      nextPatch = { youtubeWatcherEnabled: !current.youtubeWatcherEnabled };
-    } else if (data === "admin:toggle_buybot") {
-      nextPatch = { buybotEnabled: !current.buybotEnabled };
-    }
-
-    if (nextPatch) {
-      const res = await fetch(`${AI_SERVER_BASE_URL}/runtime/config`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          secret: ADMIN_SECRET,
-          patch: nextPatch
-        })
-      });
-
-      const payload = await res.json();
-      if (!payload?.ok) throw new Error(payload?.error || "runtime update failed");
-    }
-
-    await answerCallbackQuery(callbackQuery.id, "Updated");
-    await sendAdminPanel(chatId, messageId, userId);
-    return true;
-  } catch (error) {
-    console.error("Admin callback error:", error.message);
-    await answerCallbackQuery(callbackQuery.id, "Update failed");
-    return true;
-  }
-}
-
-async function handlePendingAdminInput(message) {
-  const userId = String(message.from?.id || "");
-  const pending = getPendingAdminAction(userId);
-
-  if (!pending) return false;
-  if (!isPrivateChat(message)) return false;
-  if (!isAdmin(userId)) return false;
-
-  const text = normalizeText(message.text);
-
-  if (pending.type === "scan_ca") {
-    if (!isProbablySolanaAddress(text)) {
-      await sendTelegramMessage(
-        message.chat.id,
-        t(userId, "invalid_ca"),
-        message.message_id
-      );
-      return true;
-    }
-
-    await handleScanByCA(message.chat.id, userId, message.message_id, "", text);
-    return true;
-  }
-
-  return false;
-}
-
-async function handleCommand(message) {
-  const text = normalizeText(message.text);
-  const chatId = message.chat.id;
-  const userId = String(message.from?.id || "anonymous");
-  const messageId = message.message_id;
-  const userName = getDisplayName(message.from);
-  const username = message.from?.username || "";
-
-  if (
-    isTradingCommand(text) &&
-    !text.startsWith("/propose") &&
-    !text.startsWith("/scan_ca") &&
-    !text.startsWith("/tradepanel")
-  ) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "private_only_trading"), messageId);
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
-      return true;
-    }
-
-    const result = await handleTradingCommand(text, userName, level4Kernel);
-
-    await sendTelegramMessage(
-      chatId,
-      result.ok ? result.message : result.error,
-      messageId,
-      { reply_markup: buildTradingPanelKeyboard() }
-    );
-    return true;
-  }
-
-  if (text.startsWith("/tradepanel")) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "private_only_tradepanel"), messageId);
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
-      return true;
-    }
-
-    await sendTradingPanel(chatId, messageId, userId);
-    return true;
-  }
-
-  if (text.startsWith("/scan_ca")) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "private_only_scan"), messageId);
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
-      return true;
-    }
-
-    setPendingAdminAction(userId, { type: "scan_ca" });
-    await sendTelegramMessage(chatId, t(userId, "waiting_for_ca"), messageId);
-    return true;
-  }
-
-  if (text.startsWith("/language")) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "language_private_only"), messageId);
-      return true;
-    }
-
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "language_prompt"),
-      messageId,
-      { reply_markup: buildLanguageKeyboard() }
-    );
-    return true;
-  }
-
-  if (text.startsWith("/propose")) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "private_only_proposals"), messageId);
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
-      return true;
-    }
-
-    const parsed = parseProposeCommand(text);
-    if (!parsed.ok) {
-      await sendTelegramMessage(chatId, parsed.error, messageId);
-      return true;
-    }
-
-    await handleScanByCA(chatId, userId, messageId, parsed.tokenName, parsed.ca);
-    return true;
-  }
-
-  if (text.startsWith("/start")) {
-    const reply = await askChiikawa({
-      message: "Meet a new friend warmly.",
-      userId,
-      userName,
-      username,
-      chatId: String(chatId),
-      chatType: message.chat?.type || "",
-      source: "telegram"
-    });
-
-    greetedChats.add(chatId);
-    markChatActive(chatId);
-
-    await sendTelegramMessage(chatId, reply, messageId, {
-      reply_markup: buildMainMenuKeyboard()
-    });
-    return true;
-  }
-
-  if (text.startsWith("/help")) {
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "commands_help"),
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
-    );
-    return true;
-  }
-
-  if (text.startsWith("/menu")) {
-    await sendMainMenu(chatId, messageId, userId);
-    return true;
-  }
-
-  if (text.startsWith("/admin")) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "private_only_admin"), messageId);
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
-      return true;
-    }
-
-    await sendAdminPanel(chatId, messageId, userId);
-    return true;
-  }
-
-  if (text.startsWith("/status")) {
-    const cfg = await getRuntimeConfig();
-    const trading = getTradingRuntime();
-
-    await sendTelegramMessage(
-      chatId,
-      t(userId, "runtime_status", cfg, trading),
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
-    );
-    return true;
-  }
-
-  if (text.startsWith("/trade_status")) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "private_only_trade_status"), messageId);
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
-      return true;
-    }
-
-    try {
-      const level4Text = await formatLevel4StatusText();
-      await sendTelegramMessage(
-        chatId,
-        `${formatTradingStatus()}
-
-${level4Text}`,
-        messageId,
-        { reply_markup: buildTradingPanelKeyboard() }
-      );
-      return true;
-    } catch (error) {
-      await sendTelegramMessage(
-        chatId,
-        t(userId, "level4_status_error", error.message),
-        messageId,
-        { reply_markup: buildTradingPanelKeyboard() }
-      );
-      return true;
-    }
-  }
-
-  if (text.startsWith("/wallets")) {
-    if (!isPrivateChat(message)) {
-      await sendTelegramMessage(chatId, t(userId, "private_only_trading"), messageId);
-      return true;
-    }
-
-    if (!isAdmin(userId)) {
-      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
-      return true;
-    }
-
-    try {
-      const walletsText = await formatLevel4WalletsText(userId);
-      await sendTelegramMessage(
-        chatId,
-        walletsText,
-        messageId,
-        { reply_markup: buildTradingPanelKeyboard() }
-      );
-      return true;
-    } catch (error) {
-      await sendTelegramMessage(
-        chatId,
-        t(userId, "level4_wallets_error", error.message),
-        messageId,
-        { reply_markup: buildTradingPanelKeyboard() }
-      );
-      return true;
-    }
-  }
-
-  if (text.startsWith("/ca") || isCARequest(text)) {
-    await sendTelegramMessage(
-      chatId,
-      `CA
-${TOKEN_CA}
-
-Website
-${WEBSITE_URL}`,
-      messageId,
-      { reply_markup: buildCAKeyboard() }
-    );
-    return true;
-  }
-
-  if (text.startsWith("/website") || isWebsiteRequest(text)) {
-    await sendTelegramMessage(
-      chatId,
-      WEBSITE_URL,
-      messageId,
-      { reply_markup: buildMainMenuKeyboard() }
-    );
-    return true;
-  }
-
-  return false;
-}
-
-async function maybeSendGreeting(message) {
-  const chatId = message.chat.id;
-  const userId = String(message.from?.id || "anonymous");
-  const userName = getDisplayName(message.from);
-  const username = message.from?.username || "";
-
-  if (!greetedChats.has(chatId)) {
-    const greeting = await askChiikawa({
-      message: "Meet a new friend warmly.",
-      userId,
-      userName,
-      username,
-      chatId: String(chatId),
-      chatType: message.chat?.type || "",
-      source: "telegram"
-    });
-
-    greetedChats.add(chatId);
-    markChatActive(chatId);
-    await sendTelegramMessage(chatId, greeting, message.message_id);
-  }
-}
-
-function addressReplyForGroup(message, reply) {
-  if (!isGroupChat(message)) return reply;
-  const name = getDisplayName(message.from);
-  return `${name}, ${reply}`;
-}
-
-async function handleRegularMessage(message) {
-  const chatId = message.chat.id;
-  const userId = String(message.from?.id || "anonymous");
-  const messageId = message.message_id;
-  const text = normalizeText(message.text);
-  const userName = getDisplayName(message.from);
-  const username = message.from?.username || "";
-
-  if (!text || !shouldRespond(message)) return;
-
-  const runtimeConfig = await getRuntimeConfig();
-  const traffic = countTraffic(chatId);
-
-  if (runtimeConfig.quietMode) return;
-
-  if (runtimeConfig.autoSelfTuning && isGroupChat(message) && traffic > 18) {
-    const directlyAddressed =
-      mentionsBotUsername(text) ||
-      mentionsBotByName(text) ||
-      isReplyToBot(message);
-
-    if (!directlyAddressed) return;
-  }
-
-  await maybeSendGreeting(message);
-
-  if (Math.random() < 0.2) {
-    await sendTyping(chatId);
-  }
-  await sendTyping(chatId);
-
-  markChatActive(chatId);
-
-  let prompt = `Telegram message from ${userName} in a ${message.chat?.type || "unknown"} chat: ${text}
-
-Important:
-- Reply in ${getUserLanguage(userId)}.
-- In a group, answer this specific user directly and clearly.
-- No unnecessary repeated self-introductions.
-`;
-
-  if (!isPrivateChat(message) && isChatActive(chatId)) {
-    prompt += `
-The group conversation with you is currently active. Treat this as a direct continuation of dialogue with this same user when appropriate.`;
-  }
-
-  const reply = await askChiikawa({
-    message: prompt,
-    userId,
-    userName,
-    username,
-    chatId: String(chatId),
-    chatType: message.chat?.type || "",
-    source: "telegram"
-  });
-
-  await sendTelegramMessage(
-    chatId,
-    addressReplyForGroup(message, reply),
-    messageId,
-    { reply_markup: buildMainMenuKeyboard() }
-  );
-}
-
-async function handleMessage(message) {
-  if (!message || message.text == null) return;
-
-  try {
-    const pendingHandled = await handlePendingAdminInput(message);
-    if (pendingHandled) return;
-
-    const tradingRejectedInGroup = await maybeRejectTradingCommandInGroup(message);
-    if (tradingRejectedInGroup) return;
-
-    const wasCommandHandled = await handleCommand(message);
-    if (wasCommandHandled) return;
-
-    await handleRegularMessage(message);
-  } catch (error) {
-    console.error("handleMessage error:", error);
-
-    try {
-      await sendTelegramMessage(
-        message.chat.id,
-        t(message.from?.id, "stumble"),
-        message.message_id,
-        { reply_markup: buildMainMenuKeyboard() }
-      );
-    } catch (e) {
-      console.error("Failed to send fallback message:", e);
-    }
-  }
-}
-
-async function bootstrap() {
-  try {
-    await tg("deleteWebhook", { drop_pending_updates: false });
-  } catch (error) {
-    const code = error?.telegram?.error_code;
-    if (code !== 404) throw error;
-  }
-
-  const me = await tg("getMe");
-  botUsername = me.username || null;
-  botId = me.id || null;
-
-  console.log("Initializing Level 4 Trading Kernel...");
-  await level4Kernel.init();
-  const level4Health = await level4Kernel.healthCheck();
-  console.log("Level4 Health:", level4Health);
-
-  await setTelegramCommands();
-
-  console.log(`Telegram bot started as @${botUsername || "unknown_bot"}`);
-  console.log(`Using backend: ${CHIIKAWA_AI_URL}`);
-  console.log(`Forced group scope: ${FORCED_GROUP_CHAT_ID}`);
-}
-
-async function setTelegramCommands() {
-  const commands = [
-    { command: "start", description: "Start talking to Chiikawa" },
-    { command: "help", description: "Show help" },
-    { command: "menu", description: "Open menu" },
-    { command: "admin", description: "Open admin panel (private only)" },
-    { command: "tradepanel", description: "Open trading panel (private only)" },
-    { command: "status", description: "Show runtime status" },
-    { command: "trade_status", description: "Trading status (private only)" },
-    { command: "scan_ca", description: "Scan Solana CA (private only)" },
-    { command: "propose", description: "Create proposal from token + CA" },
-    { command: "language", description: "Choose interface language" },
-    { command: "ca", description: "Show contract" },
-    { command: "website", description: "Show website" }
-  ];
-
-  await tg("setMyCommands", { commands });
-
-  await tg("setMyCommands", {
-    commands,
-    scope: { type: "all_private_chats" }
-  });
-
-  await tg("setMyCommands", {
-    commands,
-    scope: { type: "all_group_chats" }
-  });
-
-  await tg("setMyCommands", {
-    commands,
-    scope: { type: "all_chat_administrators" }
-  });
-
-  await tg("setMyCommands", {
-    commands,
-    scope: {
-      type: "chat",
-      chat_id: FORCED_GROUP_CHAT_ID
-    }
-  });
-}
-
-async function pollLoop() {
-  while (true) {
-    try {
-      const updates = await tg("getUpdates", {
-        offset,
-        timeout: 25,
-        allowed_updates: ["message", "callback_query"]
-      });
-
-      for (const update of updates) {
-        offset = update.update_id + 1;
-
-        if (update.callback_query) {
-          const handled = await handleAdminAndTradingCallback(update.callback_query);
-          if (!handled) {
-            await answerCallbackQuery(update.callback_query.id, "");
-          }
-        }
-
-        if (update.message) {
-          await handleMessage(update.message);
-        }
-      }
-    } catch (error) {
-      const code = error?.telegram?.error_code;
-
-      if (code === 409) {
-        console.log("Another bot instance is polling. Waiting 15 seconds...");
-        await sleep(15000);
-        continue;
-      }
-
-      console.error("Polling error:", error);
-      await sleep(3000);
-    }
-  }
 }
 
 function normalizeText(value) {
@@ -1862,8 +752,7 @@ function mentionsBotUsername(text) {
 }
 
 function mentionsBotByName(text) {
-  const lower = cleanLower(text);
-  return lower.includes("chiikawa");
+  return cleanLower(text).includes("chiikawa");
 }
 
 function isReplyToBot(message) {
@@ -1932,12 +821,43 @@ function isAdmin(userId) {
   return ADMIN_IDS.includes(Number(userId));
 }
 
-(async () => {
-  try {
-    await bootstrap();
-    await pollLoop();
-  } catch (error) {
-    console.error("Fatal bot error:", error);
-    process.exit(1);
-  }
-})();
+function isCARequest(text) {
+  const lower = cleanLower(text);
+  return (
+    lower === "ca" ||
+    lower === "ca?" ||
+    lower.includes("contract") ||
+    lower.includes("контракт")
+  );
+}
+
+function isWebsiteRequest(text) {
+  const lower = cleanLower(text);
+  return (
+    lower === "website" ||
+    lower.includes("site") ||
+    lower.includes("сайт") ||
+    lower.includes("ссылка")
+  );
+}
+
+function shouldRespond(message) {
+  const text = normalizeText(message.text);
+  if (!text) return false;
+
+  const commandPrefixes = [
+    "/start", "/help", "/menu", "/admin", "/tradepanel", "/status",
+    "/trade_status", "/trade_mode", "/watch_wallet", "/unwatch_wallet",
+    "/wallets", "/wallet_score", "/kill_switch", "/trading_on",
+    "/trading_off", "/setbuy", "/propose", "/scan_ca", "/language",
+    "/ca", "/website", "/add_leader", "/add_follower", "/link_copy",
+    "/top_leaders", "/copy_plan"
+  ];
+
+  if (commandPrefixes.some(cmd => text.startsWith(cmd))) return true;
+  if (isCARequest(text)) return true;
+  if (isWebsiteRequest(text)) return true;
+  if (isPrivateChat(message)) return true;
+  if (mentionsBotUsername(text)) return true;
+  if (mentionsBotByName(text)) return true;
+  if (isReplyToBot
