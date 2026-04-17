@@ -58,7 +58,7 @@ const greetedChats = new Set();
 const pendingAdminActions = new Map();
 const latestScans = new Map();
 
-const LANG_FILE = path.resolve("./bot-language-settings.json");
+const LANG_FILE = path.resolve(__dirname, "./bot-language-settings.json");
 const DEFAULT_LANG = "en";
 
 const level4Kernel = new Level4TradingKernel({
@@ -214,7 +214,13 @@ killSwitch: ${trading.killSwitch}`,
     language_prompt: "🌐 Choose your language:",
     language_set: label => `Language set to: ${label}`,
     close_panel: "Closed",
-    trading_panel_closed: "Trading panel closed."
+    trading_panel_closed: "Trading panel closed.",
+    level4_wallets_empty: "No Level 4 wallets yet.",
+    level4_status_error: error => `Level 4 status error: ${error}`,
+    level4_wallets_error: error => `Level 4 wallets error: ${error}`,
+    menu_closed: "Menu closed.",
+    open_menu: "Open menu",
+    back_to_menu: "Back to menu"
   },
   ru: {
     commands_help: `Команды:
@@ -314,7 +320,13 @@ killSwitch: ${trading.killSwitch}`,
     language_prompt: "🌐 Выбери язык:",
     language_set: label => `Язык установлен: ${label}`,
     close_panel: "Закрыто",
-    trading_panel_closed: "Торговая панель закрыта."
+    trading_panel_closed: "Торговая панель закрыта.",
+    level4_wallets_empty: "В Level 4 пока нет кошельков.",
+    level4_status_error: error => `Ошибка статуса Level 4: ${error}`,
+    level4_wallets_error: error => `Ошибка кошельков Level 4: ${error}`,
+    menu_closed: "Меню закрыто.",
+    open_menu: "Открыть меню",
+    back_to_menu: "Назад в меню"
   }
 };
 
@@ -341,6 +353,11 @@ function buildLanguageKeyboard() {
       }))
     );
   }
+
+  rows.push([
+    { text: "⬅️ Back", callback_data: "menu:open" }
+  ]);
+
   return { inline_keyboard: rows };
 }
 
@@ -365,7 +382,7 @@ async function tg(method, body = {}) {
 async function sendTelegramMessage(chatId, text, replyToMessageId = null, extra = {}) {
   const payload = {
     chat_id: chatId,
-    text,
+    text: String(text || "").slice(0, 4096),
     allow_sending_without_reply: true,
     ...extra
   };
@@ -389,7 +406,7 @@ async function sendTyping(chatId) {
 async function answerCallbackQuery(callbackQueryId, text = "") {
   return tg("answerCallbackQuery", {
     callback_query_id: callbackQueryId,
-    text
+    text: String(text || "").slice(0, 180)
   });
 }
 
@@ -482,6 +499,10 @@ function buildCAKeyboard() {
           text: "Website",
           url: WEBSITE_URL
         }
+      ],
+      [
+        { text: "🌐 Language", callback_data: "lang:open" },
+        { text: "📋 Menu", callback_data: "menu:open" }
       ]
     ]
   };
@@ -497,6 +518,10 @@ function buildMainMenuKeyboard() {
       [
         { text: "Status", callback_data: "menu:status" },
         { text: "Admin", callback_data: "menu:admin" }
+      ],
+      [
+        { text: "🎛 Trading", callback_data: "tradepanel:open" },
+        { text: "🌐 Language", callback_data: "lang:open" }
       ]
     ]
   };
@@ -533,6 +558,10 @@ function buildTradingPanelKeyboard() {
           text: `💰 Buy Min: $${trading.buybotAlertMinUsd}`,
           callback_data: "trade:buymin_up"
         }
+      ],
+      [
+        { text: "🌐 Language", callback_data: "lang:open" },
+        { text: "📋 Menu", callback_data: "menu:open" }
       ],
       [
         { text: "❎ Close", callback_data: "tradepanel:close" }
@@ -585,6 +614,9 @@ function buildAdminKeyboard(config) {
           text: trading.killSwitch ? "Kill switch: ON" : "Kill switch: OFF",
           callback_data: "trade:toggle_kill"
         }
+      ],
+      [
+        { text: "📋 Menu", callback_data: "menu:open" }
       ]
     ]
   };
@@ -596,6 +628,10 @@ function buildProposalKeyboard(proposalId) {
       [
         { text: "✅ Approve", callback_data: `proposal:approve:${proposalId}` },
         { text: "❌ Reject", callback_data: `proposal:reject:${proposalId}` }
+      ],
+      [
+        { text: "🌐 Language", callback_data: "lang:open" },
+        { text: "📋 Menu", callback_data: "menu:open" }
       ]
     ]
   };
@@ -607,6 +643,10 @@ function buildScanResultKeyboard() {
       [
         { text: "✅ Create proposal", callback_data: "scan:create_proposal" },
         { text: "❌ Cancel", callback_data: "scan:cancel" }
+      ],
+      [
+        { text: "🌐 Language", callback_data: "lang:open" },
+        { text: "📋 Menu", callback_data: "menu:open" }
       ]
     ]
   };
@@ -669,6 +709,11 @@ function shouldRespond(message) {
   if (text.startsWith("/language")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/website")) return true;
+  if (text.startsWith("/add_leader")) return true;
+  if (text.startsWith("/add_follower")) return true;
+  if (text.startsWith("/link_copy")) return true;
+  if (text.startsWith("/top_leaders")) return true;
+  if (text.startsWith("/copy_plan")) return true;
 
   if (isCARequest(text)) return true;
   if (isWebsiteRequest(text)) return true;
@@ -697,7 +742,12 @@ function isTradingCommand(text) {
     "/setbuy",
     "/propose",
     "/scan_ca",
-    "/tradepanel"
+    "/tradepanel",
+    "/add_leader",
+    "/add_follower",
+    "/link_copy",
+    "/top_leaders",
+    "/copy_plan"
   ];
 
   return tradingPrefixes.some(cmd => lower.startsWith(cmd));
@@ -815,7 +865,8 @@ async function handleProposalApprove(callbackQuery, proposalId) {
   await sendTelegramMessage(
     callbackQuery.message.chat.id,
     t(userId, "proposal_approved", proposal, execution),
-    callbackQuery.message.message_id
+    callbackQuery.message.message_id,
+    { reply_markup: buildProposalKeyboard(proposalId) }
   );
 
   return true;
@@ -838,7 +889,8 @@ async function handleProposalReject(callbackQuery, proposalId) {
   await sendTelegramMessage(
     callbackQuery.message.chat.id,
     t(userId, "proposal_rejected", proposal),
-    callbackQuery.message.message_id
+    callbackQuery.message.message_id,
+    { reply_markup: buildMainMenuKeyboard() }
   );
 
   return true;
@@ -881,7 +933,8 @@ async function handleLanguageCallback(callbackQuery) {
     await sendTelegramMessage(
       chatId,
       t(userId, "language_set", getLanguageLabel(langCode)),
-      messageId
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
     );
     return true;
   }
@@ -916,11 +969,90 @@ async function handleTradePanelCallback(callbackQuery) {
 
   if (data === "tradepanel:close") {
     await answerCallbackQuery(callbackQuery.id, t(userId, "close_panel"));
-    await sendTelegramMessage(chatId, t(userId, "trading_panel_closed"), messageId);
+    await sendTelegramMessage(
+      chatId,
+      t(userId, "trading_panel_closed"),
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
+    );
     return true;
   }
 
   return true;
+}
+
+async function handleMenuCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+  const userId = callbackQuery.from?.id;
+
+  if (!chatId) return false;
+  if (!data.startsWith("menu:")) return false;
+
+  if (data === "menu:open") {
+    await answerCallbackQuery(callbackQuery.id, "Menu");
+    await sendMainMenu(chatId, messageId, userId);
+    return true;
+  }
+
+  if (data === "menu:ca") {
+    await answerCallbackQuery(callbackQuery.id, "CA");
+    await sendTelegramMessage(
+      chatId,
+      `CA
+${TOKEN_CA}
+
+Website
+${WEBSITE_URL}`,
+      messageId,
+      { reply_markup: buildCAKeyboard() }
+    );
+    return true;
+  }
+
+  if (data === "menu:website") {
+    await answerCallbackQuery(callbackQuery.id, "Website");
+    await sendTelegramMessage(
+      chatId,
+      WEBSITE_URL,
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
+    );
+    return true;
+  }
+
+  if (data === "menu:status") {
+    const cfg = await getRuntimeConfig();
+    const trading = getTradingRuntime();
+
+    await answerCallbackQuery(callbackQuery.id, "Status");
+    await sendTelegramMessage(
+      chatId,
+      t(userId, "runtime_status", cfg, trading),
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
+    );
+    return true;
+  }
+
+  if (data === "menu:admin") {
+    if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
+      await answerCallbackQuery(callbackQuery.id, "Private chat only");
+      return true;
+    }
+
+    if (!isAdmin(userId)) {
+      await answerCallbackQuery(callbackQuery.id, t(userId, "admins_only"));
+      return true;
+    }
+
+    await answerCallbackQuery(callbackQuery.id, "Admin");
+    await sendAdminPanel(chatId, messageId, userId);
+    return true;
+  }
+
+  return false;
 }
 
 async function handleScanCallback(callbackQuery) {
@@ -954,7 +1086,12 @@ async function handleScanCallback(callbackQuery) {
     clearPendingAdminAction(userId);
     clearLatestScan(userId);
     await answerCallbackQuery(callbackQuery.id, "Cancelled");
-    await sendTelegramMessage(chatId, t(userId, "scan_cancelled"), messageId);
+    await sendTelegramMessage(
+      chatId,
+      t(userId, "scan_cancelled"),
+      messageId,
+      { reply_markup: buildTradingPanelKeyboard() }
+    );
     return true;
   }
 
@@ -992,6 +1129,30 @@ async function handleScanCallback(callbackQuery) {
   return false;
 }
 
+async function formatLevel4StatusText() {
+  const health = await level4Kernel.healthCheck();
+  return `Level4:
+initialized: ${health.initialized}
+ok: ${health.ok}
+writable: ${health.storage?.writable}
+dir: ${health.storage?.dataDir || "n/a"}`;
+}
+
+async function formatLevel4WalletsText(userId) {
+  const wallets = await level4Kernel.wallets.listWallets();
+  if (!wallets.length) return t(userId, "level4_wallets_empty");
+
+  return wallets.map((w, i) => {
+    return `${i + 1}. ${w.label || w.walletId}
+walletId: ${w.walletId}
+address: ${w.address}
+role: ${w.role || "n/a"}
+ownerUserId: ${w.ownerUserId || "n/a"}
+active: ${w.isActive}
+chain: ${w.chain || "solana"}`;
+  }).join("\n\n");
+}
+
 async function handleAdminAndTradingCallback(callbackQuery) {
   const data = callbackQuery.data || "";
   const chatId = callbackQuery.message?.chat?.id;
@@ -1001,6 +1162,7 @@ async function handleAdminAndTradingCallback(callbackQuery) {
   if (!chatId) return false;
 
   if (await handleLanguageCallback(callbackQuery)) return true;
+  if (await handleMenuCallback(callbackQuery)) return true;
   if (await handleTradePanelCallback(callbackQuery)) return true;
   if (await handleScanCallback(callbackQuery)) return true;
 
@@ -1038,18 +1200,14 @@ async function handleAdminAndTradingCallback(callbackQuery) {
     if (data === "trade:show_status") {
       try {
         const result = handleTradingAdminCallback(data);
-        const health = await level4Kernel.healthCheck();
+        const level4Text = await formatLevel4StatusText();
 
         await answerCallbackQuery(callbackQuery.id, "Updated");
         await sendTelegramMessage(
           chatId,
           `${result.message}
 
-Level4:
-initialized: ${health.initialized}
-ok: ${health.ok}
-writable: ${health.storage?.writable}
-dir: ${health.storage?.dataDir || "n/a"}`,
+${level4Text}`,
           messageId,
           { reply_markup: buildTradingPanelKeyboard() }
         );
@@ -1057,24 +1215,19 @@ dir: ${health.storage?.dataDir || "n/a"}`,
       } catch (error) {
         console.error("trade:show_status error:", error.message);
         await answerCallbackQuery(callbackQuery.id, "Failed");
+        await sendTelegramMessage(
+          chatId,
+          t(userId, "level4_status_error", error.message),
+          messageId,
+          { reply_markup: buildTradingPanelKeyboard() }
+        );
         return true;
       }
     }
 
     if (data === "trade:show_wallets") {
       try {
-        const wallets = await level4Kernel.wallets.listWallets();
-        const text = wallets.length
-          ? wallets.map((w, i) => {
-              return `${i + 1}. ${w.label || w.walletId}
-walletId: ${w.walletId}
-address: ${w.address}
-role: ${w.role || "n/a"}
-active: ${w.isActive}
-chain: ${w.chain || "solana"}`;
-            }).join("\n\n")
-          : "No Level 4 wallets yet.";
-
+        const text = await formatLevel4WalletsText(userId);
         await answerCallbackQuery(callbackQuery.id, "Updated");
         await sendTelegramMessage(
           chatId,
@@ -1086,6 +1239,12 @@ chain: ${w.chain || "solana"}`;
       } catch (error) {
         console.error("trade:show_wallets error:", error.message);
         await answerCallbackQuery(callbackQuery.id, "Failed");
+        await sendTelegramMessage(
+          chatId,
+          t(userId, "level4_wallets_error", error.message),
+          messageId,
+          { reply_markup: buildTradingPanelKeyboard() }
+        );
         return true;
       }
     }
@@ -1222,56 +1381,7 @@ async function handleCommand(message) {
       return true;
     }
 
-    if (text.startsWith("/wallets")) {
-      try {
-        const wallets = await level4Kernel.wallets.listWallets();
-        const response = wallets.length
-          ? wallets.map((w, i) => {
-              return `${i + 1}. ${w.label || w.walletId}
-walletId: ${w.walletId}
-address: ${w.address}
-role: ${w.role || "n/a"}
-active: ${w.isActive}
-chain: ${w.chain || "solana"}`;
-            }).join("\n\n")
-          : "No Level 4 wallets yet.";
-
-        await sendTelegramMessage(
-          chatId,
-          response,
-          messageId,
-          { reply_markup: buildTradingPanelKeyboard() }
-        );
-        return true;
-      } catch (error) {
-        await sendTelegramMessage(chatId, `Wallets error: ${error.message}`, messageId);
-        return true;
-      }
-    }
-
-    if (text.startsWith("/trade_status")) {
-      try {
-        const health = await level4Kernel.healthCheck();
-        await sendTelegramMessage(
-          chatId,
-          `${formatTradingStatus()}
-
-Level4:
-initialized: ${health.initialized}
-ok: ${health.ok}
-writable: ${health.storage?.writable}
-dir: ${health.storage?.dataDir || "n/a"}`,
-          messageId,
-          { reply_markup: buildTradingPanelKeyboard() }
-        );
-        return true;
-      } catch (error) {
-        await sendTelegramMessage(chatId, `Status error: ${error.message}`, messageId);
-        return true;
-      }
-    }
-
-    const result = handleTradingCommand(text, userName);
+    const result = await handleTradingCommand(text, userName, level4Kernel);
 
     await sendTelegramMessage(
       chatId,
@@ -1406,7 +1516,8 @@ dir: ${health.storage?.dataDir || "n/a"}`,
     await sendTelegramMessage(
       chatId,
       t(userId, "runtime_status", cfg, trading),
-      messageId
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
     );
     return true;
   }
@@ -1423,22 +1534,54 @@ dir: ${health.storage?.dataDir || "n/a"}`,
     }
 
     try {
-      const health = await level4Kernel.healthCheck();
+      const level4Text = await formatLevel4StatusText();
       await sendTelegramMessage(
         chatId,
         `${formatTradingStatus()}
 
-Level4:
-initialized: ${health.initialized}
-ok: ${health.ok}
-writable: ${health.storage?.writable}
-dir: ${health.storage?.dataDir || "n/a"}`,
+${level4Text}`,
         messageId,
         { reply_markup: buildTradingPanelKeyboard() }
       );
       return true;
     } catch (error) {
-      await sendTelegramMessage(chatId, `Status error: ${error.message}`, messageId);
+      await sendTelegramMessage(
+        chatId,
+        t(userId, "level4_status_error", error.message),
+        messageId,
+        { reply_markup: buildTradingPanelKeyboard() }
+      );
+      return true;
+    }
+  }
+
+  if (text.startsWith("/wallets")) {
+    if (!isPrivateChat(message)) {
+      await sendTelegramMessage(chatId, t(userId, "private_only_trading"), messageId);
+      return true;
+    }
+
+    if (!isAdmin(userId)) {
+      await sendTelegramMessage(chatId, t(userId, "admins_only"), messageId);
+      return true;
+    }
+
+    try {
+      const walletsText = await formatLevel4WalletsText(userId);
+      await sendTelegramMessage(
+        chatId,
+        walletsText,
+        messageId,
+        { reply_markup: buildTradingPanelKeyboard() }
+      );
+      return true;
+    } catch (error) {
+      await sendTelegramMessage(
+        chatId,
+        t(userId, "level4_wallets_error", error.message),
+        messageId,
+        { reply_markup: buildTradingPanelKeyboard() }
+      );
       return true;
     }
   }
@@ -1458,7 +1601,12 @@ ${WEBSITE_URL}`,
   }
 
   if (text.startsWith("/website") || isWebsiteRequest(text)) {
-    await sendTelegramMessage(chatId, WEBSITE_URL, messageId);
+    await sendTelegramMessage(
+      chatId,
+      WEBSITE_URL,
+      messageId,
+      { reply_markup: buildMainMenuKeyboard() }
+    );
     return true;
   }
 
@@ -1579,7 +1727,8 @@ async function handleMessage(message) {
       await sendTelegramMessage(
         message.chat.id,
         t(message.from?.id, "stumble"),
-        message.message_id
+        message.message_id,
+        { reply_markup: buildMainMenuKeyboard() }
       );
     } catch (e) {
       console.error("Failed to send fallback message:", e);
@@ -1723,12 +1872,8 @@ function isReplyToBot(message) {
 
 function getDisplayName(user) {
   if (!user) return "friend";
-  return (
-    user.first_name ||
-    user.username ||
-    `${user.last_name || ""}`.trim() ||
-    "friend"
-  );
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  return fullName || user.username || "friend";
 }
 
 function markChatActive(chatId) {
