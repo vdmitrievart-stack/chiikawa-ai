@@ -1,15 +1,13 @@
-'use strict';
-
-const Level4StorageKeys = require('./Level4StorageKeys');
+import Level4StorageKeys from "./Level4StorageKeys.js";
 
 class Level4WalletRegistry {
   /**
    * @param {Object} deps
-   * @param {import('./Level4JsonStorage')} deps.storage
+   * @param {import('./Level4JsonStorage.js').default} deps.storage
    */
   constructor({ storage }) {
     if (!storage) {
-      throw new Error('Level4WalletRegistry requires storage');
+      throw new Error("Level4WalletRegistry requires storage");
     }
 
     this.storage = storage;
@@ -17,11 +15,15 @@ class Level4WalletRegistry {
   }
 
   async init() {
-    await this.storage.createIfMissing(this.collection, {
-      wallets: {},
-    }, {
-      schema: 'wallet-registry',
-    });
+    await this.storage.createIfMissing(
+      this.collection,
+      {
+        wallets: {}
+      },
+      {
+        schema: "wallet-registry"
+      }
+    );
   }
 
   async listWallets() {
@@ -35,29 +37,28 @@ class Level4WalletRegistry {
   }
 
   async upsertWallet(walletInput) {
-    if (!walletInput || typeof walletInput !== 'object') {
-      throw new Error('upsertWallet requires walletInput object');
+    if (!walletInput || typeof walletInput !== "object") {
+      throw new Error("upsertWallet requires walletInput object");
     }
 
-    const walletId = String(walletInput.walletId || walletInput.id || '').trim();
+    const walletId = String(walletInput.walletId || walletInput.id || "").trim();
     if (!walletId) {
-      throw new Error('walletId is required');
+      throw new Error("walletId is required");
     }
 
-    const address = String(walletInput.address || '').trim();
+    const address = String(walletInput.address || "").trim();
     if (!address) {
-      throw new Error('wallet address is required');
+      throw new Error("wallet address is required");
     }
 
-    const ownerUserId = walletInput.ownerUserId != null
-      ? String(walletInput.ownerUserId)
-      : null;
+    const ownerUserId =
+      walletInput.ownerUserId != null ? String(walletInput.ownerUserId) : null;
 
     const now = new Date().toISOString();
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.wallets ||= {};
 
         const prev = current.wallets[walletId] || null;
@@ -66,25 +67,25 @@ class Level4WalletRegistry {
           walletId,
           ownerUserId,
           address,
-          chain: walletInput.chain || 'solana',
+          chain: walletInput.chain || "solana",
           label: walletInput.label || prev?.label || null,
-          role: walletInput.role || prev?.role || 'trader',
-          tags: Array.isArray(walletInput.tags) ? walletInput.tags : (prev?.tags || []),
+          role: walletInput.role || prev?.role || "trader",
+          tags: Array.isArray(walletInput.tags) ? walletInput.tags : prev?.tags || [],
           isActive: walletInput.isActive !== false,
-          visibility: walletInput.visibility || prev?.visibility || 'private',
+          visibility: walletInput.visibility || prev?.visibility || "private",
           createdAt: prev?.createdAt || now,
           updatedAt: now,
           meta: {
             ...(prev?.meta || {}),
-            ...(walletInput.meta || {}),
-          },
+            ...(walletInput.meta || {})
+          }
         };
 
         return current;
       },
       {
         fallbackData: { wallets: {} },
-        meta: { schema: 'wallet-registry' },
+        meta: { schema: "wallet-registry" }
       }
     );
 
@@ -92,12 +93,12 @@ class Level4WalletRegistry {
   }
 
   async setWalletActive(walletId, isActive) {
-    const id = String(walletId || '').trim();
-    if (!id) throw new Error('walletId is required');
+    const id = String(walletId || "").trim();
+    if (!id) throw new Error("walletId is required");
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.wallets ||= {};
         const wallet = current.wallets[id];
         if (!wallet) throw new Error(`Wallet not found: ${id}`);
@@ -107,7 +108,7 @@ class Level4WalletRegistry {
         return current;
       },
       {
-        fallbackData: { wallets: {} },
+        fallbackData: { wallets: {} }
       }
     );
 
@@ -115,18 +116,18 @@ class Level4WalletRegistry {
   }
 
   async removeWallet(walletId) {
-    const id = String(walletId || '').trim();
-    if (!id) throw new Error('walletId is required');
+    const id = String(walletId || "").trim();
+    if (!id) throw new Error("walletId is required");
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.wallets ||= {};
         delete current.wallets[id];
         return current;
       },
       {
-        fallbackData: { wallets: {} },
+        fallbackData: { wallets: {} }
       }
     );
 
@@ -134,20 +135,20 @@ class Level4WalletRegistry {
   }
 
   async findWalletByAddress(address) {
-    const needle = String(address || '').trim().toLowerCase();
+    const needle = String(address || "").trim().toLowerCase();
     if (!needle) return null;
 
     const wallets = await this.listWallets();
-    return wallets.find((w) => String(w.address || '').toLowerCase() === needle) || null;
+    return wallets.find(w => String(w.address || "").toLowerCase() === needle) || null;
   }
 
   async listWalletsByOwner(ownerUserId) {
-    const ownerId = String(ownerUserId || '').trim();
+    const ownerId = String(ownerUserId || "").trim();
     if (!ownerId) return [];
 
     const wallets = await this.listWallets();
-    return wallets.filter((w) => String(w.ownerUserId || '') === ownerId);
+    return wallets.filter(w => String(w.ownerUserId || "") === ownerId);
   }
 }
 
-module.exports = Level4WalletRegistry;
+export default Level4WalletRegistry;
