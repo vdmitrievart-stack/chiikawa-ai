@@ -1,15 +1,13 @@
-'use strict';
-
-const Level4StorageKeys = require('./Level4StorageKeys');
+import Level4StorageKeys from "./Level4StorageKeys.js";
 
 class Level4ScoringEngine {
   /**
    * @param {Object} deps
-   * @param {import('./Level4JsonStorage')} deps.storage
+   * @param {import('./Level4JsonStorage.js').default} deps.storage
    */
   constructor({ storage }) {
     if (!storage) {
-      throw new Error('Level4ScoringEngine requires storage');
+      throw new Error("Level4ScoringEngine requires storage");
     }
 
     this.storage = storage;
@@ -17,23 +15,27 @@ class Level4ScoringEngine {
   }
 
   async init() {
-    await this.storage.createIfMissing(this.collection, {
-      leaders: {},
-      wallets: {},
-      tokens: {},
-      snapshots: [],
-    }, {
-      schema: 'scoring-engine',
-    });
+    await this.storage.createIfMissing(
+      this.collection,
+      {
+        leaders: {},
+        wallets: {},
+        tokens: {},
+        snapshots: []
+      },
+      {
+        schema: "scoring-engine"
+      }
+    );
   }
 
   async upsertLeaderMetrics(leaderId, metrics = {}) {
-    const id = String(leaderId || '').trim();
-    if (!id) throw new Error('leaderId is required');
+    const id = String(leaderId || "").trim();
+    if (!id) throw new Error("leaderId is required");
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.leaders ||= {};
         current.wallets ||= {};
         current.tokens ||= {};
@@ -50,7 +52,7 @@ class Level4ScoringEngine {
           consistency: Number(metrics.consistency ?? prev.consistency ?? 0),
           tradeCount: Number(metrics.tradeCount ?? prev.tradeCount ?? 0),
           lastTradeAt: metrics.lastTradeAt || prev.lastTradeAt || null,
-          updatedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
         };
 
         updated.score = this.computeLeaderScore(updated);
@@ -58,10 +60,10 @@ class Level4ScoringEngine {
 
         current.snapshots.unshift({
           snapshotId: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-          type: 'leader_score_update',
+          type: "leader_score_update",
           entityId: id,
           score: updated.score,
-          createdAt: new Date().toISOString(),
+          createdAt: new Date().toISOString()
         });
 
         current.snapshots = current.snapshots.slice(0, 2000);
@@ -70,7 +72,7 @@ class Level4ScoringEngine {
       },
       {
         fallbackData: { leaders: {}, wallets: {}, tokens: {}, snapshots: [] },
-        meta: { schema: 'scoring-engine' },
+        meta: { schema: "scoring-engine" }
       }
     );
 
@@ -82,7 +84,7 @@ class Level4ScoringEngine {
       leaders: {},
       wallets: {},
       tokens: {},
-      snapshots: [],
+      snapshots: []
     });
 
     return data.leaders?.[leaderId] || null;
@@ -93,7 +95,7 @@ class Level4ScoringEngine {
       leaders: {},
       wallets: {},
       tokens: {},
-      snapshots: [],
+      snapshots: []
     });
 
     return Object.values(data.leaders || {})
@@ -131,4 +133,4 @@ class Level4ScoringEngine {
   }
 }
 
-module.exports = Level4ScoringEngine;
+export default Level4ScoringEngine;
