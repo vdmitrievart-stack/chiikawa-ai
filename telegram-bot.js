@@ -6,6 +6,17 @@ import {
   handleTradingCommand,
   formatTradingStatus
 } from "./trading-admin.js";
+import {
+  createProposal,
+  getProposal,
+  updateProposal
+} from "./trade-proposal-engine.js";
+import {
+  buildTokenDossier,
+  formatDossierForAdmin,
+  formatPublicBuyPost
+} from "./token-dossier-engine.js";
+import { executeTradeMock } from "./trade-executor.js";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHIIKAWA_AI_URL =
@@ -334,6 +345,17 @@ function buildAdminKeyboard(config) {
   };
 }
 
+function buildProposalKeyboard(proposalId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ Approve", callback_data: `proposal:approve:${proposalId}` },
+        { text: "❌ Reject", callback_data: `proposal:reject:${proposalId}` }
+      ]
+    ]
+  };
+}
+
 async function sendMainMenu(chatId, replyToMessageId = null) {
   return sendTelegramMessage(
     chatId,
@@ -391,6 +413,7 @@ function shouldRespond(message) {
   if (text.startsWith("/trading_on")) return true;
   if (text.startsWith("/trading_off")) return true;
   if (text.startsWith("/setbuy")) return true;
+  if (text.startsWith("/propose")) return true;
   if (text.startsWith("/ca")) return true;
   if (text.startsWith("/website")) return true;
 
@@ -418,7 +441,8 @@ function isTradingCommand(text) {
     "/kill_switch",
     "/trading_on",
     "/trading_off",
-    "/setbuy"
+    "/setbuy",
+    "/propose"
   ];
 
   return tradingPrefixes.some(cmd => lower.startsWith(cmd));
@@ -439,6 +463,117 @@ async function maybeRejectTradingCommandInGroup(message) {
   return true;
 }
 
+function parseProposeCommand(text) {
+  const parts = String(text || "").trim().split(/\s+/);
+
+  if (parts.length < 3) {
+    return {
+      ok: false,
+      error: "Usage: /propose <token_name> <solana_ca>"
+    };
+  }
+
+  return {
+    ok: true,
+    tokenName: parts[1],
+    ca: parts[2]
+  };
+}
+
+async function handleProposalApprove(callbackQuery, proposalId) {
+  const proposal = getProposal(proposalId);
+
+  if (!proposal) {
+    await answerCallbackQuery(callbackQuery.id, "Proposal not found");
+    return true;
+  }
+
+  if (proposal.status !== "pending") {
+    await answerCallbackQuery(callbackQuery.id, "Already processed");
+    return true;
+  }
+
+  const execution = await executeTradeMock(proposal);
+
+  if (!execution.ok) {
+    updateProposal(proposalId, {
+      status: "failed",
+      execution
+    });
+
+    await answerCallbackQuery(callbackQuery.id, "Execution failed");
+    await sendTelegramMessage(
+      callbackQuery.message.chat.id,
+      `Execution failed for proposal ${proposalId}`,
+      callbackQuery.message.message_id
+    );
+    return true;
+  }
+
+  updateProposal(proposalId, {
+    status: "approved",
+    execution
+  });
+
+  await answerCallbackQuery(callbackQuery.id, "Trade executed");
+
+  const publicPost = formatPublicBuyPost(proposal, execution);
+
+  const sent = await sendTelegramMessage(
+    FORCED_GROUP_CHAT_ID,
+    publicPost
+  );
+
+  try {
+    await tg("pinChatMessage", {
+      chat_id: FORCED_GROUP_CHAT_ID,
+      message_id: sent.message_id,
+      disable_notification: true
+    });
+  } catch (error) {
+    console.error("pinChatMessage failed:", error.message);
+  }
+
+  await sendTelegramMessage(
+    callbackQuery.message.chat.id,
+    `✅ Proposal approved
+
+Token: ${proposal.token}
+CA: ${proposal.ca}
+TX: ${execution.tx}
+
+Public buy post sent to the group.`,
+    callbackQuery.message.message_id
+  );
+
+  return true;
+}
+
+async function handleProposalReject(callbackQuery, proposalId) {
+  const proposal = getProposal(proposalId);
+
+  if (!proposal) {
+    await answerCallbackQuery(callbackQuery.id, "Proposal not found");
+    return true;
+  }
+
+  updateProposal(proposalId, {
+    status: "rejected"
+  });
+
+  await answerCallbackQuery(callbackQuery.id, "Rejected");
+  await sendTelegramMessage(
+    callbackQuery.message.chat.id,
+    `❌ Proposal rejected
+
+Token: ${proposal.token}
+CA: ${proposal.ca}`,
+    callbackQuery.message.message_id
+  );
+
+  return true;
+}
+
 async function handleAdminAndTradingCallback(callbackQuery) {
   const data = callbackQuery.data || "";
   const chatId = callbackQuery.message?.chat?.id;
@@ -446,6 +581,32 @@ async function handleAdminAndTradingCallback(callbackQuery) {
   const userId = callbackQuery.from?.id;
 
   if (!chatId) return false;
+
+  if (data.startsWith("proposal:")) {
+    if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
+      await answerCallbackQuery(callbackQuery.id, "Private chat only");
+      return true;
+    }
+
+    if (!isAdmin(userId)) {
+      await answerCallbackQuery(callbackQuery.id, "Admins only");
+      return true;
+    }
+
+    const parts = data.split(":");
+    const action = parts[1];
+    const proposalId = parts[2];
+
+    if (action === "approve") {
+      return handleProposalApprove(callbackQuery, proposalId);
+    }
+
+    if (action === "reject") {
+      return handleProposalReject(callbackQuery, proposalId);
+    }
+
+    return true;
+  }
 
   if (data.startsWith("trade:")) {
     if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
@@ -541,7 +702,7 @@ async function handleCommand(message) {
   const userName = getDisplayName(message.from);
   const username = message.from?.username || "";
 
-  if (isTradingCommand(text)) {
+  if (isTradingCommand(text) && !text.startsWith("/propose")) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
@@ -564,6 +725,67 @@ async function handleCommand(message) {
       messageId,
       { reply_markup: buildTradingAdminKeyboard(getTradingRuntime()) }
     );
+    return true;
+  }
+
+  if (text.startsWith("/propose")) {
+    if (!isPrivateChat(message)) {
+      await sendTelegramMessage(
+        chatId,
+        "Trading proposals are available only in private chat with the bot.",
+        messageId
+      );
+      return true;
+    }
+
+    if (!isAdmin(userId)) {
+      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      return true;
+    }
+
+    const parsed = parseProposeCommand(text);
+    if (!parsed.ok) {
+      await sendTelegramMessage(chatId, parsed.error, messageId);
+      return true;
+    }
+
+    await sendTyping(chatId);
+
+    const dossierResult = await buildTokenDossier(parsed.ca, parsed.tokenName);
+
+    if (!dossierResult.ok) {
+      await sendTelegramMessage(
+        chatId,
+        `Failed to build dossier:
+${dossierResult.error}`,
+        messageId
+      );
+      return true;
+    }
+
+    const dossier = dossierResult.dossier;
+
+    const proposal = createProposal({
+      token: dossier.token,
+      ca: dossier.ca,
+      reason: `Manual admin signal. Confidence ${dossier.confidence}/95, liquidity ${Math.round(dossier.liquidityUsd).toLocaleString("en-US")} USD, volume ${Math.round(dossier.volumeH24).toLocaleString("en-US")} USD.`,
+      score: dossier.confidence,
+      dossier,
+      createdBy: userName
+    });
+
+    await sendTelegramMessage(
+      chatId,
+      `🚀 Trade Proposal
+
+${formatDossierForAdmin(dossier)}
+
+Proposal ID:
+${proposal.id}`,
+      messageId,
+      { reply_markup: buildProposalKeyboard(proposal.id) }
+    );
+
     return true;
   }
 
@@ -596,6 +818,8 @@ async function handleCommand(message) {
 /menu
 /admin
 /status
+/trade_status
+/propose <token_name> <solana_ca>
 /ca
 /website`,
       messageId,
@@ -648,6 +872,27 @@ tradeMode: ${trading.mode}
 killSwitch: ${trading.killSwitch}`,
       messageId
     );
+    return true;
+  }
+
+  if (text.startsWith("/trade_status")) {
+    if (!isPrivateChat(message)) {
+      await sendTelegramMessage(
+        chatId,
+        "Trading status is available only in private chat with the bot.",
+        messageId
+      );
+      return true;
+    }
+
+    if (!isAdmin(userId)) {
+      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      return true;
+    }
+
+    await sendTelegramMessage(chatId, formatTradingStatus(), messageId, {
+      reply_markup: buildTradingAdminKeyboard(getTradingRuntime())
+    });
     return true;
   }
 
@@ -818,6 +1063,7 @@ async function setTelegramCommands() {
     { command: "admin", description: "Open admin panel (private only)" },
     { command: "status", description: "Show runtime status" },
     { command: "trade_status", description: "Trading status (private only)" },
+    { command: "propose", description: "Create trade proposal (private only)" },
     { command: "ca", description: "Show contract" },
     { command: "website", description: "Show website" }
   ];
