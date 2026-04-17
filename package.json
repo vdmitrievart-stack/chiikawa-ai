@@ -1,7 +1,7 @@
 {
   "name": "chiikawa-ai",
-  "version": "2.1.0",
-  "description": "Chiikawa AI server + Telegram bot + X watcher + YouTube watcher + Buybot + admin runtime control",
+  "version": "2.2.0",
+  "description": "Chiikawa AI server + Telegram bot + X watcher + YouTube watcher + Buybot",
   "main": "server.js",
   "type": "module",
   "scripts": {
@@ -13,7 +13,11 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.18.2",
-    "node-fetch": "^3.3.2"
+    "express": "^4.19.2",
+    "node-fetch": "^3.3.2",
+    "openai": "^4.57.0"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }
