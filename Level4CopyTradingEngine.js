@@ -1,16 +1,14 @@
-'use strict';
-
-const Level4StorageKeys = require('./Level4StorageKeys');
+import Level4StorageKeys from "./Level4StorageKeys.js";
 
 class Level4CopyTradingEngine {
   /**
    * @param {Object} deps
-   * @param {import('./Level4JsonStorage')} deps.storage
+   * @param {import('./Level4JsonStorage.js').default} deps.storage
    * @param {Console|Object} [deps.logger=console]
    */
   constructor({ storage, logger = console }) {
     if (!storage) {
-      throw new Error('Level4CopyTradingEngine requires storage');
+      throw new Error("Level4CopyTradingEngine requires storage");
     }
 
     this.storage = storage;
@@ -19,25 +17,29 @@ class Level4CopyTradingEngine {
   }
 
   async init() {
-    await this.storage.createIfMissing(this.collection, {
-      leaders: {},
-      followers: {},
-      links: {},
-      events: [],
-    }, {
-      schema: 'copytrading-engine',
-    });
+    await this.storage.createIfMissing(
+      this.collection,
+      {
+        leaders: {},
+        followers: {},
+        links: {},
+        events: []
+      },
+      {
+        schema: "copytrading-engine"
+      }
+    );
   }
 
   async registerLeader(leaderInput) {
-    const leaderId = String(leaderInput?.leaderId || '').trim();
-    if (!leaderId) throw new Error('leaderId is required');
+    const leaderId = String(leaderInput?.leaderId || "").trim();
+    if (!leaderId) throw new Error("leaderId is required");
 
     const now = new Date().toISOString();
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.leaders ||= {};
         current.followers ||= {};
         current.links ||= {};
@@ -49,23 +51,23 @@ class Level4CopyTradingEngine {
           leaderId,
           walletId: leaderInput.walletId || prev?.walletId || null,
           label: leaderInput.label || prev?.label || null,
-          chain: leaderInput.chain || prev?.chain || 'solana',
+          chain: leaderInput.chain || prev?.chain || "solana",
           isActive: leaderInput.isActive !== false,
-          strategy: leaderInput.strategy || prev?.strategy || 'mirror',
-          riskProfile: leaderInput.riskProfile || prev?.riskProfile || 'balanced',
+          strategy: leaderInput.strategy || prev?.strategy || "mirror",
+          riskProfile: leaderInput.riskProfile || prev?.riskProfile || "balanced",
           createdAt: prev?.createdAt || now,
           updatedAt: now,
           meta: {
             ...(prev?.meta || {}),
-            ...(leaderInput.meta || {}),
-          },
+            ...(leaderInput.meta || {})
+          }
         };
 
         return current;
       },
       {
         fallbackData: { leaders: {}, followers: {}, links: {}, events: [] },
-        meta: { schema: 'copytrading-engine' },
+        meta: { schema: "copytrading-engine" }
       }
     );
 
@@ -73,14 +75,14 @@ class Level4CopyTradingEngine {
   }
 
   async registerFollower(followerInput) {
-    const followerId = String(followerInput?.followerId || '').trim();
-    if (!followerId) throw new Error('followerId is required');
+    const followerId = String(followerInput?.followerId || "").trim();
+    if (!followerId) throw new Error("followerId is required");
 
     const now = new Date().toISOString();
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.leaders ||= {};
         current.followers ||= {};
         current.links ||= {};
@@ -93,31 +95,31 @@ class Level4CopyTradingEngine {
           walletId: followerInput.walletId || prev?.walletId || null,
           ownerUserId: followerInput.ownerUserId || prev?.ownerUserId || null,
           label: followerInput.label || prev?.label || null,
-          chain: followerInput.chain || prev?.chain || 'solana',
+          chain: followerInput.chain || prev?.chain || "solana",
           isActive: followerInput.isActive !== false,
-          copyMode: followerInput.copyMode || prev?.copyMode || 'proportional',
+          copyMode: followerInput.copyMode || prev?.copyMode || "proportional",
           maxAllocationUsd: Number.isFinite(followerInput.maxAllocationUsd)
             ? followerInput.maxAllocationUsd
-            : (prev?.maxAllocationUsd ?? 0),
+            : prev?.maxAllocationUsd ?? 0,
           maxOpenPositions: Number.isInteger(followerInput.maxOpenPositions)
             ? followerInput.maxOpenPositions
-            : (prev?.maxOpenPositions ?? 3),
+            : prev?.maxOpenPositions ?? 3,
           slippageBps: Number.isInteger(followerInput.slippageBps)
             ? followerInput.slippageBps
-            : (prev?.slippageBps ?? 150),
+            : prev?.slippageBps ?? 150,
           createdAt: prev?.createdAt || now,
           updatedAt: now,
           meta: {
             ...(prev?.meta || {}),
-            ...(followerInput.meta || {}),
-          },
+            ...(followerInput.meta || {})
+          }
         };
 
         return current;
       },
       {
         fallbackData: { leaders: {}, followers: {}, links: {}, events: [] },
-        meta: { schema: 'copytrading-engine' },
+        meta: { schema: "copytrading-engine" }
       }
     );
 
@@ -125,18 +127,18 @@ class Level4CopyTradingEngine {
   }
 
   async linkFollowerToLeader(linkInput) {
-    const leaderId = String(linkInput?.leaderId || '').trim();
-    const followerId = String(linkInput?.followerId || '').trim();
+    const leaderId = String(linkInput?.leaderId || "").trim();
+    const followerId = String(linkInput?.followerId || "").trim();
 
-    if (!leaderId) throw new Error('leaderId is required');
-    if (!followerId) throw new Error('followerId is required');
+    if (!leaderId) throw new Error("leaderId is required");
+    if (!followerId) throw new Error("followerId is required");
 
     const linkId = `${leaderId}::${followerId}`;
     const now = new Date().toISOString();
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.leaders ||= {};
         current.followers ||= {};
         current.links ||= {};
@@ -157,27 +159,27 @@ class Level4CopyTradingEngine {
           leaderId,
           followerId,
           isActive: linkInput.isActive !== false,
-          multiplier: Number.isFinite(linkInput.multiplier) ? linkInput.multiplier : (prev?.multiplier ?? 1),
-          mode: linkInput.mode || prev?.mode || 'mirror',
-          maxTradeUsd: Number.isFinite(linkInput.maxTradeUsd) ? linkInput.maxTradeUsd : (prev?.maxTradeUsd ?? 0),
+          multiplier: Number.isFinite(linkInput.multiplier) ? linkInput.multiplier : prev?.multiplier ?? 1,
+          mode: linkInput.mode || prev?.mode || "mirror",
+          maxTradeUsd: Number.isFinite(linkInput.maxTradeUsd) ? linkInput.maxTradeUsd : prev?.maxTradeUsd ?? 0,
           minLeaderScore: Number.isFinite(linkInput.minLeaderScore)
             ? linkInput.minLeaderScore
-            : (prev?.minLeaderScore ?? 0),
+            : prev?.minLeaderScore ?? 0,
           createdAt: prev?.createdAt || now,
           updatedAt: now,
           meta: {
             ...(prev?.meta || {}),
-            ...(linkInput.meta || {}),
-          },
+            ...(linkInput.meta || {})
+          }
         };
 
         current.events.unshift({
           eventId: `evt_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-          type: 'link_created_or_updated',
+          type: "link_created_or_updated",
           leaderId,
           followerId,
           linkId,
-          createdAt: now,
+          createdAt: now
         });
 
         current.events = current.events.slice(0, 1000);
@@ -185,7 +187,7 @@ class Level4CopyTradingEngine {
         return current;
       },
       {
-        fallbackData: { leaders: {}, followers: {}, links: {}, events: [] },
+        fallbackData: { leaders: {}, followers: {}, links: {}, events: [] }
       }
     );
 
@@ -194,7 +196,10 @@ class Level4CopyTradingEngine {
 
   async getLeader(leaderId) {
     const data = await this.storage.readData(this.collection, {
-      leaders: {}, followers: {}, links: {}, events: [],
+      leaders: {},
+      followers: {},
+      links: {},
+      events: []
     });
 
     return data.leaders?.[leaderId] || null;
@@ -202,7 +207,10 @@ class Level4CopyTradingEngine {
 
   async getFollower(followerId) {
     const data = await this.storage.readData(this.collection, {
-      leaders: {}, followers: {}, links: {}, events: [],
+      leaders: {},
+      followers: {},
+      links: {},
+      events: []
     });
 
     return data.followers?.[followerId] || null;
@@ -210,7 +218,10 @@ class Level4CopyTradingEngine {
 
   async getLink(leaderId, followerId) {
     const data = await this.storage.readData(this.collection, {
-      leaders: {}, followers: {}, links: {}, events: [],
+      leaders: {},
+      followers: {},
+      links: {},
+      events: []
     });
 
     return data.links?.[`${leaderId}::${followerId}`] || null;
@@ -218,18 +229,24 @@ class Level4CopyTradingEngine {
 
   async listLeaderLinks(leaderId) {
     const data = await this.storage.readData(this.collection, {
-      leaders: {}, followers: {}, links: {}, events: [],
+      leaders: {},
+      followers: {},
+      links: {},
+      events: []
     });
 
-    return Object.values(data.links || {}).filter((x) => x.leaderId === leaderId);
+    return Object.values(data.links || {}).filter(x => x.leaderId === leaderId);
   }
 
   async listFollowerLinks(followerId) {
     const data = await this.storage.readData(this.collection, {
-      leaders: {}, followers: {}, links: {}, events: [],
+      leaders: {},
+      followers: {},
+      links: {},
+      events: []
     });
 
-    return Object.values(data.links || {}).filter((x) => x.followerId === followerId);
+    return Object.values(data.links || {}).filter(x => x.followerId === followerId);
   }
 
   async disableLink(leaderId, followerId) {
@@ -237,7 +254,7 @@ class Level4CopyTradingEngine {
 
     const envelope = await this.storage.update(
       this.collection,
-      (current) => {
+      current => {
         current.links ||= {};
         const link = current.links[linkId];
         if (!link) throw new Error(`Link not found: ${linkId}`);
@@ -247,33 +264,29 @@ class Level4CopyTradingEngine {
         return current;
       },
       {
-        fallbackData: { leaders: {}, followers: {}, links: {}, events: [] },
+        fallbackData: { leaders: {}, followers: {}, links: {}, events: [] }
       }
     );
 
     return envelope.data.links[linkId];
   }
 
-  /**
-   * Подготавливает решение по копированию сделки.
-   * Это пока orchestration/pre-execution слой, без ончейн отправки.
-   */
   async buildCopyPlan({ leaderId, trade }) {
-    if (!trade || typeof trade !== 'object') {
-      throw new Error('trade is required');
+    if (!trade || typeof trade !== "object") {
+      throw new Error("trade is required");
     }
 
     const leader = await this.getLeader(leaderId);
     if (!leader || !leader.isActive) {
       return {
         ok: false,
-        reason: 'leader_inactive_or_missing',
-        plans: [],
+        reason: "leader_inactive_or_missing",
+        plans: []
       };
     }
 
     const links = await this.listLeaderLinks(leaderId);
-    const activeLinks = links.filter((x) => x.isActive);
+    const activeLinks = links.filter(x => x.isActive);
 
     const plans = [];
 
@@ -284,8 +297,8 @@ class Level4CopyTradingEngine {
       const leaderTradeUsd = Number(trade.sizeUsd || 0);
       let copiedUsd = leaderTradeUsd;
 
-      if (follower.copyMode === 'proportional') {
-        copiedUsd = leaderTradeUsd * (Number(link.multiplier || 1));
+      if (follower.copyMode === "proportional") {
+        copiedUsd = leaderTradeUsd * Number(link.multiplier || 1);
       }
 
       if (Number(link.maxTradeUsd || 0) > 0) {
@@ -304,23 +317,23 @@ class Level4CopyTradingEngine {
         followerId: follower.followerId,
         leaderWalletId: leader.walletId,
         followerWalletId: follower.walletId,
-        action: trade.action || 'buy',
+        action: trade.action || "buy",
         symbol: trade.symbol || null,
         ca: trade.ca || null,
-        chain: trade.chain || follower.chain || leader.chain || 'solana',
+        chain: trade.chain || follower.chain || leader.chain || "solana",
         sizeUsd: Number(copiedUsd.toFixed(2)),
         mode: link.mode || follower.copyMode,
         slippageBps: follower.slippageBps ?? 150,
-        createdAt: new Date().toISOString(),
+        createdAt: new Date().toISOString()
       });
     }
 
     return {
       ok: true,
       leaderId,
-      plans,
+      plans
     };
   }
 }
 
-module.exports = Level4CopyTradingEngine;
+export default Level4CopyTradingEngine;
