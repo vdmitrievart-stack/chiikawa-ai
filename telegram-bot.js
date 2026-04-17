@@ -45,9 +45,9 @@ const activeChatUntil = new Map();
 const chatTraffic = new Map();
 const greetedChats = new Set();
 
-// in-memory admin scan sessions
-const pendingAdminActions = new Map(); // key: userId => { type: "scan_ca" }
-const latestScans = new Map(); // key: userId => { dossier, createdAt }
+// private admin state
+const pendingAdminActions = new Map(); // userId -> { type: "scan_ca" }
+const latestScans = new Map(); // userId -> { dossier, createdAt }
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -320,16 +320,52 @@ function buildMainMenuKeyboard() {
   };
 }
 
+function buildTradingPanelKeyboard() {
+  const trading = getTradingRuntime();
+
+  return {
+    inline_keyboard: [
+      [
+        { text: "🔍 Scan CA", callback_data: "scan:start" }
+      ],
+      [
+        { text: "📊 Trade Status", callback_data: "trade:show_status" },
+        { text: "👛 Wallets", callback_data: "trade:show_wallets" }
+      ],
+      [
+        {
+          text: trading.enabled ? "⚙️ Trading ON" : "⚙️ Trading OFF",
+          callback_data: "trade:toggle_enabled"
+        },
+        {
+          text: trading.killSwitch ? "🛑 Kill ON" : "🛑 Kill OFF",
+          callback_data: "trade:toggle_kill"
+        }
+      ],
+      [
+        {
+          text: `🔁 Mode: ${trading.mode}`,
+          callback_data: "trade:cycle_mode"
+        },
+        {
+          text: `💰 Buy Min: $${trading.buybotAlertMinUsd}`,
+          callback_data: "trade:buymin_up"
+        }
+      ],
+      [
+        { text: "❎ Close", callback_data: "tradepanel:close" }
+      ]
+    ]
+  };
+}
+
 function buildAdminKeyboard(config) {
   const trading = getTradingRuntime();
 
   return {
     inline_keyboard: [
       [
-        {
-          text: "🔍 Scan CA",
-          callback_data: "scan:start"
-        }
+        { text: "🎛 Trading Panel", callback_data: "tradepanel:open" }
       ],
       [
         {
@@ -365,22 +401,6 @@ function buildAdminKeyboard(config) {
         {
           text: trading.killSwitch ? "Kill switch: ON" : "Kill switch: OFF",
           callback_data: "trade:toggle_kill"
-        }
-      ],
-      [
-        {
-          text: `Trade mode: ${trading.mode}`,
-          callback_data: "trade:cycle_mode"
-        }
-      ],
-      [
-        {
-          text: "Wallets",
-          callback_data: "trade:show_wallets"
-        },
-        {
-          text: "Trade status",
-          callback_data: "trade:show_status"
         }
       ]
     ]
@@ -447,6 +467,23 @@ killSwitch: ${trading.killSwitch}`,
   );
 }
 
+async function sendTradingPanel(chatId, replyToMessageId = null) {
+  const trading = getTradingRuntime();
+
+  return sendTelegramMessage(
+    chatId,
+    `🎛 Trading Panel
+
+enabled: ${trading.enabled}
+mode: ${trading.mode}
+killSwitch: ${trading.killSwitch}
+buybotAlertMinUsd: ${trading.buybotAlertMinUsd}
+trackedWallets: ${Array.isArray(trading.trackedWallets) ? trading.trackedWallets.length : 0}`,
+    replyToMessageId,
+    { reply_markup: buildTradingPanelKeyboard() }
+  );
+}
+
 function shouldRespond(message) {
   const text = normalizeText(message.text);
   if (!text) return false;
@@ -455,6 +492,7 @@ function shouldRespond(message) {
   if (text.startsWith("/help")) return true;
   if (text.startsWith("/menu")) return true;
   if (text.startsWith("/admin")) return true;
+  if (text.startsWith("/tradepanel")) return true;
   if (text.startsWith("/status")) return true;
   if (text.startsWith("/trade_status")) return true;
   if (text.startsWith("/trade_mode")) return true;
@@ -497,7 +535,8 @@ function isTradingCommand(text) {
     "/trading_off",
     "/setbuy",
     "/propose",
-    "/scan_ca"
+    "/scan_ca",
+    "/tradepanel"
   ];
 
   return tradingPrefixes.some(cmd => lower.startsWith(cmd));
@@ -658,6 +697,40 @@ CA: ${proposal.ca}`,
   return true;
 }
 
+async function handleTradePanelCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  const chatId = callbackQuery.message?.chat?.id;
+  const messageId = callbackQuery.message?.message_id;
+  const userId = callbackQuery.from?.id;
+
+  if (!chatId) return false;
+  if (!data.startsWith("tradepanel:")) return false;
+
+  if (!isPrivateChat(callbackQuery.message || { chat: { type: "unknown" } })) {
+    await answerCallbackQuery(callbackQuery.id, "Private chat only");
+    return true;
+  }
+
+  if (!isAdmin(userId)) {
+    await answerCallbackQuery(callbackQuery.id, "Admins only");
+    return true;
+  }
+
+  if (data === "tradepanel:open") {
+    await answerCallbackQuery(callbackQuery.id, "Opening trading panel");
+    await sendTradingPanel(chatId, messageId);
+    return true;
+  }
+
+  if (data === "tradepanel:close") {
+    await answerCallbackQuery(callbackQuery.id, "Closed");
+    await sendTelegramMessage(chatId, "Trading panel closed.", messageId);
+    return true;
+  }
+
+  return true;
+}
+
 async function handleScanCallback(callbackQuery) {
   const data = callbackQuery.data || "";
   const chatId = callbackQuery.message?.chat?.id;
@@ -696,11 +769,7 @@ Example:
     clearPendingAdminAction(userId);
     clearLatestScan(userId);
     await answerCallbackQuery(callbackQuery.id, "Cancelled");
-    await sendTelegramMessage(
-      chatId,
-      "Scan cancelled.",
-      messageId
-    );
+    await sendTelegramMessage(chatId, "Scan cancelled.", messageId);
     return true;
   }
 
@@ -755,6 +824,9 @@ async function handleAdminAndTradingCallback(callbackQuery) {
 
   if (!chatId) return false;
 
+  const handledTradePanel = await handleTradePanelCallback(callbackQuery);
+  if (handledTradePanel) return true;
+
   const handledScan = await handleScanCallback(callbackQuery);
   if (handledScan) return true;
 
@@ -801,15 +873,27 @@ async function handleAdminAndTradingCallback(callbackQuery) {
       return true;
     }
 
-    const config = await getRuntimeConfig();
+    const isTradingPanelAction =
+      data === "trade:show_status" ||
+      data === "trade:show_wallets" ||
+      data === "trade:toggle_enabled" ||
+      data === "trade:toggle_kill" ||
+      data === "trade:cycle_mode" ||
+      data === "trade:buymin_up";
 
     await answerCallbackQuery(callbackQuery.id, "Updated");
-    await sendTelegramMessage(
-      chatId,
-      result.message,
-      messageId,
-      { reply_markup: buildAdminKeyboard(config) }
-    );
+
+    if (isTradingPanelAction) {
+      await sendTradingPanel(chatId, messageId);
+    } else {
+      const config = await getRuntimeConfig();
+      await sendTelegramMessage(
+        chatId,
+        result.message,
+        messageId,
+        { reply_markup: buildAdminKeyboard(config) }
+      );
+    }
 
     return true;
   }
@@ -913,7 +997,12 @@ async function handleCommand(message) {
   const userName = getDisplayName(message.from);
   const username = message.from?.username || "";
 
-  if (isTradingCommand(text) && !text.startsWith("/propose") && !text.startsWith("/scan_ca")) {
+  if (
+    isTradingCommand(text) &&
+    !text.startsWith("/propose") &&
+    !text.startsWith("/scan_ca") &&
+    !text.startsWith("/tradepanel")
+  ) {
     if (!isPrivateChat(message)) {
       await sendTelegramMessage(
         chatId,
@@ -934,8 +1023,27 @@ async function handleCommand(message) {
       chatId,
       result.ok ? result.message : result.error,
       messageId,
-      { reply_markup: buildTradingAdminKeyboard(getTradingRuntime()) }
+      { reply_markup: buildTradingPanelKeyboard() }
     );
+    return true;
+  }
+
+  if (text.startsWith("/tradepanel")) {
+    if (!isPrivateChat(message)) {
+      await sendTelegramMessage(
+        chatId,
+        "Trading panel is available only in private chat with the bot.",
+        messageId
+      );
+      return true;
+    }
+
+    if (!isAdmin(userId)) {
+      await sendTelegramMessage(chatId, "Admins only 🥺", messageId);
+      return true;
+    }
+
+    await sendTradingPanel(chatId, messageId);
     return true;
   }
 
@@ -1017,6 +1125,7 @@ async function handleCommand(message) {
 /help
 /menu
 /admin
+/tradepanel
 /status
 /trade_status
 /scan_ca
@@ -1092,7 +1201,7 @@ killSwitch: ${trading.killSwitch}`,
     }
 
     await sendTelegramMessage(chatId, formatTradingStatus(), messageId, {
-      reply_markup: buildTradingAdminKeyboard(getTradingRuntime())
+      reply_markup: buildTradingPanelKeyboard()
     });
     return true;
   }
@@ -1265,6 +1374,7 @@ async function setTelegramCommands() {
     { command: "help", description: "Show help" },
     { command: "menu", description: "Open menu" },
     { command: "admin", description: "Open admin panel (private only)" },
+    { command: "tradepanel", description: "Open trading panel (private only)" },
     { command: "status", description: "Show runtime status" },
     { command: "trade_status", description: "Trading status (private only)" },
     { command: "scan_ca", description: "Scan Solana CA (private only)" },
