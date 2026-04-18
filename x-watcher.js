@@ -2,7 +2,11 @@ import fetch from "node-fetch";
 
 // ================= ENV =================
 
-const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN || "";
+const TWITTER_BEARER_TOKEN =
+  process.env.TWITTER_BEARER_TOKEN ||
+  process.env.X_BEARER_TOKEN ||
+  "";
+
 const X_USERNAME = process.env.X_USERNAME || "Chiikawa_CTO";
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
 
@@ -26,7 +30,7 @@ function log(...args) {
   console.log("[X WATCHER]", ...args);
 }
 
-// ================= DEBUG ENV =================
+// ================= DEBUG =================
 
 log("=== ENV CHECK ===");
 log("TOKEN EXISTS:", !!TWITTER_BEARER_TOKEN);
@@ -85,6 +89,7 @@ async function forwardTweet(tweet) {
     },
     body: JSON.stringify({
       secret: ADMIN_SECRET,
+      source: "x_watcher",
       tweet: {
         id: tweet.id,
         text: tweet.text,
@@ -99,7 +104,7 @@ async function forwardTweet(tweet) {
   }
 }
 
-// ================= ERROR HANDLING =================
+// ================= ERROR =================
 
 function handleError(err) {
   const msg = err.message || "";
@@ -110,9 +115,8 @@ function handleError(err) {
     return;
   }
 
-  if (msg.includes("Missing TWITTER_BEARER_TOKEN")) {
+  if (!TWITTER_BEARER_TOKEN) {
     log("❌ TOKEN NOT FOUND IN ENV");
-    log("👉 CHECK RENDER ENV → X watcher PRO");
     backoffUntil = Date.now() + BACKOFF_ERROR;
     return;
   }
@@ -137,7 +141,7 @@ async function loop() {
     userId = await getUserId();
     log("User ID:", userId);
   } catch (e) {
-    log("Failed to resolve user:", e.message);
+    log("❌ Failed to resolve user:", e.message);
     return;
   }
 
@@ -145,7 +149,7 @@ async function loop() {
     try {
       if (Date.now() < backoffUntil) {
         const sec = Math.ceil((backoffUntil - Date.now()) / 1000);
-        log(`⏳ Backoff active (${sec}s)`);
+        log(`⏳ Backoff (${sec}s)`);
         await sleep(5000);
         continue;
       }
@@ -158,9 +162,9 @@ async function loop() {
         continue;
       }
 
-      const sorted = [...tweets].reverse();
+      const ordered = [...tweets].reverse();
 
-      for (const t of sorted) {
+      for (const t of ordered) {
         if (!lastTweetId || BigInt(t.id) > BigInt(lastTweetId)) {
           await forwardTweet(t);
           lastTweetId = t.id;
