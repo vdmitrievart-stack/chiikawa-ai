@@ -16,10 +16,7 @@ const TELEGRAM_ALERT_CHAT_ID =
   process.env.FORCED_GROUP_CHAT_ID ||
   "";
 
-const YOUTUBE_RSS_URL =
-  process.env.YOUTUBE_RSS_URL ||
-  "";
-
+const YOUTUBE_RSS_URL = (process.env.YOUTUBE_RSS_URL || "").trim();
 const POLL_INTERVAL_MS = Number(process.env.YOUTUBE_POLL_INTERVAL_MS || 60000);
 
 if (!TELEGRAM_BOT_TOKEN) {
@@ -67,6 +64,8 @@ async function sendTelegramMessage(text) {
 }
 
 async function fetchLatestVideo() {
+  console.log("Using YOUTUBE_RSS_URL:", YOUTUBE_RSS_URL);
+
   const feed = await parser.parseURL(YOUTUBE_RSS_URL);
 
   if (!feed.items || !feed.items.length) {
@@ -121,7 +120,7 @@ async function loop() {
         console.log("No new YouTube episode");
       }
     } catch (error) {
-      console.error("youtube watcher error:", error.message);
+      console.error("youtube watcher error:", error.message || error);
     }
 
     await sleep(POLL_INTERVAL_MS);
