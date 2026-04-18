@@ -2,15 +2,15 @@
 
 import fetch from "node-fetch";
 
-const CHECK_INTERVAL = 60 * 1000;
-const STUCK_RESET_MS = 15 * 60 * 1000;
-
-const TARGET_ACCOUNTS = [
-  "chiikawa_kouhou"
-];
+const CHECK_INTERVAL = 60000;
+const TARGET_ACCOUNTS = ["chiikawa_kouhou"];
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TG_CHAT_ID = process.env.FORCED_GROUP_CHAT_ID;
+
+let lastSeen = {};
+let isRunning = false;
+let gifCursor = 0;
 
 const GIFS = [
   "https://tenor.com/vLMG1KGYUyT.gif",
@@ -18,52 +18,45 @@ const GIFS = [
   "https://tenor.com/sooKVCqgZq8.gif"
 ];
 
-let lastSeen = {};
-let lastActivity = Date.now();
-let isRunning = false;
-let gifCursor = 0;
-
 function nextGif() {
-  if (!GIFS.length) return null;
   const gif = GIFS[gifCursor % GIFS.length];
-  gifCursor = (gifCursor + 1) % GIFS.length;
+  gifCursor++;
   return gif;
 }
 
-async function sendToTelegram(text, gif) {
-  try {
-    if (!TELEGRAM_BOT_TOKEN || !TG_CHAT_ID) return;
+// ==============================
+// TELEGRAM SEND
+// ==============================
 
-    if (gif) {
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendAnimation`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: TG_CHAT_ID,
-          animation: gif,
-          caption: text,
-          parse_mode: "HTML"
-        })
-      });
-    } else {
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: TG_CHAT_ID,
-          text,
-          parse_mode: "HTML"
-        })
-      });
-    }
+async function sendToTelegram(text, gif) {
+  if (!TELEGRAM_BOT_TOKEN || !TG_CHAT_ID) return;
+
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendAnimation`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        chat_id: TG_CHAT_ID,
+        animation: gif,
+        caption: text,
+        parse_mode: "HTML"
+      })
+    });
   } catch (err) {
-    console.log("❌ TG send error:", err.message);
+    console.log("❌ TG error:", err.message);
   }
 }
 
+// ==============================
+// FETCH
+// ==============================
+
 async function fetchTweets(username) {
   try {
-    const url = `https://nitter.net/${username}/rss`;
+    const url = `https://nitter.poast.org/${username}/rss`;
+
     const res = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0"
@@ -76,21 +69,22 @@ async function fetchTweets(username) {
 
     return items.map(item => {
       const block = item[1];
-      const title = block.match(/<title>(.*?)<\/title>/)?.[1] || "";
-      const link = block.match(/<link>(.*?)<\/link>/)?.[1] || "";
-      const guid = block.match(/<guid.*?>(.*?)<\/guid>/)?.[1] || "";
 
       return {
-        id: guid || link,
-        text: title,
-        url: link
+        id: block.match(/<guid.*?>(.*?)<\/guid>/)?.[1],
+        text: block.match(/<title>(.*?)<\/title>/)?.[1],
+        url: block.match(/<link>(.*?)<\/link>/)?.[1]
       };
     });
   } catch (err) {
-    console.log("❌ fetchTweets error:", err.message);
+    console.log("❌ fetch error:", err.message);
     return [];
   }
 }
+
+// ==============================
+// PROCESS
+// ==============================
 
 async function processAccount(username) {
   const posts = await fetchTweets(username);
@@ -100,33 +94,40 @@ async function processAccount(username) {
     return;
   }
 
-  console.log(`📡 ${username}: ${posts.length} posts fetched`);
+  console.log(`📡 ${username}: ${posts.length} posts`);
 
+  // 🧠 FIRST SYNC
   if (!lastSeen[username]) {
-    lastSeen[username] = posts[0].id;
-    console.log(`🧠 first sync for ${username}`);
+    console.log("🧠 first sync → skipping history");
+    lastSeen[username] = posts[0]?.id;
     return;
   }
 
-  const ordered = [...posts].reverse();
+  const ordered = [...posts].reverse().slice(-3); // 🔥 максимум 3
 
   for (const post of ordered) {
-    if (!post.id || post.id === lastSeen[username]) continue;
+    if (!post.id) continue;
+
+    if (post.id === lastSeen[username]) break;
 
     console.log("🚀 NEW POST:", post.text);
 
-    const message = `🐹 <b>Chiikawa detected new post!</b>
+    await sendToTelegram(
+      `🐹 <b>Chiikawa detected new post!</b>
 
 ${post.text}
 
-🔗 ${post.url}`;
-
-    await sendToTelegram(message, nextGif());
+🔗 ${post.url}`,
+      nextGif()
+    );
 
     lastSeen[username] = post.id;
-    lastActivity = Date.now();
   }
 }
+
+// ==============================
+// LOOP
+// ==============================
 
 async function loop() {
   if (isRunning) return;
@@ -143,22 +144,14 @@ async function loop() {
   isRunning = false;
 }
 
+// ==============================
+// START
+// ==============================
+
 export function startXWatcher() {
   console.log("👀 X Watcher started");
 
   loop();
 
-  setInterval(async () => {
-    await loop();
-  }, CHECK_INTERVAL);
-
-  setInterval(() => {
-    const now = Date.now();
-
-    if (now - lastActivity > STUCK_RESET_MS) {
-      console.log("♻️ RESETTING WATCHER (stuck detected)");
-      lastSeen = {};
-      lastActivity = Date.now();
-    }
-  }, 60 * 1000);
+  setInterval(loop, CHECK_INTERVAL);
 }
