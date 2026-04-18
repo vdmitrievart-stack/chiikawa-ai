@@ -2,7 +2,6 @@ import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
-import Parser from "rss-parser";
 import {
   initTradingAdmin,
   getTradingRuntime,
@@ -35,16 +34,25 @@ const WEBHOOK_SECRET =
 const WEBHOOK_PATH = `/telegram/${WEBHOOK_SECRET}`;
 const WEBHOOK_URL = `${TELEGRAM_WEBHOOK_BASE_URL}${WEBHOOK_PATH}`;
 
-const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN || "";
-const X_MIN_FOLLOWERS = Number(process.env.X_MIN_FOLLOWERS || 1000);
-const X_MAX_STORED_IDS = Number(process.env.X_MAX_STORED_IDS || 500);
-const X_POST_COOLDOWN_MS = Number(process.env.X_POST_COOLDOWN_MS || 20000);
-const X_WATCH_INTERVAL_MS = Number(process.env.X_LOOP_INTERVAL_MS || 60000);
-const X_WATCH_HEARTBEAT_TIMEOUT_MS = Number(
-  process.env.X_WATCH_HEARTBEAT_TIMEOUT_MS || 180000
-);
+const TWITTER_BEARER_TOKEN =
+  process.env.TWITTER_BEARER_TOKEN ||
+  "";
 
-const STATE_FILE = path.resolve("/tmp/telegram-bot-x-state.json");
+const X_WATCH_ACCOUNTS = getEnvList("X_WATCH_ACCOUNTS").length
+  ? getEnvList("X_WATCH_ACCOUNTS")
+  : [process.env.X_USERNAME || "chiikawa_kouhou"];
+
+const X_GIF_FILE_IDS = getEnvList("X_GIF_FILE_IDS");
+const X_MIN_FOLLOWERS = Number(process.env.X_MIN_FOLLOWERS || 1000);
+const X_FETCH_COUNT = Number(process.env.X_FETCH_COUNT || 5);
+const X_LOOP_INTERVAL_MS = Number(process.env.X_LOOP_INTERVAL_MS || 60000);
+const X_MAX_STORED_IDS = Number(process.env.X_MAX_STORED_IDS || 600);
+const X_POST_COOLDOWN_MS = Number(process.env.X_POST_COOLDOWN_MS || 20000);
+const X_CTA_SCORE = Number(process.env.X_CTA_SCORE || 78);
+const X_POST_SCORE_MIN = Number(process.env.X_POST_SCORE_MIN || 42);
+const MARKET_MODE = (process.env.MARKET_MODE || "neutral").toLowerCase();
+
+const STATE_FILE = path.resolve("/tmp/chiikawa_telegram_x_state.json");
 
 if (!TOKEN) {
   console.error("❌ BOT_TOKEN missing");
@@ -52,7 +60,7 @@ if (!TOKEN) {
 }
 
 if (!CHAT_ID) {
-  console.error("❌ TELEGRAM_ALERT_CHAT_ID / CHAT_ID missing");
+  console.error("❌ CHAT_ID / TELEGRAM_ALERT_CHAT_ID missing");
   process.exit(1);
 }
 
@@ -61,61 +69,27 @@ if (!TELEGRAM_WEBHOOK_BASE_URL) {
   process.exit(1);
 }
 
+if (!TWITTER_BEARER_TOKEN) {
+  console.error("❌ TWITTER_BEARER_TOKEN missing");
+  process.exit(1);
+}
+
 const bot = new TelegramBot(TOKEN, { polling: false });
 
-const parser = new Parser({
-  timeout: 15000,
-  headers: {
-    "User-Agent": "Mozilla/5.0"
-  }
-});
-
 const userSettings = new Map();
-const followerCache = new Map();
+const xUserCache = new Map();
 
-const watcherState = {
+const xState = {
   started: false,
   timer: null,
   guardTimer: null,
-  lastHeartbeat: Date.now(),
-  lastPostedAt: 0,
-  lastHostIndex: 0,
   firstSyncDone: false,
-  seenIds: new Set()
+  seenIds: new Set(),
+  lastHeartbeat: Date.now(),
+  lastPostAt: 0,
+  gifCursor: 0,
+  gifLastIndex: -1
 };
-
-function getEnvList(name) {
-  const raw = process.env[name];
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map(v => v.trim())
-    .filter(Boolean);
-}
-
-function getEnvJson(name, fallback = {}) {
-  try {
-    const raw = process.env[name];
-    if (!raw) return fallback;
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
-}
-
-const WATCH_ACCOUNTS = getEnvList("X_WATCH_ACCOUNTS").length
-  ? getEnvList("X_WATCH_ACCOUNTS")
-  : [process.env.X_USERNAME || "chiikawa_kouhou"];
-
-const X_GIF_FILE_IDS = getEnvList("X_GIF_FILE_IDS");
-const X_ACCOUNT_FOLLOWERS_JSON = getEnvJson("X_ACCOUNT_FOLLOWERS_JSON", {});
-const NITTER_HOSTS = getEnvList("X_RSS_HOSTS").length
-  ? getEnvList("X_RSS_HOSTS")
-  : [
-      "https://nitter.net",
-      "https://nitter.privacydev.net",
-      "https://nitter.poast.org"
-    ];
 
 const I18N = {
   en: {
@@ -174,13 +148,17 @@ const I18N = {
   }
 };
 
-function nowIso() {
-  return new Date().toISOString();
+function getEnvList(name) {
+  const raw = process.env[name];
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map(v => v.trim())
+    .filter(Boolean);
 }
 
-function rand(arr) {
-  if (!Array.isArray(arr) || arr.length === 0) return null;
-  return arr[Math.floor(Math.random() * arr.length)];
+function nowIso() {
+  return new Date().toISOString();
 }
 
 function getUserLang(userId) {
@@ -195,6 +173,39 @@ function setUserLang(userId, lang) {
 function t(userId, key) {
   const lang = getUserLang(userId);
   return (I18N[lang] && I18N[lang][key]) || I18N.ru[key] || key;
+}
+
+function stripHtml(text) {
+  return String(text || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function safeNum(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function pickNaturalGif() {
+  const list = X_GIF_FILE_IDS;
+  if (!Array.isArray(list) || !list.length) return null;
+
+  if (list.length === 1) {
+    xState.gifCursor = 0;
+    xState.gifLastIndex = 0;
+    return list[0];
+  }
+
+  let idx = xState.gifCursor % list.length;
+  if (idx === xState.gifLastIndex) {
+    idx = (idx + 1) % list.length;
+  }
+
+  xState.gifLastIndex = idx;
+  xState.gifCursor = (idx + 1) % list.length;
+
+  return list[idx];
 }
 
 async function sendText(chatId, text, options = {}) {
@@ -270,9 +281,9 @@ function buildStatusText(userId) {
   return `${t(userId, "statusTitle")}
 
 <b>Bot:</b> ${t(userId, "online")}
-<b>${t(userId, "watcher")}:</b> ${watcherState.started ? t(userId, "online") : t(userId, "offline")}
-<b>${t(userId, "heartbeat")}:</b> ${new Date(watcherState.lastHeartbeat).toLocaleString()}
-<b>${t(userId, "accounts")}:</b> ${WATCH_ACCOUNTS.join(", ")}
+<b>${t(userId, "watcher")}:</b> ${xState.started ? t(userId, "online") : t(userId, "offline")}
+<b>${t(userId, "heartbeat")}:</b> ${new Date(xState.lastHeartbeat).toLocaleString()}
+<b>${t(userId, "accounts")}:</b> ${X_WATCH_ACCOUNTS.join(", ")}
 
 <b>${t(userId, "trading")}:</b> ${runtime.enabled ? "ON" : "OFF"}
 <b>${t(userId, "mode")}:</b> ${runtime.mode}
@@ -283,7 +294,7 @@ function buildStatusText(userId) {
 <b>${t(userId, "level6")}:</b>
 • ${t(userId, "winRate")}: ${(summary.winRate * 100).toFixed(1)}%
 • ${t(userId, "trades")}: ${summary.totalTrades}
-• ${t(userId, "pnl")}: ${summary.pnl}%
+• ${t(userId, "pnl")}:% ${summary.pnl}
 • ${t(userId, "avgEntryScore")}: ${summary.avgEntryScore}
 • ${t(userId, "openTrades")}: ${openTrades.length}`;
 }
@@ -388,20 +399,84 @@ async function refreshMenu(chatId, messageId, userId) {
   }
 }
 
-function normalizeXItem(item, username) {
-  return {
-    id: item.id || item.guid || item.link || "",
-    title: String(item.title || "").trim(),
-    url: item.link || item.id || "",
-    username
-  };
+async function loadXState() {
+  try {
+    const raw = await fs.readFile(STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    xState.firstSyncDone = Boolean(parsed.firstSyncDone);
+    xState.lastPostAt = safeNum(parsed.lastPostAt, 0);
+    xState.gifCursor = safeNum(parsed.gifCursor, 0);
+    xState.gifLastIndex = safeNum(parsed.gifLastIndex, -1);
+    xState.seenIds = new Set(
+      Array.isArray(parsed.seenIds) ? parsed.seenIds.slice(-X_MAX_STORED_IDS) : []
+    );
+
+    console.log(`loaded X state: ${xState.seenIds.size} ids`);
+  } catch {
+    console.log("x state not found, starting fresh");
+  }
 }
 
-function stripHtml(text) {
-  return String(text || "")
-    .replace(/<[^>]*>/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+async function saveXState() {
+  try {
+    const payload = {
+      firstSyncDone: xState.firstSyncDone,
+      lastPostAt: xState.lastPostAt,
+      gifCursor: xState.gifCursor,
+      gifLastIndex: xState.gifLastIndex,
+      seenIds: Array.from(xState.seenIds).slice(-X_MAX_STORED_IDS)
+    };
+
+    await fs.writeFile(STATE_FILE, JSON.stringify(payload), "utf8");
+  } catch (error) {
+    console.log(`saveXState error: ${error.message}`);
+  }
+}
+
+async function twitterGetJson(url) {
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`
+    }
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Twitter API ${res.status}: ${text}`);
+  }
+
+  return res.json();
+}
+
+async function getUserByUsername(username) {
+  if (xUserCache.has(username)) {
+    return xUserCache.get(username);
+  }
+
+  const url =
+    `https://api.twitter.com/2/users/by/username/${encodeURIComponent(username)}` +
+    `?user.fields=public_metrics,verified,description,name,profile_image_url`;
+
+  const data = await twitterGetJson(url);
+  const user = data?.data || null;
+  xUserCache.set(username, user);
+  return user;
+}
+
+async function getLatestTweetsForUser(userId) {
+  const url =
+    `https://api.twitter.com/2/users/${encodeURIComponent(userId)}/tweets` +
+    `?max_results=${Math.min(Math.max(X_FETCH_COUNT, 5), 10)}` +
+    `&exclude=retweets,replies` +
+    `&tweet.fields=created_at,public_metrics,lang,entities,conversation_id`;
+
+  const data = await twitterGetJson(url);
+  return Array.isArray(data?.data) ? data.data : [];
+}
+
+function buildTweetUrl(username, tweetId) {
+  return `https://x.com/${username}/status/${tweetId}`;
 }
 
 function isRaidOrShillPost(text) {
@@ -415,286 +490,314 @@ function isRaidOrShillPost(text) {
     /\b0x[a-f0-9]{6,}\b/i,
     /\bairdrop\b/,
     /\bwhitelist\b/,
-    /\bjoin\b.{0,20}\btelegram\b/,
-    /\bcomment\b.{0,20}\bbelow\b/,
-    /\btag\b.{0,20}\bfriends\b/,
-    /\bfollow\b.{0,20}\bretweet\b/,
     /\bgiveaway\b/,
     /\bpromo\b/,
+    /\bfollow\s+and\s+retweet\b/,
+    /\bretweet\s+to\s+win\b/,
+    /\btag\s+\d+\s+friends\b/,
+    /\bjoin\s+telegram\b/,
+    /\bcomment\s+below\b/,
+    /\bdrop\s+your\s+wallet\b/,
     /\bpartnership\b/,
-    /\bbuy now\b/,
-    /\bcall\b/
+    /\bcall\b/,
+    /\bmoon\b.{0,20}\bnow\b/
   ];
 
   return rejectPatterns.some(re => re.test(value));
 }
 
 function isLowValuePost(text) {
+  const value = stripHtml(text);
+  if (!value) return true;
+  if (value.length < 20) return true;
+  if (/^(gm|gn|lol|soon|ok|yes|no|hi|hello)[!\.\s]*$/i.test(value)) return true;
+  return false;
+}
+
+function containsStrongContentSignal(text) {
   const value = stripHtml(text).toLowerCase();
 
-  if (!value) return true;
-  if (value.length < 18) return true;
-  if (/^(gm|gn|lol|ok|yes|no|hi|hello|soon)[!\.\s]*$/i.test(value)) return true;
+  const goodPatterns = [
+    /\bepisode\b/,
+    /\bvideo\b/,
+    /\bpreview\b/,
+    /\btrailer\b/,
+    /\bteaser\b/,
+    /\bupdate\b/,
+    /\bnews\b/,
+    /\bnotice\b/,
+    /\bannouncement\b/,
+    /\brelease\b/,
+    /\blaunch\b/,
+    /\bopen\b/,
+    /\bavailable\b/,
+    /\bstream\b/,
+    /\bchapter\b/,
+    /\bmerch\b/,
+    /\bcollab\b/,
+    /\bevent\b/
+  ];
+
+  return goodPatterns.some(re => re.test(value));
+}
+
+function calcTweetScore(tweet, followerCount) {
+  const metrics = tweet.public_metrics || {};
+  const likes = safeNum(metrics.like_count);
+  const replies = safeNum(metrics.reply_count);
+  const reposts = safeNum(metrics.retweet_count);
+  const quotes = safeNum(metrics.quote_count);
+
+  const weighted = likes + replies * 2 + reposts * 2.5 + quotes * 3;
+  const baseEngagementRate = followerCount > 0 ? weighted / followerCount : 0;
+
+  let score = 0;
+
+  if (followerCount >= X_MIN_FOLLOWERS) score += 12;
+  if (followerCount >= 5000) score += 8;
+  if (followerCount >= 20000) score += 6;
+
+  if (weighted >= 10) score += 10;
+  if (weighted >= 25) score += 10;
+  if (weighted >= 60) score += 12;
+  if (weighted >= 150) score += 14;
+
+  if (baseEngagementRate >= 0.003) score += 10;
+  if (baseEngagementRate >= 0.008) score += 12;
+  if (baseEngagementRate >= 0.015) score += 14;
+
+  if (containsStrongContentSignal(tweet.text)) score += 14;
+  if (tweet.lang === "ja" || tweet.lang === "en") score += 4;
+
+  if (isRaidOrShillPost(tweet.text)) score -= 100;
+  if (isLowValuePost(tweet.text)) score -= 40;
+
+  return {
+    score,
+    weighted,
+    engagementRate: Number((baseEngagementRate * 100).toFixed(3)),
+    likes,
+    replies,
+    reposts,
+    quotes
+  };
+}
+
+function chooseMood(postScore) {
+  const hour = new Date().getHours();
+
+  if (MARKET_MODE === "bull" && postScore >= 70) return "hyped";
+  if (MARKET_MODE === "bear" && postScore < 60) return "careful";
+  if (postScore >= 85) return "excited";
+  if (postScore >= 70) return "interested";
+  if (hour >= 1 && hour <= 8) return "sleepy";
+  return "neutral";
+}
+
+function buildCommentary(tweet, scorePack) {
+  const text = stripHtml(tweet.text);
+  const mood = chooseMood(scorePack.score);
+
+  if (/episode|video|preview|trailer|teaser/i.test(text)) {
+    if (mood === "excited") {
+      return "🎬 Chiikawa очень доволен: это уже похоже на действительно сильный контентный апдейт, а не просто шум.";
+    }
+    return "🎬 Похоже на контентный апдейт. Это выглядит заметно сильнее обычного проходного поста.";
+  }
+
+  if (/update|notice|announcement|news/i.test(text)) {
+    if (mood === "interested") {
+      return "🧠 Здесь есть смысл. Похоже на пост, который реально может собрать живое внимание.";
+    }
+    if (mood === "careful") {
+      return "🧠 Пост выглядит содержательно. Без лишней эйфории, но его точно стоит отметить.";
+    }
+    return "🧠 Это уже ближе к полезному объявлению, а не к пустому движу.";
+  }
+
+  if (/release|launch|open|available|event|collab/i.test(text)) {
+    return "🚀 Это выглядит как сильный апдейт. Такой пост уже можно использовать как точку внимания.";
+  }
+
+  if (scorePack.engagementRate >= 1) {
+    return "📈 Пост статистически выглядит заметнее остальных. Тут уже есть живой отклик, а не просто формальная публикация.";
+  }
+
+  if (mood === "sleepy") {
+    return "😴 Даже в сонном режиме Chiikawa считает, что этот пост стоит внимания.";
+  }
+
+  return "👀 Пойман неплохой пост. Он выглядит достаточно содержательно, чтобы показать его в группе.";
+}
+
+function shouldPushCTA(tweet, scorePack) {
+  const text = stripHtml(tweet.text);
+
+  if (isRaidOrShillPost(text)) return false;
+  if (scorePack.score < X_CTA_SCORE) return false;
+
+  if (
+    /episode|video|preview|trailer|teaser|update|announcement|release|launch|event|collab/i.test(
+      text
+    )
+  ) {
+    return true;
+  }
+
+  if (scorePack.weighted >= 40 && scorePack.engagementRate >= 0.6) {
+    return true;
+  }
 
   return false;
 }
 
-function buildXCommentary(title) {
-  const text = stripHtml(title);
-
-  if (/episode|video|trailer|preview|teaser/i.test(text)) {
-    return "🎬 Похоже на контентный апдейт, а не шум.";
-  }
-
-  if (/release|launch|start|open|available/i.test(text)) {
-    return "🚀 Похоже на реальный апдейт/запуск.";
-  }
-
-  if (/update|notice|important|news|announcement/i.test(text)) {
-    return "🧠 Выглядит как полезное объявление.";
-  }
-
-  return "👀 Пойман новый содержательный пост.";
+function buildCTA() {
+  return "📣 Пост выглядит сильным. Можно аккуратно зайти в реплаи и напомнить о нас без спама и без рейд-стиля.";
 }
 
-async function loadWatcherState() {
-  try {
-    const raw = await fs.readFile(STATE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-
-    watcherState.firstSyncDone = Boolean(parsed.firstSyncDone);
-    watcherState.lastPostedAt = Number(parsed.lastPostedAt || 0);
-    watcherState.seenIds = new Set(
-      Array.isArray(parsed.seenIds) ? parsed.seenIds.slice(-X_MAX_STORED_IDS) : []
-    );
-
-    console.log(`loaded watcher state: ${watcherState.seenIds.size} ids`);
-  } catch {
-    console.log("watcher state not found, starting fresh");
-  }
-}
-
-async function saveWatcherState() {
-  try {
-    const payload = {
-      firstSyncDone: watcherState.firstSyncDone,
-      lastPostedAt: watcherState.lastPostedAt,
-      seenIds: Array.from(watcherState.seenIds).slice(-X_MAX_STORED_IDS)
-    };
-
-    await fs.writeFile(STATE_FILE, JSON.stringify(payload), "utf8");
-  } catch (error) {
-    console.log(`saveWatcherState error: ${error.message}`);
-  }
-}
-
-async function getFollowerCount(username) {
-  if (followerCache.has(username)) {
-    return followerCache.get(username);
-  }
-
-  if (typeof X_ACCOUNT_FOLLOWERS_JSON[username] === "number") {
-    const val = Number(X_ACCOUNT_FOLLOWERS_JSON[username]);
-    followerCache.set(username, val);
-    return val;
-  }
-
-  if (!TWITTER_BEARER_TOKEN) {
-    followerCache.set(username, null);
-    return null;
-  }
-
-  try {
-    const res = await fetch(
-      `https://api.twitter.com/2/users/by/username/${encodeURIComponent(
-        username
-      )}?user.fields=public_metrics`,
-      {
-        headers: {
-          Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`
-        }
-      }
-    );
-
-    const data = await res.json();
-
-    const count = Number(
-      data?.data?.public_metrics?.followers_count ?? null
-    );
-
-    followerCache.set(username, Number.isFinite(count) ? count : null);
-    return Number.isFinite(count) ? count : null;
-  } catch (error) {
-    console.log(`getFollowerCount error for ${username}: ${error.message}`);
-    followerCache.set(username, null);
-    return null;
-  }
-}
-
-async function parseFeedWithFallback(username) {
-  let lastError = null;
-
-  for (let i = 0; i < NITTER_HOSTS.length; i += 1) {
-    const host = NITTER_HOSTS[(watcherState.lastHostIndex + i) % NITTER_HOSTS.length];
-    const url = `${host.replace(/\/$/, "")}/${username}/rss`;
-
-    try {
-      const feed = await parser.parseURL(url);
-      watcherState.lastHostIndex =
-        (watcherState.lastHostIndex + i) % NITTER_HOSTS.length;
-      return feed;
-    } catch (error) {
-      lastError = error;
-      console.log(`[${nowIso()}] X watcher host failed: ${host} -> ${error.message}`);
-    }
-  }
-
-  throw lastError || new Error("All RSS hosts failed");
-}
-
-async function shouldForwardXPost(item) {
-  const followers = await getFollowerCount(item.username);
-
-  if (followers !== null && followers < X_MIN_FOLLOWERS) {
-    console.log(
-      `[${nowIso()}] skip ${item.username}: followers ${followers} < ${X_MIN_FOLLOWERS}`
-    );
-    return false;
-  }
-
-  if (isRaidOrShillPost(item.title)) {
-    console.log(`[${nowIso()}] skip ${item.username}: raid/shill filter`);
-    return false;
-  }
-
-  if (isLowValuePost(item.title)) {
-    console.log(`[${nowIso()}] skip ${item.username}: low value`);
-    return false;
-  }
-
-  return true;
-}
-
-async function postXAlert(item) {
+async function publishXPost(username, followerCount, tweet, scorePack) {
   const now = Date.now();
-  if (now - watcherState.lastPostedAt < X_POST_COOLDOWN_MS) {
-    console.log(`[${nowIso()}] cooldown skip for ${item.username}`);
+
+  if (now - xState.lastPostAt < X_POST_COOLDOWN_MS) {
+    console.log(`[${nowIso()}] X cooldown active, skip publish`);
     return;
   }
 
-  const commentary = buildXCommentary(item.title);
-  const followers = await getFollowerCount(item.username);
+  const tweetUrl = buildTweetUrl(username, tweet.id);
+  const commentary = buildCommentary(tweet, scorePack);
+  const cta = shouldPushCTA(tweet, scorePack) ? `\n\n${buildCTA()}` : "";
 
-  const text = `🚨 <b>NEW X POST DETECTED</b>
+  const text = `🚨 <b>Новый X-пост от @${username}</b>
 
-<b>Account:</b> @${item.username}
-${followers !== null ? `<b>Followers:</b> ${followers}\n` : ""}<b>Post:</b> ${item.title}
+<b>Подписчики:</b> ${followerCount}
+<b>Score:</b> ${scorePack.score}
+<b>Engagement:</b> ${scorePack.engagementRate}%
+<b>Likes / Replies / Reposts:</b> ${scorePack.likes} / ${scorePack.replies} / ${scorePack.reposts}
 
-${commentary}
+<b>Пост:</b>
+${stripHtml(tweet.text)}
 
-${item.url}`;
+${commentary}${cta}
 
-  const gif = rand(X_GIF_FILE_IDS);
+🔗 ${tweetUrl}`;
 
-  try {
-    if (gif) {
-      await sendAnimation(CHAT_ID, gif, {
-        caption: text.slice(0, 1024),
-        parse_mode: "HTML"
-      });
-    } else {
-      await sendText(CHAT_ID, text);
-    }
+  const gif = pickNaturalGif();
 
-    watcherState.lastPostedAt = now;
-    await saveWatcherState();
-  } catch (error) {
-    console.log(`postXAlert error: ${error.message}`);
+  if (gif) {
+    await sendAnimation(CHAT_ID, gif, {
+      caption: text.slice(0, 1024),
+      parse_mode: "HTML"
+    });
+  } else {
+    await sendText(CHAT_ID, text);
   }
+
+  xState.lastPostAt = now;
+  await saveXState();
 }
 
-async function checkAccount(username) {
-  const feed = await parseFeedWithFallback(username);
-
-  if (!feed.items || feed.items.length === 0) {
-    console.log(`[${nowIso()}] ⚠️ no posts for ${username}`);
+async function scanAccount(username) {
+  const user = await getUserByUsername(username);
+  if (!user) {
+    console.log(`[${nowIso()}] no user data for ${username}`);
     return;
   }
 
-  const items = feed.items
-    .map(item => normalizeXItem(item, username))
-    .filter(item => item.id);
+  const followers = safeNum(user?.public_metrics?.followers_count, 0);
+  if (followers < X_MIN_FOLLOWERS) {
+    console.log(
+      `[${nowIso()}] skip account ${username}: followers ${followers} < ${X_MIN_FOLLOWERS}`
+    );
+    return;
+  }
 
-  if (!items.length) return;
+  const tweets = await getLatestTweetsForUser(user.id);
+  if (!tweets.length) {
+    console.log(`[${nowIso()}] no tweets for ${username}`);
+    return;
+  }
 
-  if (!watcherState.firstSyncDone) {
-    items.slice(0, 20).forEach(item => watcherState.seenIds.add(item.id));
-    watcherState.firstSyncDone = true;
-    await saveWatcherState();
+  const normalized = tweets.map(tweet => ({
+    ...tweet,
+    url: buildTweetUrl(username, tweet.id),
+    username
+  }));
+
+  if (!xState.firstSyncDone) {
+    normalized.forEach(tweet => xState.seenIds.add(tweet.id));
+    xState.firstSyncDone = true;
+    await saveXState();
     console.log(`[${nowIso()}] X first sync complete for ${username}`);
     return;
   }
 
-  const fresh = [];
-  for (const item of items.reverse()) {
-    if (watcherState.seenIds.has(item.id)) continue;
-    fresh.push(item);
-  }
+  const fresh = normalized
+    .filter(tweet => !xState.seenIds.has(tweet.id))
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   if (!fresh.length) {
     console.log(`[${nowIso()}] no new X posts for ${username}`);
     return;
   }
 
-  for (const item of fresh) {
-    watcherState.seenIds.add(item.id);
+  for (const tweet of fresh) {
+    xState.seenIds.add(tweet.id);
 
-    if (watcherState.seenIds.size > X_MAX_STORED_IDS) {
-      watcherState.seenIds = new Set(
-        Array.from(watcherState.seenIds).slice(-X_MAX_STORED_IDS)
+    if (xState.seenIds.size > X_MAX_STORED_IDS) {
+      xState.seenIds = new Set(
+        Array.from(xState.seenIds).slice(-X_MAX_STORED_IDS)
       );
     }
 
-    const okToPost = await shouldForwardXPost(item);
-    await saveWatcherState();
+    const scorePack = calcTweetScore(tweet, followers);
+    await saveXState();
 
-    if (!okToPost) continue;
+    if (scorePack.score < X_POST_SCORE_MIN) {
+      console.log(
+        `[${nowIso()}] filtered low-score post from ${username}: ${scorePack.score}`
+      );
+      continue;
+    }
 
-    await postXAlert(item);
+    await publishXPost(username, followers, tweet, scorePack);
   }
 }
 
-async function watcherLoop() {
-  watcherState.lastHeartbeat = Date.now();
+async function xWatcherLoop() {
+  xState.lastHeartbeat = Date.now();
 
-  for (const account of WATCH_ACCOUNTS) {
-    await checkAccount(account);
+  for (const username of X_WATCH_ACCOUNTS) {
+    try {
+      await scanAccount(username);
+    } catch (error) {
+      console.log(`[${nowIso()}] scanAccount error for ${username}: ${error.message}`);
+    }
   }
 }
 
-function startWatcher() {
-  if (watcherState.started) return;
+function startXWatcher() {
+  if (xState.started) return;
 
-  watcherState.started = true;
+  xState.started = true;
   console.log("🚀 X WATCHER STARTED");
 
   const run = async () => {
     try {
-      await watcherLoop();
+      await xWatcherLoop();
     } catch (error) {
-      console.log(`[${nowIso()}] watcher error: ${error.message}`);
+      console.log(`[${nowIso()}] xWatcherLoop error: ${error.message}`);
     }
   };
 
   run();
 
-  watcherState.timer = setInterval(run, X_WATCH_INTERVAL_MS);
+  xState.timer = setInterval(run, X_LOOP_INTERVAL_MS);
 
-  watcherState.guardTimer = setInterval(() => {
-    const diff = Date.now() - watcherState.lastHeartbeat;
+  xState.guardTimer = setInterval(() => {
+    const diff = Date.now() - xState.lastHeartbeat;
     if (diff > X_WATCH_HEARTBEAT_TIMEOUT_MS) {
-      console.log(`[${nowIso()}] ♻️ WATCHER HEARTBEAT RESET`);
-      watcherState.lastHeartbeat = Date.now();
+      console.log(`[${nowIso()}] ♻️ X watcher heartbeat reset`);
+      xState.lastHeartbeat = Date.now();
       run();
     }
   }, 30000);
@@ -899,8 +1002,8 @@ function createServer() {
         JSON.stringify({
           ok: true,
           service: "telegram-bot",
-          watcherStarted: watcherState.started,
-          heartbeat: watcherState.lastHeartbeat
+          watcherStarted: xState.started,
+          heartbeat: xState.lastHeartbeat
         })
       );
       return;
@@ -953,7 +1056,7 @@ async function ensureCommandsAndWebhook() {
 
 async function bootstrap() {
   console.log("🤖 BOT STARTED");
-  await loadWatcherState();
+  await loadXState();
   await initTradingAdmin();
 
   const server = createServer();
@@ -961,9 +1064,8 @@ async function bootstrap() {
   server.listen(PORT, async () => {
     console.log(`HTTP server listening on ${PORT}`);
     console.log(`Webhook path: ${WEBHOOK_PATH}`);
-
     await ensureCommandsAndWebhook();
-    startWatcher();
+    startXWatcher();
   });
 
   setInterval(() => {
