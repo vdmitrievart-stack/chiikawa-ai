@@ -1,3 +1,4 @@
+import http from "node:http";
 import TelegramBot from "node-telegram-bot-api";
 import Parser from "rss-parser";
 import {
@@ -20,6 +21,16 @@ const CHAT_ID =
   process.env.TELEGRAM_ALERT_CHAT_ID ||
   "";
 
+const PORT = Number(process.env.PORT || 3000);
+
+const TELEGRAM_WEBHOOK_BASE_URL =
+  (process.env.TELEGRAM_WEBHOOK_BASE_URL || "").replace(/\/+$/, "");
+
+const WEBHOOK_SECRET =
+  process.env.WEBHOOK_SECRET ||
+  process.env.TELEGRAM_WEBHOOK_SECRET ||
+  "chiikawa-super-secret";
+
 if (!TOKEN) {
   console.error("❌ BOT_TOKEN missing");
   process.exit(1);
@@ -30,14 +41,16 @@ if (!CHAT_ID) {
   process.exit(1);
 }
 
+if (!TELEGRAM_WEBHOOK_BASE_URL) {
+  console.error("❌ TELEGRAM_WEBHOOK_BASE_URL missing");
+  process.exit(1);
+}
+
+const WEBHOOK_PATH = `/telegram/${WEBHOOK_SECRET}`;
+const WEBHOOK_URL = `${TELEGRAM_WEBHOOK_BASE_URL}${WEBHOOK_PATH}`;
+
 const bot = new TelegramBot(TOKEN, {
-  polling: {
-    interval: 1000,
-    autoStart: true,
-    params: {
-      timeout: 10
-    }
-  }
+  polling: false
 });
 
 const parser = new Parser({
@@ -342,9 +355,7 @@ async function openMenu(chatId, userId, replyToMessageId) {
   });
 }
 
-async function refreshMenu(query, userId) {
-  const chatId = query?.message?.chat?.id;
-  const messageId = query?.message?.message_id;
+async function refreshMenu(chatId, messageId, userId) {
   if (!chatId || !messageId) return;
 
   try {
@@ -572,94 +583,86 @@ async function handleTextCommand(msg) {
   return false;
 }
 
-bot.on("callback_query", async query => {
+async function handleCallbackQuery(query) {
   const data = query?.data || "";
   const userId = query?.from?.id || 0;
   const chatId = query?.message?.chat?.id;
+  const messageId = query?.message?.message_id;
 
-  console.log("CALLBACK HIT:", data, "chatId=", chatId);
+  console.log("CALLBACK HIT:", data, "chatId=", chatId, "messageId=", messageId);
 
-  try {
-    await bot.answerCallbackQuery(query.id);
+  await bot.answerCallbackQuery(query.id);
 
-    if (!chatId) return;
+  if (!chatId) return;
 
-    if (data === "ui:status") {
-      await sendText(chatId, buildStatusText(userId));
-      return;
-    }
-
-    if (data === "ui:l6") {
-      await sendText(chatId, buildLevel6Text(userId));
-      return;
-    }
-
-    if (data === "ui:lang") {
-      await sendText(chatId, t(userId, "chooseLang"), {
-        reply_markup: buildLanguageKeyboard()
-      });
-      return;
-    }
-
-    if (data === "lang:en" || data === "lang:ru") {
-      const lang = data.split(":")[1];
-      setUserLang(userId, lang);
-      await sendText(chatId, `${t(userId, "langSet")}: ${lang.toUpperCase()}`);
-      await refreshMenu(query, userId);
-      return;
-    }
-
-    if (data === "cmd:test_trade") {
-      await sendText(chatId, t(userId, "entryStarted"));
-
-      const userSender = async payload => {
-        await sendTradePayload(chatId, payload);
-      };
-
-      const groupSender = async payload => {
-        await sendTradePayload(CHAT_ID, payload);
-      };
-
-      await simulateTradeFlow(userSender, groupSender);
-      return;
-    }
-
-    if (data === "cmd:toggle_trading") {
-      const runtime = getTradingRuntime();
-      await handleTradingCommand(runtime.enabled ? "/trading_off" : "/trading_on");
-      await refreshMenu(query, userId);
-      return;
-    }
-
-    if (data === "cmd:toggle_dryrun") {
-      const runtime = getTradingRuntime();
-      await handleTradingCommand(runtime.dryRun ? "/dryrun_off" : "/dryrun_on");
-      await refreshMenu(query, userId);
-      return;
-    }
-
-    if (data === "cmd:mode") {
-      await handleTradingCommand("/trade_mode");
-      await refreshMenu(query, userId);
-      return;
-    }
-
-    if (data === "cmd:kill") {
-      await handleTradingCommand("/kill_switch");
-      await refreshMenu(query, userId);
-      return;
-    }
-
-    console.log("unknown callback:", data);
-  } catch (error) {
-    console.log("callback error full:", error);
-    try {
-      if (chatId) {
-        await sendText(chatId, `⚠️ Callback error: ${error.message}`);
-      }
-    } catch {}
+  if (data === "ui:status") {
+    await sendText(chatId, buildStatusText(userId));
+    return;
   }
-});
+
+  if (data === "ui:l6") {
+    await sendText(chatId, buildLevel6Text(userId));
+    return;
+  }
+
+  if (data === "ui:lang") {
+    await sendText(chatId, t(userId, "chooseLang"), {
+      reply_markup: buildLanguageKeyboard()
+    });
+    return;
+  }
+
+  if (data === "lang:en" || data === "lang:ru") {
+    const lang = data.split(":")[1];
+    setUserLang(userId, lang);
+    await sendText(chatId, `${t(userId, "langSet")}: ${lang.toUpperCase()}`);
+    await refreshMenu(chatId, messageId, userId);
+    return;
+  }
+
+  if (data === "cmd:test_trade") {
+    await sendText(chatId, t(userId, "entryStarted"));
+
+    const userSender = async payload => {
+      await sendTradePayload(chatId, payload);
+    };
+
+    const groupSender = async payload => {
+      await sendTradePayload(CHAT_ID, payload);
+    };
+
+    await simulateTradeFlow(userSender, groupSender);
+    return;
+  }
+
+  if (data === "cmd:toggle_trading") {
+    const runtime = getTradingRuntime();
+    await handleTradingCommand(runtime.enabled ? "/trading_off" : "/trading_on");
+    await refreshMenu(chatId, messageId, userId);
+    return;
+  }
+
+  if (data === "cmd:toggle_dryrun") {
+    const runtime = getTradingRuntime();
+    await handleTradingCommand(runtime.dryRun ? "/dryrun_off" : "/dryrun_on");
+    await refreshMenu(chatId, messageId, userId);
+    return;
+  }
+
+  if (data === "cmd:mode") {
+    await handleTradingCommand("/trade_mode");
+    await refreshMenu(chatId, messageId, userId);
+    return;
+  }
+
+  if (data === "cmd:kill") {
+    await handleTradingCommand("/kill_switch");
+    await refreshMenu(chatId, messageId, userId);
+    return;
+  }
+
+  console.log("unknown callback:", data);
+}
 
 bot.on("message", async msg => {
   try {
@@ -676,8 +679,18 @@ bot.on("message", async msg => {
   }
 });
 
-bot.on("polling_error", err => {
-  console.log("Polling error:", err.message);
+bot.on("callback_query", async query => {
+  try {
+    await handleCallbackQuery(query);
+  } catch (error) {
+    const chatId = query?.message?.chat?.id;
+    console.log("callback error full:", error);
+    try {
+      if (chatId) {
+        await sendText(chatId, `⚠️ Callback error: ${error.message}`);
+      }
+    } catch {}
+  }
 });
 
 process.on("unhandledRejection", error => {
@@ -688,11 +701,108 @@ process.on("uncaughtException", error => {
   console.log("Uncaught exception:", error);
 });
 
+async function processUpdate(update) {
+  if (!update || typeof update !== "object") return;
+
+  try {
+    if (update.callback_query) {
+      await handleCallbackQuery(update.callback_query);
+      return;
+    }
+
+    if (update.message?.text) {
+      await handleTextCommand(update.message);
+    }
+  } catch (error) {
+    console.log("processUpdate error:", error);
+    const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id;
+    try {
+      if (chatId) {
+        await sendText(chatId, `⚠️ Update error: ${error.message}`);
+      }
+    } catch {}
+  }
+}
+
+function createServer() {
+  return http.createServer(async (req, res) => {
+    try {
+      if (req.method === "GET" && req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          service: "telegram-bot",
+          watcherStarted: watcherState.started,
+          heartbeat: watcherState.lastHeartbeat
+        }));
+        return;
+      }
+
+      if (req.method === "POST" && req.url === WEBHOOK_PATH) {
+        let body = "";
+
+        req.on("data", chunk => {
+          body += chunk.toString();
+        });
+
+        req.on("end", async () => {
+          try {
+            const update = body ? JSON.parse(body) : {};
+            await processUpdate(update);
+
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true }));
+          } catch (error) {
+            console.log("webhook body error:", error);
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: error.message }));
+          }
+        });
+
+        return;
+      }
+
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: "Not found" }));
+    } catch (error) {
+      console.log("server error:", error);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: error.message }));
+    }
+  });
+}
+
+async function ensureWebhook() {
+  try {
+    await bot.deleteWebHook({ drop_pending_updates: false });
+  } catch (error) {
+    console.log("deleteWebHook warn:", error.message);
+  }
+
+  const result = await bot.setWebHook(WEBHOOK_URL);
+  console.log("Webhook set:", result, WEBHOOK_URL);
+}
+
+async function ensureCommandsAndWebhook() {
+  await ensureCommands();
+  await ensureWebhook();
+}
+
 async function bootstrap() {
   console.log("🤖 BOT STARTED");
   await initTradingAdmin();
-  await ensureCommands();
+  await ensureCommandsAndWebhook();
   startWatcher();
+
+  const server = createServer();
+  server.listen(PORT, () => {
+    console.log(`HTTP server listening on ${PORT}`);
+    console.log(`Webhook path: ${WEBHOOK_PATH}`);
+  });
+
+  setInterval(() => {
+    console.log("heartbeat alive", new Date().toISOString());
+  }, 15000);
 }
 
 bootstrap().catch(error => {
