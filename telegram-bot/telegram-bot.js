@@ -32,7 +32,7 @@ if (!CHAT_ID) {
 
 const bot = new TelegramBot(TOKEN, {
   polling: {
-    interval: 1500,
+    interval: 1200,
     autoStart: true,
     params: {
       timeout: 10
@@ -46,6 +46,8 @@ const parser = new Parser({
     "User-Agent": "Mozilla/5.0"
   }
 });
+
+const userSettings = new Map();
 
 function getEnvList(name) {
   const raw = process.env[name];
@@ -61,9 +63,9 @@ const WATCH_ACCOUNTS = getEnvList("X_WATCH_ACCOUNTS").length
 const NITTER_HOSTS = getEnvList("X_RSS_HOSTS").length
   ? getEnvList("X_RSS_HOSTS")
   : [
-      "https://nitter.poast.org",
       "https://nitter.net",
-      "https://nitter.privacydev.net"
+      "https://nitter.privacydev.net",
+      "https://nitter.poast.org"
     ];
 
 const WATCH_INTERVAL_MS = Number(process.env.X_WATCH_INTERVAL_MS || 60000);
@@ -82,6 +84,95 @@ const watcherState = {
   lastHostIndex: 0
 };
 
+const I18N = {
+  en: {
+    botAlive: "🚀 Bot is alive",
+    center: "🧠 Chiikawa Control Center",
+    status: "📊 System Status",
+    trading: "Trading",
+    mode: "Mode",
+    kill: "Kill switch",
+    buyMin: "Buy min",
+    dryRun: "Dry run",
+    level6: "Level 6",
+    winRate: "Win rate",
+    trades: "Trades",
+    pnl: "PnL",
+    score: "Score",
+    avgEntry: "Avg entry score",
+    openTrades: "Open trades",
+    online: "ONLINE",
+    offline: "OFFLINE",
+    watcher: "X watcher",
+    heartbeat: "Heartbeat",
+    accounts: "Accounts",
+    menu: "📋 Menu",
+    actions: "⚡ Actions",
+    lang: "🌍 Language",
+    chooseLang: "Choose language",
+    langSet: "Language set",
+    noOpenTrades: "No open trades",
+    stumbled: "Chiikawa stumbled a little... 🥺",
+    xPost: "🚨 NEW X POST DETECTED",
+    account: "Account",
+    entryStarted: "🚀 Test trade launched",
+    dryRunOn: "🧪 Dry run ON",
+    dryRunOff: "💸 Dry run OFF",
+    tradingOn: "✅ Trading enabled",
+    tradingOff: "⛔ Trading disabled"
+  },
+  ru: {
+    botAlive: "🚀 Бот жив",
+    center: "🧠 Центр управления Chiikawa",
+    status: "📊 Статус системы",
+    trading: "Торговля",
+    mode: "Режим",
+    kill: "Kill switch",
+    buyMin: "Мин. покупка",
+    dryRun: "Dry run",
+    level6: "Level 6",
+    winRate: "Винрейт",
+    trades: "Сделки",
+    pnl: "PnL",
+    score: "Оценка",
+    avgEntry: "Средняя оценка входа",
+    openTrades: "Открытые сделки",
+    online: "ОНЛАЙН",
+    offline: "ОФЛАЙН",
+    watcher: "X watcher",
+    heartbeat: "Пульс",
+    accounts: "Аккаунты",
+    menu: "📋 Меню",
+    actions: "⚡ Действия",
+    lang: "🌍 Язык",
+    chooseLang: "Выбери язык",
+    langSet: "Язык установлен",
+    noOpenTrades: "Открытых сделок нет",
+    stumbled: "Chiikawa немного споткнулся... 🥺",
+    xPost: "🚨 ОБНАРУЖЕН НОВЫЙ ПОСТ В X",
+    account: "Аккаунт",
+    entryStarted: "🚀 Тестовая сделка запущена",
+    dryRunOn: "🧪 Dry run включён",
+    dryRunOff: "💸 Dry run выключен",
+    tradingOn: "✅ Торговля включена",
+    tradingOff: "⛔ Торговля выключена"
+  }
+};
+
+function getUserLang(userId) {
+  return userSettings.get(userId)?.lang || "ru";
+}
+
+function setUserLang(userId, lang) {
+  const current = userSettings.get(userId) || {};
+  userSettings.set(userId, { ...current, lang });
+}
+
+function t(userId, key) {
+  const lang = getUserLang(userId);
+  return (I18N[lang] && I18N[lang][key]) || I18N.ru[key] || key;
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -94,6 +185,7 @@ function rand(arr) {
 async function sendText(chatId, text, options = {}) {
   return bot.sendMessage(chatId, text, {
     disable_web_page_preview: true,
+    parse_mode: "HTML",
     ...options
   });
 }
@@ -110,14 +202,9 @@ async function sendTradePayload(chatId, payload, replyToMessageId = undefined) {
 
   try {
     if (gif && /^https?:\/\//i.test(gif)) {
-      await sendText(
-        chatId,
-        `${text}\n\n${gif}`.trim(),
-        {
-          parse_mode: "HTML",
-          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
-        }
-      );
+      await sendText(chatId, `${text}\n\n${gif}`.trim(), {
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+      });
       return;
     }
 
@@ -131,76 +218,94 @@ async function sendTradePayload(chatId, payload, replyToMessageId = undefined) {
     }
 
     await sendText(chatId, text, {
-      parse_mode: "HTML",
       ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
     });
   } catch (error) {
     console.log(`sendTradePayload error: ${error.message}`);
 
     await sendText(chatId, text, {
-      parse_mode: "HTML",
       ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
     });
   }
 }
 
-function buildMainMenuText() {
+function buildMainMenuText(userId) {
   const runtime = getTradingRuntime();
   const s = getLevel6Summary();
 
-  return `🧠 <b>Chiikawa Control Center</b>
+  return `${t(userId, "center")}
 
-Trading: ${runtime.enabled ? "ON" : "OFF"}
-Mode: ${runtime.mode}
-Kill switch: ${runtime.killSwitch ? "ON" : "OFF"}
-Buy min: $${runtime.buybotAlertMinUsd}
-Dry run: ${runtime.dryRun ? "ON" : "OFF"}
+<b>${t(userId, "trading")}:</b> ${runtime.enabled ? "ON" : "OFF"}
+<b>${t(userId, "mode")}:</b> ${runtime.mode}
+<b>${t(userId, "kill")}:</b> ${runtime.killSwitch ? "ON" : "OFF"}
+<b>${t(userId, "buyMin")}:</b> $${runtime.buybotAlertMinUsd}
+<b>${t(userId, "dryRun")}:</b> ${runtime.dryRun ? "ON" : "OFF"}
 
-Level 6:
-WinRate: ${(s.winRate * 100).toFixed(1)}%
-Trades: ${s.totalTrades}
-PnL: ${s.pnl}%
-Score: ${s.avgEntryScore}
-
-Commands:
-/menu
-/status
-/test_trade
-/trading_on
-/trading_off
-/kill_switch
-/trade_mode
-/dryrun_on
-/dryrun_off
-/setbuy 25
-/level6_status
-/level6_open_trades`;
+<b>${t(userId, "level6")}:</b>
+• ${t(userId, "winRate")}: ${(s.winRate * 100).toFixed(1)}%
+• ${t(userId, "trades")}: ${s.totalTrades}
+• ${t(userId, "pnl")}: ${s.pnl}%
+• ${t(userId, "score")}: ${s.avgEntryScore}`;
 }
 
-function buildStatusText() {
+function buildStatusText(userId) {
   const runtime = getTradingRuntime();
   const s = getLevel6Summary();
   const openTrades = getLevel6OpenTrades();
 
-  return `📊 <b>System Status</b>
+  return `${t(userId, "status")}
 
-Bot: ONLINE
-X watcher: ${watcherState.started ? "ONLINE" : "OFFLINE"}
-Watcher heartbeat: ${new Date(watcherState.lastHeartbeat).toLocaleString()}
-Watched accounts: ${WATCH_ACCOUNTS.join(", ")}
+<b>Bot:</b> ${t(userId, "online")}
+<b>${t(userId, "watcher")}:</b> ${watcherState.started ? t(userId, "online") : t(userId, "offline")}
+<b>${t(userId, "heartbeat")}:</b> ${new Date(watcherState.lastHeartbeat).toLocaleString()}
+<b>${t(userId, "accounts")}:</b> ${WATCH_ACCOUNTS.join(", ")}
 
-Trading: ${runtime.enabled ? "ON" : "OFF"}
-Mode: ${runtime.mode}
-Kill switch: ${runtime.killSwitch ? "ON" : "OFF"}
-Buy min: $${runtime.buybotAlertMinUsd}
-Dry run: ${runtime.dryRun ? "ON" : "OFF"}
+<b>${t(userId, "trading")}:</b> ${runtime.enabled ? "ON" : "OFF"}
+<b>${t(userId, "mode")}:</b> ${runtime.mode}
+<b>${t(userId, "kill")}:</b> ${runtime.killSwitch ? "ON" : "OFF"}
+<b>${t(userId, "buyMin")}:</b> $${runtime.buybotAlertMinUsd}
+<b>${t(userId, "dryRun")}:</b> ${runtime.dryRun ? "ON" : "OFF"}
 
-Level 6:
-WinRate: ${(s.winRate * 100).toFixed(1)}%
-Trades: ${s.totalTrades}
-PnL: ${s.pnl}%
-Avg entry score: ${s.avgEntryScore}
-Open trades: ${openTrades.length}`;
+<b>${t(userId, "level6")}:</b>
+• ${t(userId, "winRate")}: ${(s.winRate * 100).toFixed(1)}%
+• ${t(userId, "trades")}: ${s.totalTrades}
+• ${t(userId, "pnl")}: ${s.pnl}%
+• ${t(userId, "avgEntry")}: ${s.avgEntryScore}
+• ${t(userId, "openTrades")}: ${openTrades.length}`;
+}
+
+function buildMenuKeyboard(userId) {
+  const runtime = getTradingRuntime();
+
+  return {
+    inline_keyboard: [
+      [
+        { text: "📊 Status", callback_data: "ui:status" },
+        { text: "🧠 Level 6", callback_data: "ui:l6" }
+      ],
+      [
+        { text: runtime.enabled ? "⛔ Trading OFF" : "✅ Trading ON", callback_data: "cmd:toggle_trading" },
+        { text: runtime.dryRun ? "💸 DryRun OFF" : "🧪 DryRun ON", callback_data: "cmd:toggle_dryrun" }
+      ],
+      [
+        { text: "⚙️ Mode", callback_data: "cmd:mode" },
+        { text: "🛑 Kill Switch", callback_data: "cmd:kill" }
+      ],
+      [
+        { text: "🚀 Test Trade", callback_data: "cmd:test_trade" },
+        { text: "🌍 Language", callback_data: "ui:lang" }
+      ]
+    ]
+  };
+}
+
+function buildLanguageKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "English", callback_data: "lang:en" }],
+      [{ text: "Русский", callback_data: "lang:ru" }]
+    ]
+  };
 }
 
 function normalizeXItem(item) {
@@ -240,17 +345,12 @@ async function checkAccount(username) {
   }
 
   const items = feed.items.map(normalizeXItem).filter(item => item.id);
-  if (!items.length) {
-    console.log(`[${nowIso()}] ⚠️ no valid ids for ${username}`);
-    return;
-  }
+  if (!items.length) return;
 
   if (!watcherState.firstSyncDone) {
     items.slice(0, 10).forEach(item => watcherState.seenIds.add(item.id));
     watcherState.firstSyncDone = true;
-    console.log(
-      `[${nowIso()}] X first sync complete for ${username}, cached ${Math.min(items.length, 10)} posts`
-    );
+    console.log(`[${nowIso()}] X first sync complete for ${username}`);
     return;
   }
 
@@ -271,13 +371,11 @@ async function checkAccount(username) {
 
     const text = `🚨 <b>NEW X POST DETECTED</b>
 
-Account: @${username}
+<b>Account:</b> @${username}
 
 ${item.title}
 
 ${item.url}`;
-
-    console.log(`[${nowIso()}] 🚨 NEW POST: ${item.title}`);
 
     const gif = rand(X_DETECT_GIFS);
     if (gif) {
@@ -286,13 +384,8 @@ ${item.url}`;
         parse_mode: "HTML"
       });
     } else {
-      await sendText(CHAT_ID, text, { parse_mode: "HTML" });
+      await sendText(CHAT_ID, text);
     }
-  }
-
-  if (watcherState.seenIds.size > 500) {
-    const trimmed = Array.from(watcherState.seenIds).slice(-250);
-    watcherState.seenIds = new Set(trimmed);
   }
 }
 
@@ -319,7 +412,6 @@ function startWatcher() {
   };
 
   run();
-
   watcherState.timer = setInterval(run, WATCH_INTERVAL_MS);
 
   watcherState.guardTimer = setInterval(() => {
@@ -335,54 +427,72 @@ function startWatcher() {
 async function ensureCommands() {
   await bot.setMyCommands([
     { command: "start", description: "Start bot" },
-    { command: "menu", description: "Open control menu" },
+    { command: "menu", description: "Open menu" },
     { command: "status", description: "System status" },
-    { command: "test_trade", description: "Run test trade flow" },
+    { command: "lang", description: "Choose language" },
+    { command: "test_trade", description: "Run test trade" },
     { command: "level6_status", description: "Level 6 summary" },
-    { command: "level6_open_trades", description: "Show open trades" }
+    { command: "level6_open_trades", description: "Open trades" }
   ]);
+}
+
+async function openMenu(chatId, userId, replyToMessageId) {
+  await sendText(chatId, buildMainMenuText(userId), {
+    reply_markup: buildMenuKeyboard(userId),
+    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+  });
 }
 
 async function handleTextCommand(msg) {
   const text = String(msg.text || "").trim();
   const chatId = msg.chat.id;
+  const userId = msg.from?.id || msg.chat.id;
   const replyTo = msg.message_id;
 
   if (!text.startsWith("/")) return false;
 
   if (text === "/start") {
-    await sendText(chatId, "🚀 Bot is alive", {
+    await sendText(chatId, t(userId, "botAlive"), {
       reply_to_message_id: replyTo
     });
-    await sendText(chatId, buildMainMenuText(), {
-      parse_mode: "HTML",
-      reply_to_message_id: replyTo
-    });
+    await openMenu(chatId, userId, replyTo);
     return true;
   }
 
   if (text === "/menu") {
-    await sendText(chatId, buildMainMenuText(), {
-      parse_mode: "HTML",
+    await openMenu(chatId, userId, replyTo);
+    return true;
+  }
+
+  if (text === "/status") {
+    await sendText(chatId, buildStatusText(userId), {
       reply_to_message_id: replyTo
     });
     return true;
   }
 
-  if (text === "/status") {
-    await sendText(chatId, buildStatusText(), {
-      parse_mode: "HTML",
-      reply_to_message_id: replyTo
+  if (text === "/lang") {
+    await sendText(chatId, t(userId, "chooseLang"), {
+      reply_to_message_id: replyTo,
+      reply_markup: buildLanguageKeyboard()
     });
     return true;
   }
 
   if (text === "/test_trade") {
-    const sender = async payload => {
+    await sendText(chatId, t(userId, "entryStarted"), {
+      reply_to_message_id: replyTo
+    });
+
+    const userSender = async payload => {
       await sendTradePayload(chatId, payload, replyTo);
     };
 
-    await simulateTradeFlow(sender);
+    const groupSender = async payload => {
+      await sendTradePayload(CHAT_ID, payload);
+    };
+
+    await simulateTradeFlow(userSender, groupSender);
     return true;
   }
 
@@ -404,16 +514,108 @@ async function handleTextCommand(msg) {
   return false;
 }
 
+bot.on("callback_query", async query => {
+  try {
+    const data = query.data || "";
+    const userId = query.from?.id || 0;
+    const chatId = query.message?.chat?.id;
+
+    if (!chatId) return;
+
+    if (data === "ui:status") {
+      await bot.answerCallbackQuery(query.id);
+      await sendText(chatId, buildStatusText(userId));
+      return;
+    }
+
+    if (data === "ui:l6") {
+      await bot.answerCallbackQuery(query.id);
+      const s = getLevel6Summary();
+      await sendText(
+        chatId,
+        `🧠 <b>Level 6</b>
+
+<b>WinRate:</b> ${(s.winRate * 100).toFixed(1)}%
+<b>Trades:</b> ${s.totalTrades}
+<b>PnL:</b> ${s.pnl}%
+<b>Score:</b> ${s.avgEntryScore}`
+      );
+      return;
+    }
+
+    if (data === "ui:lang") {
+      await bot.answerCallbackQuery(query.id);
+      await sendText(chatId, t(userId, "chooseLang"), {
+        reply_markup: buildLanguageKeyboard()
+      });
+      return;
+    }
+
+    if (data === "lang:en" || data === "lang:ru") {
+      const lang = data.split(":")[1];
+      setUserLang(userId, lang);
+      await bot.answerCallbackQuery(query.id, {
+        text: `${t(userId, "langSet")}: ${lang.toUpperCase()}`
+      });
+      await openMenu(chatId, userId);
+      return;
+    }
+
+    if (data === "cmd:test_trade") {
+      await bot.answerCallbackQuery(query.id);
+      const userSender = async payload => {
+        await sendTradePayload(chatId, payload);
+      };
+      const groupSender = async payload => {
+        await sendTradePayload(CHAT_ID, payload);
+      };
+      await simulateTradeFlow(userSender, groupSender);
+      return;
+    }
+
+    if (data === "cmd:toggle_trading") {
+      const runtime = getTradingRuntime();
+      const result = await handleTradingCommand(runtime.enabled ? "/trading_off" : "/trading_on");
+      await bot.answerCallbackQuery(query.id, { text: result.message });
+      await openMenu(chatId, userId);
+      return;
+    }
+
+    if (data === "cmd:toggle_dryrun") {
+      const runtime = getTradingRuntime();
+      const result = await handleTradingCommand(runtime.dryRun ? "/dryrun_off" : "/dryrun_on");
+      await bot.answerCallbackQuery(query.id, { text: result.message });
+      await openMenu(chatId, userId);
+      return;
+    }
+
+    if (data === "cmd:mode") {
+      const result = await handleTradingCommand("/trade_mode");
+      await bot.answerCallbackQuery(query.id, { text: result.message });
+      await openMenu(chatId, userId);
+      return;
+    }
+
+    if (data === "cmd:kill") {
+      const result = await handleTradingCommand("/kill_switch");
+      await bot.answerCallbackQuery(query.id, { text: result.message });
+      await openMenu(chatId, userId);
+      return;
+    }
+  } catch (error) {
+    console.log(`callback error: ${error.message}`);
+  }
+});
+
 bot.on("message", async msg => {
   try {
     if (!msg?.text) return;
-
     const handled = await handleTextCommand(msg);
     if (handled) return;
   } catch (error) {
     console.log(`message handler error: ${error.message}`);
     try {
-      await sendText(msg.chat.id, "Chiikawa stumbled a little... 🥺", {
+      await sendText(msg.chat.id, t(msg.from?.id || msg.chat.id, "stumbled"), {
         reply_to_message_id: msg.message_id
       });
     } catch {}
