@@ -1,0 +1,12 @@
+{
+  "name": "youtube-watcher",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "youtube-watcher.js",
+  "scripts": {
+    "start": "node youtube-watcher.js"
+  },
+  "dependencies": {
+    "rss-parser": "^3.13.0"
+  }
+}
