@@ -126,35 +126,6 @@ export function getLevel6OpenTrades() {
   return ensureOrchestrator().getOpenTrades?.() || [];
 }
 
-export async function handleTradingAdminCallback(data) {
-  try {
-    if (data === "trade:toggle_enabled") {
-      tradingRuntime.enabled = !tradingRuntime.enabled;
-      return { ok: true, message: `Trading enabled: ${tradingRuntime.enabled}` };
-    }
-
-    if (data === "trade:toggle_kill") {
-      tradingRuntime.killSwitch = !tradingRuntime.killSwitch;
-      return { ok: true, message: `Kill switch: ${tradingRuntime.killSwitch}` };
-    }
-
-    if (data === "trade:cycle_mode") {
-      tradingRuntime.mode = tradingRuntime.mode === "safe" ? "aggressive" : "safe";
-      return { ok: true, message: `Mode: ${tradingRuntime.mode}` };
-    }
-
-    if (data === "trade:dryrun_toggle") {
-      tradingRuntime.dryRun = !tradingRuntime.dryRun;
-      ensureOrchestrator().dryRun = tradingRuntime.dryRun;
-      return { ok: true, message: `Dry run: ${tradingRuntime.dryRun}` };
-    }
-
-    return { ok: false, error: "Unknown action" };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
 export async function handleTradingCommand(text) {
   try {
     ensureOrchestrator();
@@ -247,6 +218,17 @@ Score: ${t.score}`
   }
 }
 
+function buildEntryReasoning(signal) {
+  return [
+    signal.volumeSpike ? "• volume spike confirmed" : null,
+    signal.smartWallets ? "• smart wallet participation detected" : null,
+    signal.liquidity > 10000 ? `• liquidity healthy: $${signal.liquidity}` : null,
+    signal.hypeScore > 70 ? `• social / hype score strong: ${signal.hypeScore}` : null
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildUpdateNarrative(trade) {
   const pnl = Number(trade.pnl || 0);
 
@@ -275,28 +257,29 @@ function buildFinalNarrative(closed) {
   return "Bad trade, but cut correctly. The loss matters less than protecting capital.";
 }
 
-export async function simulateTradeFlow(sendToTG) {
+export async function simulateTradeFlow(sendToUser, sendToGroup = null) {
   const engine = ensureOrchestrator();
 
-  const trade = engine.tryEnter({
+  const signal = {
     token: "CHI",
     price: 1,
     volumeSpike: true,
     smartWallets: true,
     liquidity: 20000,
     hypeScore: 80
-  });
+  };
+
+  const trade = engine.tryEnter(signal);
 
   if (!trade) {
-    await sendToTG({
+    await sendToUser({
       text: "No entry signal",
       gif: null
     });
     return;
   }
 
-  await sendToTG({
-    text: `🚀 <b>ENTRY</b>
+  const entryText = `🚀 <b>ENTRY</b>
 
 Token: ${trade.token}
 Price: ${trade.entry}
@@ -306,9 +289,21 @@ Dry run: ${tradingRuntime.dryRun}
 Max wallet exposure: ${tradingRuntime.maxWalletExposurePct}%
 Fee reserve: ${tradingRuntime.feeReserveSol} SOL
 
-🧠 Smart entry detected`,
+<b>Reasoning:</b>
+${buildEntryReasoning(signal)}
+
+🧠 Smart entry detected`;
+
+  const entryPayload = {
+    text: entryText,
     gif: pickNaturalGif("entry")
-  });
+  };
+
+  await sendToUser(entryPayload);
+
+  if (sendToGroup) {
+    await sendToGroup(entryPayload);
+  }
 
   let price = 1;
 
@@ -318,7 +313,7 @@ Fee reserve: ${tradingRuntime.feeReserveSol} SOL
     price *= 1 + (Math.random() * 0.12 - 0.04);
     engine.updateTrade(trade, price);
 
-    await sendToTG({
+    const updatePayload = {
       text: `📈 <b>Update</b>
 
 Token: ${trade.token}
@@ -327,23 +322,25 @@ Price: ${price.toFixed(4)}
 
 ${buildUpdateNarrative(trade)}`,
       gif: pickNaturalGif("update")
-    });
+    };
+
+    await sendToUser(updatePayload);
 
     const exit = engine.shouldExit(trade);
 
     if (exit) {
       const closed = engine.closeTrade(trade, exit);
 
-      await sendToTG({
+      const exitPayload = {
         text: `🏁 <b>EXIT</b>
 
 Token: ${closed.token}
 PnL: ${Number(closed.pnl || 0).toFixed(2)}%
 Reason: ${exit}`,
         gif: pickNaturalGif("exit")
-      });
+      };
 
-      await sendToTG({
+      const finalPayload = {
         text:
           Number(closed.pnl || 0) > 0
             ? `🎉 <b>WIN</b>
@@ -364,7 +361,15 @@ ${buildFinalNarrative(closed)}`,
           Number(closed.pnl || 0) > 0
             ? pickNaturalGif("win")
             : pickNaturalGif("loss")
-      });
+      };
+
+      await sendToUser(exitPayload);
+      await sendToUser(finalPayload);
+
+      if (sendToGroup) {
+        await sendToGroup(exitPayload);
+        await sendToGroup(finalPayload);
+      }
 
       return;
     }
@@ -372,16 +377,16 @@ ${buildFinalNarrative(closed)}`,
 
   const closed = engine.closeTrade(trade, "TIMEOUT");
 
-  await sendToTG({
+  const exitPayload = {
     text: `🏁 <b>EXIT</b>
 
 Token: ${closed.token}
 PnL: ${Number(closed.pnl || 0).toFixed(2)}%
 Reason: TIMEOUT`,
     gif: pickNaturalGif("exit")
-  });
+  };
 
-  await sendToTG({
+  const finalPayload = {
     text:
       Number(closed.pnl || 0) > 0
         ? `🎉 <b>WIN</b>
@@ -402,5 +407,13 @@ ${buildFinalNarrative(closed)}`,
       Number(closed.pnl || 0) > 0
         ? pickNaturalGif("win")
         : pickNaturalGif("loss")
-  });
+  };
+
+  await sendToUser(exitPayload);
+  await sendToUser(finalPayload);
+
+  if (sendToGroup) {
+    await sendToGroup(exitPayload);
+    await sendToGroup(finalPayload);
+  }
 }
