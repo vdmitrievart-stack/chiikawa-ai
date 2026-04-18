@@ -1,222 +1,199 @@
-// trading-admin.js
+// telegram-bot.js
 
-import { Level6TradingOrchestrator } from "./Level6TradingOrchestrator.js";
+import fetch from "node-fetch";
+import { startXWatcher } from "./x-watcher.js";
+import { initTradingAdmin, simulateTradeFlow } from "./trading-admin.js";
+
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+
+if (!TOKEN) {
+  console.error("❌ TELEGRAM_BOT_TOKEN missing");
+  process.exit(1);
+}
+
+const API = `https://api.telegram.org/bot${TOKEN}`;
+let offset = 0;
 
 // ==============================
-// STATE
+// TG CORE
 // ==============================
 
-const tradingRuntime = {
-  enabled: false,
-  mode: "safe",
-  killSwitch: false,
-  buybotAlertMinUsd: 20
-};
+async function tg(method, body = {}) {
+  const res = await fetch(`${API}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
 
-let orchestrator = null;
+  const data = await res.json();
 
-// ==============================
-// GIF ROTATION
-// ==============================
-
-const GIFS = {
-  entry: [
-    "https://tenor.com/vLMG1KGYUyT.gif",
-    "https://tenor.com/pp5GdrEl62Z.gif",
-    "https://tenor.com/sooKVCqgZq8.gif"
-  ],
-  update: [
-    "https://tenor.com/ljj380KXDAP.gif",
-    "https://tenor.com/fUK8Huu1U7Q.gif",
-    "https://tenor.com/g9gHsoSlJt.gif",
-    "https://tenor.com/sNFBJfQy31T.gif",
-    "https://tenor.com/fMh0VLFKGyX.gif"
-  ],
-  exit: [
-    "https://tenor.com/piMOnfwNEoX.gif",
-    "https://tenor.com/iIn3jQbN5XN.gif",
-    "https://tenor.com/b1s9E.gif"
-  ],
-  win: [
-    "https://tenor.com/qZRXpxQ9cAd.gif",
-    "https://tenor.com/lidNFsvSOfi.gif"
-  ],
-  loss: [
-    "https://tenor.com/rWrXAZPADpT.gif",
-    "https://tenor.com/sEo1VH4xE8q.gif"
-  ]
-};
-
-const gifRotationState = {
-  entry: { lastIndex: -1, cursor: 0 },
-  update: { lastIndex: -1, cursor: 0 },
-  exit: { lastIndex: -1, cursor: 0 },
-  win: { lastIndex: -1, cursor: 0 },
-  loss: { lastIndex: -1, cursor: 0 }
-};
-
-function pickNaturalGif(bucketName) {
-  const list = GIFS[bucketName];
-  const state = gifRotationState[bucketName];
-
-  if (!Array.isArray(list) || !list.length) return null;
-  if (list.length === 1) {
-    state.lastIndex = 0;
-    state.cursor = 0;
-    return list[0];
+  if (!res.ok || !data.ok) {
+    throw new Error(`Telegram API error in ${method}: ${JSON.stringify(data)}`);
   }
 
-  const start = state.cursor % list.length;
-  let chosenIndex = start;
+  return data.result;
+}
 
-  if (chosenIndex === state.lastIndex) {
-    chosenIndex = (chosenIndex + 1) % list.length;
+async function sendMessage(chatId, text, replyTo = null) {
+  return tg("sendMessage", {
+    chat_id: chatId,
+    text: String(text || "").slice(0, 4096),
+    parse_mode: "HTML",
+    ...(replyTo ? { reply_to_message_id: replyTo } : {})
+  });
+}
+
+async function sendGif(chatId, gif, caption = "", replyTo = null) {
+  return tg("sendAnimation", {
+    chat_id: chatId,
+    animation: gif,
+    caption: String(caption || "").slice(0, 1024),
+    parse_mode: "HTML",
+    ...(replyTo ? { reply_to_message_id: replyTo } : {})
+  });
+}
+
+// ==============================
+// TRADE REPORT SENDER
+// ==============================
+
+function createTradeSender(chatId, replyTo = null) {
+  return async ({ text, gif }) => {
+    if (gif) {
+      await sendGif(chatId, gif, text, replyTo);
+    } else {
+      await sendMessage(chatId, text, replyTo);
+    }
+  };
+}
+
+// ==============================
+// COMMANDS
+// ==============================
+
+async function handleCommand(msg) {
+  const text = String(msg.text || "").trim();
+  const chatId = msg.chat.id;
+  const replyTo = msg.message_id;
+
+  if (text === "/start") {
+    await sendMessage(
+      chatId,
+      `🐹 <b>Chiikawa bot is alive!</b>
+
+Watching X posts 👀
+Trade flow test ready 🚀
+
+Commands:
+/start
+/status
+/ping
+/test_trade`,
+      replyTo
+    );
+    return true;
   }
 
-  state.lastIndex = chosenIndex;
-  state.cursor = (chosenIndex + 1) % list.length;
+  if (text === "/status") {
+    await sendMessage(
+      chatId,
+      `✅ <b>Bot running</b>
+👀 X watcher active
+🎬 GIF trade reactions enabled`,
+      replyTo
+    );
+    return true;
+  }
 
-  return list[chosenIndex];
+  if (text === "/ping") {
+    await sendMessage(chatId, "pong 🏓", replyTo);
+    return true;
+  }
+
+  if (text === "/test_trade") {
+    const sender = createTradeSender(chatId, replyTo);
+    await simulateTradeFlow(sender);
+    return true;
+  }
+
+  return false;
 }
 
 // ==============================
-// INIT
+// MESSAGE HANDLER
 // ==============================
 
-export async function initTradingAdmin() {
-  console.log("🚀 Trading Admin init");
+async function handleMessage(message) {
+  try {
+    if (!message || !message.text) return;
 
-  orchestrator = new Level6TradingOrchestrator({
-    dryRun: true
-  });
-}
+    const handled = await handleCommand(message);
+    if (handled) return;
+  } catch (err) {
+    console.log("❌ handleMessage error:", err.message);
 
-// ==============================
-// GETTERS
-// ==============================
-
-export function getTradingRuntime() {
-  return tradingRuntime;
-}
-
-// ==============================
-// TRADE REPORT FLOW
-// ==============================
-
-export async function simulateTradeFlow(sendToTG) {
-  const trade = await orchestrator.tryEnter({
-    token: "CHI",
-    price: 1,
-    volumeSpike: true,
-    smartWallets: true,
-    liquidity: 20000,
-    hypeScore: 80
-  });
-
-  if (!trade) return;
-
-  await sendToTG({
-    text: `🚀 <b>ENTRY</b>
-
-Token: ${trade.token}
-Price: ${trade.entry}
-Score: ${trade.score}
-
-🧠 Smart entry detected`,
-    gif: pickNaturalGif("entry")
-  });
-
-  let price = 1;
-
-  for (let i = 0; i < 10; i++) {
-    await sleep(800);
-
-    price *= 1 + (Math.random() * 0.12 - 0.04);
-    orchestrator.updateTrade(trade, price);
-
-    await sendToTG({
-      text: `📈 <b>Update</b>
-
-Token: ${trade.token}
-PnL: ${trade.pnl.toFixed(2)}%
-Price: ${price.toFixed(4)}`,
-      gif: pickNaturalGif("update")
-    });
-
-    const exit = orchestrator.shouldExit(trade);
-
-    if (exit) {
-      const closed = orchestrator.closeTrade(trade, exit);
-
-      await sendToTG({
-        text: `🏁 <b>EXIT</b>
-
-Token: ${closed.token}
-PnL: ${closed.pnl.toFixed(2)}%
-Reason: ${exit}`,
-        gif: pickNaturalGif("exit")
-      });
-
-      await sendToTG({
-        text:
-          closed.pnl > 0
-            ? `🎉 <b>WIN</b>
-
-+${closed.pnl.toFixed(2)}%
-
-Chiikawa happy 🐹✨
-
-📊 Good entry, momentum confirmed`
-            : `💀 <b>LOSS</b>
-
-${closed.pnl.toFixed(2)}%
-
-Market tricky...
-
-📊 Lesson: weak momentum or bad timing`,
-        gif: closed.pnl > 0 ? pickNaturalGif("win") : pickNaturalGif("loss")
-      });
-
-      return;
+    try {
+      await sendMessage(message.chat.id, "Chiikawa stumbled a little... 🥺", message.message_id);
+    } catch (sendErr) {
+      console.log("❌ fallback send error:", sendErr.message);
     }
   }
-
-  const closed = orchestrator.closeTrade(trade, "TIMEOUT");
-
-  await sendToTG({
-    text: `🏁 <b>EXIT</b>
-
-Token: ${closed.token}
-PnL: ${closed.pnl.toFixed(2)}%
-Reason: TIMEOUT`,
-    gif: pickNaturalGif("exit")
-  });
-
-  await sendToTG({
-    text:
-      closed.pnl > 0
-        ? `🎉 <b>WIN</b>
-
-+${closed.pnl.toFixed(2)}%
-
-Chiikawa happy 🐹✨
-
-📊 Good entry, momentum confirmed`
-        : `💀 <b>LOSS</b>
-
-${closed.pnl.toFixed(2)}%
-
-Market tricky...
-
-📊 Lesson: weak momentum or bad timing`,
-    gif: closed.pnl > 0 ? pickNaturalGif("win") : pickNaturalGif("loss")
-  });
 }
 
 // ==============================
-// HELPERS
+// LOOP
 // ==============================
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+async function poll() {
+  while (true) {
+    try {
+      const updates = await tg("getUpdates", {
+        offset,
+        timeout: 30,
+        allowed_updates: ["message"]
+      });
+
+      for (const upd of updates) {
+        offset = upd.update_id + 1;
+
+        if (upd.message) {
+          await handleMessage(upd.message);
+        }
+      }
+    } catch (err) {
+      console.log("❌ polling error:", err.message);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
 }
+
+// ==============================
+// START
+// ==============================
+
+async function start() {
+  console.log("🚀 bot start");
+
+  await tg("deleteWebhook");
+
+  await initTradingAdmin();
+
+  startXWatcher();
+  console.log("👀 X watcher started");
+
+  await tg("setMyCommands", {
+    commands: [
+      { command: "start", description: "Start bot" },
+      { command: "status", description: "Show bot status" },
+      { command: "ping", description: "Ping bot" },
+      { command: "test_trade", description: "Run test trade with GIF reactions" }
+    ]
+  });
+
+  await poll();
+}
+
+start().catch(err => {
+  console.error("❌ startup error:", err.message);
+  process.exit(1);
+});
