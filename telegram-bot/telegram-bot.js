@@ -1,4 +1,6 @@
 import http from "node:http";
+import fs from "node:fs/promises";
+import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
 import Parser from "rss-parser";
 import {
@@ -28,8 +30,21 @@ const TELEGRAM_WEBHOOK_BASE_URL =
 
 const WEBHOOK_SECRET =
   process.env.WEBHOOK_SECRET ||
-  process.env.TELEGRAM_WEBHOOK_SECRET ||
-  "chiikawa-super-secret";
+  "chiikawa_webhook_secret_2026";
+
+const WEBHOOK_PATH = `/telegram/${WEBHOOK_SECRET}`;
+const WEBHOOK_URL = `${TELEGRAM_WEBHOOK_BASE_URL}${WEBHOOK_PATH}`;
+
+const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN || "";
+const X_MIN_FOLLOWERS = Number(process.env.X_MIN_FOLLOWERS || 1000);
+const X_MAX_STORED_IDS = Number(process.env.X_MAX_STORED_IDS || 500);
+const X_POST_COOLDOWN_MS = Number(process.env.X_POST_COOLDOWN_MS || 20000);
+const X_WATCH_INTERVAL_MS = Number(process.env.X_LOOP_INTERVAL_MS || 60000);
+const X_WATCH_HEARTBEAT_TIMEOUT_MS = Number(
+  process.env.X_WATCH_HEARTBEAT_TIMEOUT_MS || 180000
+);
+
+const STATE_FILE = path.resolve("/tmp/telegram-bot-x-state.json");
 
 if (!TOKEN) {
   console.error("❌ BOT_TOKEN missing");
@@ -37,7 +52,7 @@ if (!TOKEN) {
 }
 
 if (!CHAT_ID) {
-  console.error("❌ CHAT_ID missing");
+  console.error("❌ TELEGRAM_ALERT_CHAT_ID / CHAT_ID missing");
   process.exit(1);
 }
 
@@ -46,12 +61,7 @@ if (!TELEGRAM_WEBHOOK_BASE_URL) {
   process.exit(1);
 }
 
-const WEBHOOK_PATH = `/telegram/${WEBHOOK_SECRET}`;
-const WEBHOOK_URL = `${TELEGRAM_WEBHOOK_BASE_URL}${WEBHOOK_PATH}`;
-
-const bot = new TelegramBot(TOKEN, {
-  polling: false
-});
+const bot = new TelegramBot(TOKEN, { polling: false });
 
 const parser = new Parser({
   timeout: 15000,
@@ -61,18 +71,44 @@ const parser = new Parser({
 });
 
 const userSettings = new Map();
+const followerCache = new Map();
+
+const watcherState = {
+  started: false,
+  timer: null,
+  guardTimer: null,
+  lastHeartbeat: Date.now(),
+  lastPostedAt: 0,
+  lastHostIndex: 0,
+  firstSyncDone: false,
+  seenIds: new Set()
+};
 
 function getEnvList(name) {
   const raw = process.env[name];
   if (!raw) return [];
-  return raw.split(",").map(v => v.trim()).filter(Boolean);
+  return raw
+    .split(",")
+    .map(v => v.trim())
+    .filter(Boolean);
 }
 
-const X_GIF_FILE_IDS = getEnvList("X_GIF_FILE_IDS");
+function getEnvJson(name, fallback = {}) {
+  try {
+    const raw = process.env[name];
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
 const WATCH_ACCOUNTS = getEnvList("X_WATCH_ACCOUNTS").length
   ? getEnvList("X_WATCH_ACCOUNTS")
   : [process.env.X_USERNAME || "chiikawa_kouhou"];
 
+const X_GIF_FILE_IDS = getEnvList("X_GIF_FILE_IDS");
+const X_ACCOUNT_FOLLOWERS_JSON = getEnvJson("X_ACCOUNT_FOLLOWERS_JSON", {});
 const NITTER_HOSTS = getEnvList("X_RSS_HOSTS").length
   ? getEnvList("X_RSS_HOSTS")
   : [
@@ -80,22 +116,6 @@ const NITTER_HOSTS = getEnvList("X_RSS_HOSTS").length
       "https://nitter.privacydev.net",
       "https://nitter.poast.org"
     ];
-
-const WATCH_INTERVAL_MS = Number(process.env.X_LOOP_INTERVAL_MS || 60000);
-const WATCH_HEARTBEAT_TIMEOUT_MS = Number(
-  process.env.X_WATCH_HEARTBEAT_TIMEOUT_MS || 180000
-);
-
-const watcherState = {
-  started: false,
-  timer: null,
-  guardTimer: null,
-  lastHeartbeat: Date.now(),
-  seenIds: new Set(),
-  firstSyncDone: false,
-  lastDetectedAt: 0,
-  lastHostIndex: 0
-};
 
 const I18N = {
   en: {
@@ -123,9 +143,7 @@ const I18N = {
     langSet: "🌍 Language set",
     noOpenTrades: "No open trades",
     stumbled: "Chiikawa stumbled a little... 🥺",
-    entryStarted: "🚀 Test trade launched",
-    newXPost: "🚨 NEW X POST DETECTED",
-    account: "Account"
+    entryStarted: "🚀 Test trade launched"
   },
   ru: {
     botAlive: "🚀 Бот жив",
@@ -152,11 +170,18 @@ const I18N = {
     langSet: "🌍 Язык установлен",
     noOpenTrades: "Открытых сделок нет",
     stumbled: "Chiikawa немного споткнулся... 🥺",
-    entryStarted: "🚀 Тестовая сделка запущена",
-    newXPost: "🚨 ОБНАРУЖЕН НОВЫЙ ПОСТ В X",
-    account: "Аккаунт"
+    entryStarted: "🚀 Тестовая сделка запущена"
   }
 };
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function rand(arr) {
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  return arr[Math.floor(Math.random() * arr.length)];
+}
 
 function getUserLang(userId) {
   return userSettings.get(userId)?.lang || "ru";
@@ -170,15 +195,6 @@ function setUserLang(userId, lang) {
 function t(userId, key) {
   const lang = getUserLang(userId);
   return (I18N[lang] && I18N[lang][key]) || I18N.ru[key] || key;
-}
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function rand(arr) {
-  if (!Array.isArray(arr) || arr.length === 0) return null;
-  return arr[Math.floor(Math.random() * arr.length)];
 }
 
 async function sendText(chatId, text, options = {}) {
@@ -372,11 +388,147 @@ async function refreshMenu(chatId, messageId, userId) {
   }
 }
 
-function normalizeXItem(item) {
-  const id = item.id || item.guid || item.link || "";
-  const title = String(item.title || "").trim();
-  const url = item.link || item.id || "";
-  return { id, title, url };
+function normalizeXItem(item, username) {
+  return {
+    id: item.id || item.guid || item.link || "",
+    title: String(item.title || "").trim(),
+    url: item.link || item.id || "",
+    username
+  };
+}
+
+function stripHtml(text) {
+  return String(text || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isRaidOrShillPost(text) {
+  const value = stripHtml(text).toLowerCase();
+
+  const rejectPatterns = [
+    /\braid\b/,
+    /\bshill\b/,
+    /\bca\b/,
+    /\bcontract\b/,
+    /\b0x[a-f0-9]{6,}\b/i,
+    /\bairdrop\b/,
+    /\bwhitelist\b/,
+    /\bjoin\b.{0,20}\btelegram\b/,
+    /\bcomment\b.{0,20}\bbelow\b/,
+    /\btag\b.{0,20}\bfriends\b/,
+    /\bfollow\b.{0,20}\bretweet\b/,
+    /\bgiveaway\b/,
+    /\bpromo\b/,
+    /\bpartnership\b/,
+    /\bbuy now\b/,
+    /\bcall\b/
+  ];
+
+  return rejectPatterns.some(re => re.test(value));
+}
+
+function isLowValuePost(text) {
+  const value = stripHtml(text).toLowerCase();
+
+  if (!value) return true;
+  if (value.length < 18) return true;
+  if (/^(gm|gn|lol|ok|yes|no|hi|hello|soon)[!\.\s]*$/i.test(value)) return true;
+
+  return false;
+}
+
+function buildXCommentary(title) {
+  const text = stripHtml(title);
+
+  if (/episode|video|trailer|preview|teaser/i.test(text)) {
+    return "🎬 Похоже на контентный апдейт, а не шум.";
+  }
+
+  if (/release|launch|start|open|available/i.test(text)) {
+    return "🚀 Похоже на реальный апдейт/запуск.";
+  }
+
+  if (/update|notice|important|news|announcement/i.test(text)) {
+    return "🧠 Выглядит как полезное объявление.";
+  }
+
+  return "👀 Пойман новый содержательный пост.";
+}
+
+async function loadWatcherState() {
+  try {
+    const raw = await fs.readFile(STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    watcherState.firstSyncDone = Boolean(parsed.firstSyncDone);
+    watcherState.lastPostedAt = Number(parsed.lastPostedAt || 0);
+    watcherState.seenIds = new Set(
+      Array.isArray(parsed.seenIds) ? parsed.seenIds.slice(-X_MAX_STORED_IDS) : []
+    );
+
+    console.log(`loaded watcher state: ${watcherState.seenIds.size} ids`);
+  } catch {
+    console.log("watcher state not found, starting fresh");
+  }
+}
+
+async function saveWatcherState() {
+  try {
+    const payload = {
+      firstSyncDone: watcherState.firstSyncDone,
+      lastPostedAt: watcherState.lastPostedAt,
+      seenIds: Array.from(watcherState.seenIds).slice(-X_MAX_STORED_IDS)
+    };
+
+    await fs.writeFile(STATE_FILE, JSON.stringify(payload), "utf8");
+  } catch (error) {
+    console.log(`saveWatcherState error: ${error.message}`);
+  }
+}
+
+async function getFollowerCount(username) {
+  if (followerCache.has(username)) {
+    return followerCache.get(username);
+  }
+
+  if (typeof X_ACCOUNT_FOLLOWERS_JSON[username] === "number") {
+    const val = Number(X_ACCOUNT_FOLLOWERS_JSON[username]);
+    followerCache.set(username, val);
+    return val;
+  }
+
+  if (!TWITTER_BEARER_TOKEN) {
+    followerCache.set(username, null);
+    return null;
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.twitter.com/2/users/by/username/${encodeURIComponent(
+        username
+      )}?user.fields=public_metrics`,
+      {
+        headers: {
+          Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`
+        }
+      }
+    );
+
+    const data = await res.json();
+
+    const count = Number(
+      data?.data?.public_metrics?.followers_count ?? null
+    );
+
+    followerCache.set(username, Number.isFinite(count) ? count : null);
+    return Number.isFinite(count) ? count : null;
+  } catch (error) {
+    console.log(`getFollowerCount error for ${username}: ${error.message}`);
+    followerCache.set(username, null);
+    return null;
+  }
 }
 
 async function parseFeedWithFallback(username) {
@@ -400,12 +552,45 @@ async function parseFeedWithFallback(username) {
   throw lastError || new Error("All RSS hosts failed");
 }
 
-async function postXAlert(username, item) {
-  const text = `${t(0, "newXPost")}
+async function shouldForwardXPost(item) {
+  const followers = await getFollowerCount(item.username);
 
-<b>${t(0, "account")}:</b> @${username}
+  if (followers !== null && followers < X_MIN_FOLLOWERS) {
+    console.log(
+      `[${nowIso()}] skip ${item.username}: followers ${followers} < ${X_MIN_FOLLOWERS}`
+    );
+    return false;
+  }
 
-${item.title}
+  if (isRaidOrShillPost(item.title)) {
+    console.log(`[${nowIso()}] skip ${item.username}: raid/shill filter`);
+    return false;
+  }
+
+  if (isLowValuePost(item.title)) {
+    console.log(`[${nowIso()}] skip ${item.username}: low value`);
+    return false;
+  }
+
+  return true;
+}
+
+async function postXAlert(item) {
+  const now = Date.now();
+  if (now - watcherState.lastPostedAt < X_POST_COOLDOWN_MS) {
+    console.log(`[${nowIso()}] cooldown skip for ${item.username}`);
+    return;
+  }
+
+  const commentary = buildXCommentary(item.title);
+  const followers = await getFollowerCount(item.username);
+
+  const text = `🚨 <b>NEW X POST DETECTED</b>
+
+<b>Account:</b> @${item.username}
+${followers !== null ? `<b>Followers:</b> ${followers}\n` : ""}<b>Post:</b> ${item.title}
+
+${commentary}
 
 ${item.url}`;
 
@@ -420,9 +605,11 @@ ${item.url}`;
     } else {
       await sendText(CHAT_ID, text);
     }
+
+    watcherState.lastPostedAt = now;
+    await saveWatcherState();
   } catch (error) {
     console.log(`postXAlert error: ${error.message}`);
-    await sendText(CHAT_ID, text);
   }
 }
 
@@ -434,12 +621,16 @@ async function checkAccount(username) {
     return;
   }
 
-  const items = feed.items.map(normalizeXItem).filter(item => item.id);
+  const items = feed.items
+    .map(item => normalizeXItem(item, username))
+    .filter(item => item.id);
+
   if (!items.length) return;
 
   if (!watcherState.firstSyncDone) {
-    items.slice(0, 10).forEach(item => watcherState.seenIds.add(item.id));
+    items.slice(0, 20).forEach(item => watcherState.seenIds.add(item.id));
     watcherState.firstSyncDone = true;
+    await saveWatcherState();
     console.log(`[${nowIso()}] X first sync complete for ${username}`);
     return;
   }
@@ -455,10 +646,21 @@ async function checkAccount(username) {
     return;
   }
 
-  for (const item of fresh.slice(-3)) {
+  for (const item of fresh) {
     watcherState.seenIds.add(item.id);
-    watcherState.lastDetectedAt = Date.now();
-    await postXAlert(username, item);
+
+    if (watcherState.seenIds.size > X_MAX_STORED_IDS) {
+      watcherState.seenIds = new Set(
+        Array.from(watcherState.seenIds).slice(-X_MAX_STORED_IDS)
+      );
+    }
+
+    const okToPost = await shouldForwardXPost(item);
+    await saveWatcherState();
+
+    if (!okToPost) continue;
+
+    await postXAlert(item);
   }
 }
 
@@ -486,11 +688,11 @@ function startWatcher() {
 
   run();
 
-  watcherState.timer = setInterval(run, WATCH_INTERVAL_MS);
+  watcherState.timer = setInterval(run, X_WATCH_INTERVAL_MS);
 
   watcherState.guardTimer = setInterval(() => {
     const diff = Date.now() - watcherState.lastHeartbeat;
-    if (diff > WATCH_HEARTBEAT_TIMEOUT_MS) {
+    if (diff > X_WATCH_HEARTBEAT_TIMEOUT_MS) {
       console.log(`[${nowIso()}] ♻️ WATCHER HEARTBEAT RESET`);
       watcherState.lastHeartbeat = Date.now();
       run();
@@ -664,58 +866,23 @@ async function handleCallbackQuery(query) {
   console.log("unknown callback:", data);
 }
 
-bot.on("message", async msg => {
-  try {
-    if (!msg?.text) return;
-    const handled = await handleTextCommand(msg);
-    if (handled) return;
-  } catch (error) {
-    console.log(`message handler error: ${error.message}`);
-    try {
-      await sendText(msg.chat.id, t(msg.from?.id || msg.chat.id, "stumbled"), {
-        reply_to_message_id: msg.message_id
-      });
-    } catch {}
-  }
-});
-
-bot.on("callback_query", async query => {
-  try {
-    await handleCallbackQuery(query);
-  } catch (error) {
-    const chatId = query?.message?.chat?.id;
-    console.log("callback error full:", error);
-    try {
-      if (chatId) {
-        await sendText(chatId, `⚠️ Callback error: ${error.message}`);
-      }
-    } catch {}
-  }
-});
-
-process.on("unhandledRejection", error => {
-  console.log("Unhandled rejection:", error);
-});
-
-process.on("uncaughtException", error => {
-  console.log("Uncaught exception:", error);
-});
-
 async function processUpdate(update) {
-  if (!update || typeof update !== "object") return;
-
   try {
-    if (update.callback_query) {
+    if (update?.callback_query) {
       await handleCallbackQuery(update.callback_query);
       return;
     }
 
-    if (update.message?.text) {
+    if (update?.message?.text) {
       await handleTextCommand(update.message);
+      return;
     }
   } catch (error) {
     console.log("processUpdate error:", error);
-    const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id;
+    const chatId =
+      update?.message?.chat?.id ||
+      update?.callback_query?.message?.chat?.id;
+
     try {
       if (chatId) {
         await sendText(chatId, `⚠️ Update error: ${error.message}`);
@@ -725,56 +892,52 @@ async function processUpdate(update) {
 }
 
 function createServer() {
-  return http.createServer(async (req, res) => {
-    try {
-      if (req.method === "GET" && req.url === "/health") {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
+  return http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
           ok: true,
           service: "telegram-bot",
           watcherStarted: watcherState.started,
           heartbeat: watcherState.lastHeartbeat
-        }));
-        return;
-      }
-
-      if (req.method === "POST" && req.url === WEBHOOK_PATH) {
-        let body = "";
-
-        req.on("data", chunk => {
-          body += chunk.toString();
-        });
-
-        req.on("end", async () => {
-          try {
-            const update = body ? JSON.parse(body) : {};
-            await processUpdate(update);
-
-            res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: true }));
-          } catch (error) {
-            console.log("webhook body error:", error);
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ ok: false, error: error.message }));
-          }
-        });
-
-        return;
-      }
-
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: "Not found" }));
-    } catch (error) {
-      console.log("server error:", error);
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: false, error: error.message }));
+        })
+      );
+      return;
     }
+
+    if (req.method === "POST" && req.url === WEBHOOK_PATH) {
+      let body = "";
+
+      req.on("data", chunk => {
+        body += chunk.toString();
+      });
+
+      req.on("end", async () => {
+        try {
+          const update = body ? JSON.parse(body) : {};
+          await processUpdate(update);
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (error) {
+          console.log("webhook body error:", error);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: error.message }));
+        }
+      });
+
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: "Not found" }));
   });
 }
 
 async function ensureWebhook() {
   try {
-    await bot.deleteWebHook({ drop_pending_updates: false });
+    await bot.deleteWebHook({ drop_pending_updates: true });
   } catch (error) {
     console.log("deleteWebHook warn:", error.message);
   }
@@ -790,14 +953,17 @@ async function ensureCommandsAndWebhook() {
 
 async function bootstrap() {
   console.log("🤖 BOT STARTED");
+  await loadWatcherState();
   await initTradingAdmin();
-  await ensureCommandsAndWebhook();
-  startWatcher();
 
   const server = createServer();
-  server.listen(PORT, () => {
+
+  server.listen(PORT, async () => {
     console.log(`HTTP server listening on ${PORT}`);
     console.log(`Webhook path: ${WEBHOOK_PATH}`);
+
+    await ensureCommandsAndWebhook();
+    startWatcher();
   });
 
   setInterval(() => {
