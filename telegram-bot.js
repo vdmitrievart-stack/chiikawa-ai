@@ -14,10 +14,6 @@ if (!TOKEN) {
 const API = `https://api.telegram.org/bot${TOKEN}`;
 let offset = 0;
 
-// ==============================
-// TG CORE
-// ==============================
-
 async function tg(method, body = {}) {
   const res = await fetch(`${API}/${method}`, {
     method: "POST",
@@ -53,10 +49,6 @@ async function sendGif(chatId, gif, caption = "", replyTo = null) {
   });
 }
 
-// ==============================
-// TRADE REPORT SENDER
-// ==============================
-
 function createTradeSender(chatId, replyTo = null) {
   return async ({ text, gif }) => {
     if (gif) {
@@ -66,10 +58,6 @@ function createTradeSender(chatId, replyTo = null) {
     }
   };
 }
-
-// ==============================
-// COMMANDS
-// ==============================
 
 async function handleCommand(msg) {
   const text = String(msg.text || "").trim();
@@ -119,10 +107,6 @@ Commands:
   return false;
 }
 
-// ==============================
-// MESSAGE HANDLER
-// ==============================
-
 async function handleMessage(message) {
   try {
     if (!message || !message.text) return;
@@ -133,16 +117,16 @@ async function handleMessage(message) {
     console.log("❌ handleMessage error:", err.message);
 
     try {
-      await sendMessage(message.chat.id, "Chiikawa stumbled a little... 🥺", message.message_id);
+      await sendMessage(
+        message.chat.id,
+        "Chiikawa stumbled a little... 🥺",
+        message.message_id
+      );
     } catch (sendErr) {
       console.log("❌ fallback send error:", sendErr.message);
     }
   }
 }
-
-// ==============================
-// LOOP
-// ==============================
 
 async function poll() {
   while (true) {
@@ -167,18 +151,14 @@ async function poll() {
   }
 }
 
-// ==============================
-// START
-// ==============================
-
 async function start() {
   console.log("🚀 bot start");
 
   await tg("deleteWebhook");
 
   await initTradingAdmin();
-
   startXWatcher();
+
   console.log("👀 X watcher started");
 
   await tg("setMyCommands", {
