@@ -2,15 +2,29 @@ export function buildBuyAlert(input = {}) {
   const token = String(input.token || "UNKNOWN");
   const amount = String(input.amount || "");
   const ca = String(input.ca || "");
-  return `🚀 CHIIKAWA BUY ALERT\n\nToken: ${token}\nAmount: ${amount}\nCA: ${ca}`;
+  const price = String(input.price || "");
+  const buyer = String(input.buyer || "");
+
+  return `🚀 CHIIKAWA BUY ALERT
+
+Token: ${token}
+Amount: ${amount}
+Price: ${price}
+Buyer: ${buyer}
+CA: ${ca}`;
 }
 
 export function buildBuyReaction(input = {}) {
   const token = String(input.token || "UNKNOWN");
-  return `Chiikawa noticed a buy on ${token} 🐹💰`;
+  const amount = String(input.amount || "");
+  return `Chiikawa noticed a buy on ${token} 🐹💰
+
+Amount: ${amount}`;
 }
 
-export default {
+const personality = {
   buildBuyAlert,
   buildBuyReaction
 };
+
+export default personality;
