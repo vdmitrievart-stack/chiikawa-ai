@@ -278,7 +278,7 @@ function buildFinalNarrative(closed) {
 export async function simulateTradeFlow(sendToTG) {
   const engine = ensureOrchestrator();
 
-  const trade = await engine.tryEnter({
+  const trade = engine.tryEnter({
     token: "CHI",
     price: 1,
     volumeSpike: true,
