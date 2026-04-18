@@ -22,7 +22,6 @@ export class Level6TradingOrchestrator {
     };
 
     this.openTrades.push(trade);
-
     return trade;
   }
 
@@ -62,7 +61,6 @@ export class Level6TradingOrchestrator {
     };
 
     this.journal.push(closed);
-
     return closed;
   }
 
