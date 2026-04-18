@@ -1,4 +1,6 @@
 import fetch from "node-fetch";
+import fs from "fs";
+import path from "path";
 
 // ================= ENV =================
 
@@ -16,9 +18,12 @@ const CHIIKAWA_AI_URL =
 const AI_BASE = CHIIKAWA_AI_URL.replace(/\/chat$/, "");
 const X_FORWARD_URL = process.env.X_FORWARD_URL || `${AI_BASE}/watchers/x`;
 
-const POLL_INTERVAL = 60000;
+const POLL_INTERVAL = Number(process.env.X_LOOP_INTERVAL_MS || 60000);
 const BACKOFF_ERROR = 5 * 60 * 1000;
 const BACKOFF_CREDITS = 60 * 60 * 1000;
+
+const DATA_DIR = path.join(process.cwd(), "data");
+const STATE_FILE = path.join(DATA_DIR, "x-watcher-state.json");
 
 // ================= UTILS =================
 
@@ -28,6 +33,75 @@ function sleep(ms) {
 
 function log(...args) {
   console.log("[X WATCHER]", ...args);
+}
+
+function ensureDirSync(dirPath) {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function loadState() {
+  try {
+    ensureDirSync(DATA_DIR);
+
+    if (!fs.existsSync(STATE_FILE)) {
+      return {
+        lastTweetId: null,
+        initialized: false,
+        updatedAt: new Date().toISOString()
+      };
+    }
+
+    const raw = fs.readFileSync(STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    return {
+      lastTweetId: parsed?.lastTweetId || null,
+      initialized: Boolean(parsed?.initialized),
+      updatedAt: parsed?.updatedAt || new Date().toISOString()
+    };
+  } catch (error) {
+    log("state load error:", error.message);
+    return {
+      lastTweetId: null,
+      initialized: false,
+      updatedAt: new Date().toISOString()
+    };
+  }
+}
+
+function saveState() {
+  try {
+    ensureDirSync(DATA_DIR);
+    fs.writeFileSync(
+      STATE_FILE,
+      JSON.stringify(
+        {
+          lastTweetId: state.lastTweetId,
+          initialized: state.initialized,
+          updatedAt: new Date().toISOString()
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    log("state save error:", error.message);
+  }
+}
+
+function compareTweetIds(a, b) {
+  try {
+    const aa = BigInt(a);
+    const bb = BigInt(b);
+    if (aa > bb) return 1;
+    if (aa < bb) return -1;
+    return 0;
+  } catch {
+    if (String(a) > String(b)) return 1;
+    if (String(a) < String(b)) return -1;
+    return 0;
+  }
 }
 
 // ================= DEBUG =================
@@ -40,7 +114,7 @@ log("FORWARD URL:", X_FORWARD_URL);
 
 // ================= STATE =================
 
-let lastTweetId = null;
+const state = loadState();
 let backoffUntil = 0;
 
 // ================= CORE =================
@@ -78,7 +152,7 @@ async function getTweets(userId) {
     throw new Error(JSON.stringify(data));
   }
 
-  return data?.data || [];
+  return Array.isArray(data?.data) ? data.data : [];
 }
 
 async function forwardTweet(tweet) {
@@ -93,15 +167,31 @@ async function forwardTweet(tweet) {
       tweet: {
         id: tweet.id,
         text: tweet.text,
+        createdAt: tweet.created_at || null,
+        username: X_USERNAME,
         url: `https://x.com/${X_USERNAME}/status/${tweet.id}`
       }
     })
   });
 
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(txt);
+  const text = await res.text();
+
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
   }
+
+  if (!res.ok) {
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+
+  if (data && data.ok === false) {
+    throw new Error(JSON.stringify(data));
+  }
+
+  return data;
 }
 
 // ================= ERROR =================
@@ -162,15 +252,35 @@ async function loop() {
         continue;
       }
 
-      const ordered = [...tweets].reverse();
+      const ordered = [...tweets].sort((a, b) => compareTweetIds(a.id, b.id));
+
+      // Warm start: first successful launch after empty state
+      if (!state.initialized || !state.lastTweetId) {
+        const newest = ordered[ordered.length - 1];
+        state.lastTweetId = newest.id;
+        state.initialized = true;
+        saveState();
+        log(`Warm start complete. Anchored at tweet ${state.lastTweetId}`);
+        await sleep(POLL_INTERVAL);
+        continue;
+      }
+
+      let forwardedAny = false;
 
       for (const t of ordered) {
-        if (!lastTweetId || BigInt(t.id) > BigInt(lastTweetId)) {
+        if (compareTweetIds(t.id, state.lastTweetId) > 0) {
           await forwardTweet(t);
-          lastTweetId = t.id;
+          state.lastTweetId = t.id;
+          state.initialized = true;
+          saveState();
+          forwardedAny = true;
 
           log("✅ Forwarded:", t.id);
         }
+      }
+
+      if (!forwardedAny) {
+        log("No new tweets");
       }
     } catch (err) {
       handleError(err);
