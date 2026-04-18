@@ -1,5 +1,5 @@
 {
-  "name": "chiikawa-buybot",
+  "name": "buybot",
   "version": "1.0.0",
   "type": "module",
   "main": "buybot-worker.js",
