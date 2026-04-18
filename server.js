@@ -3,6 +3,7 @@ import cors from "cors";
 import OpenAI from "openai";
 import fs from "fs";
 import path from "path";
+import fetch from "node-fetch";
 
 const app = express();
 
@@ -12,6 +13,11 @@ app.use(express.json());
 const PORT = Number(process.env.PORT || 10000);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ADMIN_SECRET = process.env.ADMIN_SECRET || "";
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_ALERT_CHAT_ID =
+  process.env.TELEGRAM_ALERT_CHAT_ID ||
+  process.env.FORCED_GROUP_CHAT_ID ||
+  "-1003953010138";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY");
@@ -22,6 +28,7 @@ const openai = new OpenAI({
 });
 
 const CONFIG_FILE = path.resolve("./runtime-config.json");
+const X_WATCHER_STATE_FILE = path.resolve("./watchers-x-state.json");
 
 const DEFAULT_CONFIG = {
   quietMode: false,
@@ -59,10 +66,126 @@ function saveRuntimeConfig(config) {
   }
 }
 
+function loadXWatcherState() {
+  try {
+    if (!fs.existsSync(X_WATCHER_STATE_FILE)) {
+      return {
+        postedTweetIds: [],
+        updatedAt: Date.now()
+      };
+    }
+
+    const raw = fs.readFileSync(X_WATCHER_STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+
+    return {
+      postedTweetIds: Array.isArray(parsed?.postedTweetIds)
+        ? parsed.postedTweetIds
+        : [],
+      updatedAt: Number(parsed?.updatedAt || Date.now())
+    };
+  } catch (error) {
+    console.error("Failed to load X watcher state:", error.message);
+    return {
+      postedTweetIds: [],
+      updatedAt: Date.now()
+    };
+  }
+}
+
+function saveXWatcherState(state) {
+  try {
+    const next = {
+      postedTweetIds: Array.isArray(state?.postedTweetIds)
+        ? state.postedTweetIds.slice(0, 500)
+        : [],
+      updatedAt: Date.now()
+    };
+
+    fs.writeFileSync(X_WATCHER_STATE_FILE, JSON.stringify(next, null, 2), "utf8");
+  } catch (error) {
+    console.error("Failed to save X watcher state:", error.message);
+  }
+}
+
 let runtimeConfig = loadRuntimeConfig();
+let xWatcherState = loadXWatcherState();
 
 function authOk(secret) {
   return ADMIN_SECRET && secret && secret === ADMIN_SECRET;
+}
+
+function wasTweetPosted(tweetId) {
+  return xWatcherState.postedTweetIds.includes(String(tweetId));
+}
+
+function markTweetPosted(tweetId) {
+  xWatcherState.postedTweetIds.unshift(String(tweetId));
+  xWatcherState.postedTweetIds = xWatcherState.postedTweetIds.slice(0, 500);
+  xWatcherState.updatedAt = Date.now();
+  saveXWatcherState(xWatcherState);
+}
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function normalizeTweetText(text) {
+  return String(text || "").replace(/\r/g, "").trim();
+}
+
+function buildTelegramXPost(tweet) {
+  const username = String(tweet?.username || "").trim() || "unknown";
+  const text = normalizeTweetText(tweet?.text || "");
+  const url =
+    String(tweet?.url || "").trim() ||
+    (tweet?.id ? `https://x.com/${username}/status/${tweet.id}` : "");
+  const createdAt = String(tweet?.createdAt || "").trim();
+
+  const parts = [`🐦 <b>New X post</b>`, "", `<b>@${escapeHtml(username)}</b>`];
+
+  if (createdAt) {
+    parts.push(escapeHtml(createdAt));
+  }
+
+  parts.push("");
+
+  if (text) {
+    parts.push(escapeHtml(text));
+    parts.push("");
+  }
+
+  if (url) {
+    parts.push(escapeHtml(url));
+  }
+
+  return parts.join("\n");
+}
+
+async function sendTelegramMessage(chatId, text) {
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: false
+    })
+  });
+
+  const data = await res.json();
+
+  if (!res.ok || !data.ok) {
+    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
+  }
+
+  return data.result;
 }
 
 app.get("/", (req, res) => {
@@ -100,6 +223,62 @@ app.post("/runtime/config", (req, res) => {
     ok: true,
     config: runtimeConfig
   });
+});
+
+app.post("/watchers/x", async (req, res) => {
+  try {
+    const secret = String(req.body.secret || "");
+    const tweet = req.body.tweet || {};
+
+    if (!authOk(secret)) {
+      return res.status(403).json({ ok: false, error: "unauthorized" });
+    }
+
+    if (!runtimeConfig.xWatcherEnabled) {
+      return res.json({ ok: true, skipped: true, reason: "x_watcher_disabled" });
+    }
+
+    if (!tweet?.id || !tweet?.text) {
+      return res.status(400).json({ ok: false, error: "invalid tweet payload" });
+    }
+
+    const tweetId = String(tweet.id);
+
+    if (wasTweetPosted(tweetId)) {
+      return res.json({ ok: true, deduped: true, tweetId });
+    }
+
+    if (!TELEGRAM_BOT_TOKEN) {
+      return res.status(500).json({ ok: false, error: "missing TELEGRAM_BOT_TOKEN" });
+    }
+
+    if (!TELEGRAM_ALERT_CHAT_ID) {
+      return res.status(500).json({ ok: false, error: "missing TELEGRAM_ALERT_CHAT_ID" });
+    }
+
+    console.log("[X WATCHER] incoming tweet:", {
+      id: tweetId,
+      username: tweet?.username || null,
+      text: String(tweet.text).slice(0, 300)
+    });
+
+    const message = buildTelegramXPost(tweet);
+    const sent = await sendTelegramMessage(TELEGRAM_ALERT_CHAT_ID, message);
+
+    markTweetPosted(tweetId);
+
+    return res.json({
+      ok: true,
+      tweetId,
+      telegramMessageId: sent?.message_id || null
+    });
+  } catch (error) {
+    console.error("[X WATCHER] route error:", error);
+    return res.status(500).json({
+      ok: false,
+      error: error.message || "unknown_error"
+    });
+  }
 });
 
 function buildSystemPrompt({
