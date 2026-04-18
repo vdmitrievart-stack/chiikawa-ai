@@ -1,96 +1,89 @@
+// telegram-bot.js
+
 import fetch from "node-fetch";
 import { startXWatcher } from "./x-watcher.js";
+import { initTradingAdmin, simulateTradeFlow } from "./trading-admin.js";
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error("❌ TELEGRAM_BOT_TOKEN missing");
+if (!TOKEN) {
+  console.error("NO TOKEN");
   process.exit(1);
 }
 
-const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
-
+const API = `https://api.telegram.org/bot${TOKEN}`;
 let offset = 0;
 
-// =======================
-// TELEGRAM HELPERS
-// =======================
+// ==============================
+// TG CORE
+// ==============================
 
 async function tg(method, body = {}) {
-  const res = await fetch(`${TG_API}/${method}`, {
+  const res = await fetch(`${API}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
-
   return res.json();
 }
 
-async function sendMessage(chatId, text, replyTo = null) {
+async function sendMessage(chatId, text) {
   return tg("sendMessage", {
     chat_id: chatId,
     text,
-    parse_mode: "HTML",
-    reply_to_message_id: replyTo || undefined
+    parse_mode: "HTML"
   });
 }
 
-// =======================
-// BASIC COMMANDS
-// =======================
+async function sendGif(chatId, gif, caption) {
+  return tg("sendAnimation", {
+    chat_id: chatId,
+    animation: gif,
+    caption,
+    parse_mode: "HTML"
+  });
+}
 
-async function handleCommand(message) {
-  const text = message.text || "";
-  const chatId = message.chat.id;
+// ==============================
+// TRADE REPORT SENDER
+// ==============================
 
-  if (text.startsWith("/start")) {
-    await sendMessage(
-      chatId,
-      `🐹 Chiikawa bot is alive!
+function createTradeSender(chatId) {
+  return async ({ text, gif }) => {
+    if (gif) {
+      await sendGif(chatId, gif, text);
+    } else {
+      await sendMessage(chatId, text);
+    }
+  };
+}
 
-Watching X posts 👀
-Ready for chaos 🚀`
-    );
+// ==============================
+// COMMANDS
+// ==============================
+
+async function handleCommand(msg) {
+  const text = msg.text || "";
+  const chatId = msg.chat.id;
+
+  if (text === "/start") {
+    await sendMessage(chatId, "🐹 Chiikawa bot ready");
     return true;
   }
 
-  if (text.startsWith("/status")) {
-    await sendMessage(
-      chatId,
-      `✅ Bot running
-👀 X watcher active
-🔥 Ready`
-    );
-    return true;
-  }
+  if (text === "/test_trade") {
+    const sender = createTradeSender(chatId);
 
-  if (text.startsWith("/ping")) {
-    await sendMessage(chatId, "pong 🏓");
+    await simulateTradeFlow(sender);
     return true;
   }
 
   return false;
 }
 
-// =======================
-// MESSAGE HANDLER
-// =======================
-
-async function handleMessage(message) {
-  try {
-    if (!message || !message.text) return;
-
-    const handled = await handleCommand(message);
-    if (handled) return;
-
-  } catch (err) {
-    console.log("❌ handleMessage error:", err.message);
-  }
-}
-
-// =======================
-// POLLING LOOP
-// =======================
+// ==============================
+// LOOP
+// ==============================
 
 async function poll() {
   while (true) {
@@ -100,42 +93,36 @@ async function poll() {
         timeout: 30
       });
 
-      const updates = res.result || [];
-
-      for (const upd of updates) {
+      for (const upd of res.result || []) {
         offset = upd.update_id + 1;
 
         if (upd.message) {
-          await handleMessage(upd.message);
+          await handleCommand(upd.message);
         }
       }
     } catch (err) {
-      console.log("❌ polling error:", err.message);
-      await new Promise(r => setTimeout(r, 3000));
+      console.log("poll error", err.message);
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 }
 
-// =======================
-// BOOTSTRAP
-// =======================
+// ==============================
+// START
+// ==============================
 
 async function start() {
-  console.log("🚀 Starting bot...");
+  console.log("🚀 bot start");
 
-  try {
-    await tg("deleteWebhook");
+  await tg("deleteWebhook");
 
-    // 🔥 запускаем watcher
-    startXWatcher();
+  await initTradingAdmin();
 
-    console.log("👀 X watcher started");
+  startXWatcher();
 
-    await poll();
-  } catch (err) {
-    console.log("❌ startup error:", err.message);
-    process.exit(1);
-  }
+  console.log("👀 watcher started");
+
+  await poll();
 }
 
 start();
