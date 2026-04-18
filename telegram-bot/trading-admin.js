@@ -1,12 +1,13 @@
-// trading-admin.js
-
 import { Level6TradingOrchestrator } from "./Level6TradingOrchestrator.js";
 
 const tradingRuntime = {
   enabled: false,
   mode: "safe",
   killSwitch: false,
-  buybotAlertMinUsd: 20
+  buybotAlertMinUsd: 20,
+  dryRun: true,
+  feeReserveSol: Number(process.env.LEVEL6_FEE_RESERVE_SOL || 0.07),
+  maxWalletExposurePct: Number(process.env.LEVEL6_MAX_WALLET_EXPOSURE_PCT || 3.5)
 };
 
 let orchestrator = null;
@@ -52,6 +53,7 @@ function pickNaturalGif(bucketName) {
   const state = gifRotationState[bucketName];
 
   if (!Array.isArray(list) || !list.length) return null;
+
   if (list.length === 1) {
     state.lastIndex = 0;
     state.cursor = 0;
@@ -73,25 +75,16 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function initTradingAdmin() {
-  console.log("🚀 Trading Admin init");
-
+function ensureOrchestrator() {
   if (!orchestrator) {
     orchestrator = new Level6TradingOrchestrator({
-      dryRun: true
+      dryRun: tradingRuntime.dryRun
     });
   }
-
-  return { ok: true };
+  return orchestrator;
 }
 
-export function getTradingRuntime() {
-  return tradingRuntime;
-}
-
-export function getLevel6Summary() {
-  const journal = orchestrator?.getJournal?.() || [];
-
+function summarizeJournal(journal) {
   if (!journal.length) {
     return {
       winRate: 0,
@@ -114,8 +107,23 @@ export function getLevel6Summary() {
   };
 }
 
+export async function initTradingAdmin() {
+  console.log("🚀 Trading Admin init");
+  ensureOrchestrator();
+  return { ok: true };
+}
+
+export function getTradingRuntime() {
+  return { ...tradingRuntime };
+}
+
+export function getLevel6Summary() {
+  const journal = ensureOrchestrator().getJournal?.() || [];
+  return summarizeJournal(journal);
+}
+
 export function getLevel6OpenTrades() {
-  return orchestrator?.getOpenTrades?.() || [];
+  return ensureOrchestrator().getOpenTrades?.() || [];
 }
 
 export async function handleTradingAdminCallback(data) {
@@ -131,17 +139,14 @@ export async function handleTradingAdminCallback(data) {
     }
 
     if (data === "trade:cycle_mode") {
-      tradingRuntime.mode =
-        tradingRuntime.mode === "safe" ? "aggressive" : "safe";
+      tradingRuntime.mode = tradingRuntime.mode === "safe" ? "aggressive" : "safe";
       return { ok: true, message: `Mode: ${tradingRuntime.mode}` };
     }
 
-    if (data === "trade:buymin_up") {
-      tradingRuntime.buybotAlertMinUsd += 5;
-      return {
-        ok: true,
-        message: `Buy min: $${tradingRuntime.buybotAlertMinUsd}`
-      };
+    if (data === "trade:dryrun_toggle") {
+      tradingRuntime.dryRun = !tradingRuntime.dryRun;
+      ensureOrchestrator().dryRun = tradingRuntime.dryRun;
+      return { ok: true, message: `Dry run: ${tradingRuntime.dryRun}` };
     }
 
     return { ok: false, error: "Unknown action" };
@@ -152,6 +157,8 @@ export async function handleTradingAdminCallback(data) {
 
 export async function handleTradingCommand(text) {
   try {
+    ensureOrchestrator();
+
     if (text.startsWith("/trading_on")) {
       tradingRuntime.enabled = true;
       return { ok: true, message: "✅ Trading enabled" };
@@ -168,9 +175,20 @@ export async function handleTradingCommand(text) {
     }
 
     if (text.startsWith("/trade_mode")) {
-      tradingRuntime.mode =
-        tradingRuntime.mode === "safe" ? "aggressive" : "safe";
+      tradingRuntime.mode = tradingRuntime.mode === "safe" ? "aggressive" : "safe";
       return { ok: true, message: `⚙️ Mode: ${tradingRuntime.mode}` };
+    }
+
+    if (text.startsWith("/dryrun_on")) {
+      tradingRuntime.dryRun = true;
+      ensureOrchestrator().dryRun = true;
+      return { ok: true, message: "🧪 Dry run ON" };
+    }
+
+    if (text.startsWith("/dryrun_off")) {
+      tradingRuntime.dryRun = false;
+      ensureOrchestrator().dryRun = false;
+      return { ok: true, message: "💸 Dry run OFF" };
     }
 
     if (text.startsWith("/setbuy")) {
@@ -192,7 +210,13 @@ export async function handleTradingCommand(text) {
 WinRate: ${(s.winRate * 100).toFixed(1)}%
 Trades: ${s.totalTrades}
 PnL: ${s.pnl}%
-Score: ${s.avgEntryScore}`
+Score: ${s.avgEntryScore}
+
+Dry run: ${tradingRuntime.dryRun}
+Mode: ${tradingRuntime.mode}
+Kill switch: ${tradingRuntime.killSwitch}
+Fee reserve: ${tradingRuntime.feeReserveSol} SOL
+Max wallet exposure: ${tradingRuntime.maxWalletExposurePct}%`
       };
     }
 
@@ -209,6 +233,7 @@ Score: ${s.avgEntryScore}`
             (t, i) =>
               `${i + 1}. ${t.token}
 Entry: ${t.entry}
+Current: ${t.current ?? t.entry}
 PnL: ${Number(t.pnl || 0).toFixed(2)}%
 Score: ${t.score}`
           )
@@ -222,12 +247,38 @@ Score: ${t.score}`
   }
 }
 
-export async function simulateTradeFlow(sendToTG) {
-  if (!orchestrator) {
-    await initTradingAdmin();
+function buildUpdateNarrative(trade) {
+  const pnl = Number(trade.pnl || 0);
+
+  if (pnl >= 20) return "Momentum strong. Chiikawa is watching for a clean exit ✨";
+  if (pnl >= 8) return "Position is healthy. Trend still looks constructive.";
+  if (pnl >= 0) return "Trade is alive, but still needs confirmation.";
+  if (pnl > -6) return "Small pressure. No panic yet, just watching structure.";
+  return "Pressure increasing. Risk control matters here.";
+}
+
+function buildFinalNarrative(closed) {
+  const pnl = Number(closed.pnl || 0);
+
+  if (pnl > 15) {
+    return "Excellent close. Strong structure, good timing, healthy follow-through.";
   }
 
-  const trade = await orchestrator.tryEnter({
+  if (pnl > 0) {
+    return "Profitable close. Not explosive, but disciplined and valid.";
+  }
+
+  if (pnl > -8) {
+    return "Manageable damage. Exit discipline worked better than hope.";
+  }
+
+  return "Bad trade, but cut correctly. The loss matters less than protecting capital.";
+}
+
+export async function simulateTradeFlow(sendToTG) {
+  const engine = ensureOrchestrator();
+
+  const trade = await engine.tryEnter({
     token: "CHI",
     price: 1,
     volumeSpike: true,
@@ -250,6 +301,10 @@ export async function simulateTradeFlow(sendToTG) {
 Token: ${trade.token}
 Price: ${trade.entry}
 Score: ${trade.score}
+Mode: ${tradingRuntime.mode}
+Dry run: ${tradingRuntime.dryRun}
+Max wallet exposure: ${tradingRuntime.maxWalletExposurePct}%
+Fee reserve: ${tradingRuntime.feeReserveSol} SOL
 
 🧠 Smart entry detected`,
     gif: pickNaturalGif("entry")
@@ -257,25 +312,27 @@ Score: ${trade.score}
 
   let price = 1;
 
-  for (let i = 0; i < 10; i++) {
-    await sleep(800);
+  for (let i = 0; i < 10; i += 1) {
+    await sleep(900);
 
     price *= 1 + (Math.random() * 0.12 - 0.04);
-    orchestrator.updateTrade(trade, price);
+    engine.updateTrade(trade, price);
 
     await sendToTG({
       text: `📈 <b>Update</b>
 
 Token: ${trade.token}
 PnL: ${Number(trade.pnl || 0).toFixed(2)}%
-Price: ${price.toFixed(4)}`,
+Price: ${price.toFixed(4)}
+
+${buildUpdateNarrative(trade)}`,
       gif: pickNaturalGif("update")
     });
 
-    const exit = orchestrator.shouldExit(trade);
+    const exit = engine.shouldExit(trade);
 
     if (exit) {
-      const closed = orchestrator.closeTrade(trade, exit);
+      const closed = engine.closeTrade(trade, exit);
 
       await sendToTG({
         text: `🏁 <b>EXIT</b>
@@ -295,22 +352,25 @@ Reason: ${exit}`,
 
 Chiikawa happy 🐹✨
 
-📊 Good entry, momentum confirmed`
+${buildFinalNarrative(closed)}`
             : `💀 <b>LOSS</b>
 
 ${Number(closed.pnl || 0).toFixed(2)}%
 
 Market tricky...
 
-📊 Lesson: weak momentum or bad timing`,
-        gif: Number(closed.pnl || 0) > 0 ? pickNaturalGif("win") : pickNaturalGif("loss")
+${buildFinalNarrative(closed)}`,
+        gif:
+          Number(closed.pnl || 0) > 0
+            ? pickNaturalGif("win")
+            : pickNaturalGif("loss")
       });
 
       return;
     }
   }
 
-  const closed = orchestrator.closeTrade(trade, "TIMEOUT");
+  const closed = engine.closeTrade(trade, "TIMEOUT");
 
   await sendToTG({
     text: `🏁 <b>EXIT</b>
@@ -330,14 +390,17 @@ Reason: TIMEOUT`,
 
 Chiikawa happy 🐹✨
 
-📊 Good entry, momentum confirmed`
+${buildFinalNarrative(closed)}`
         : `💀 <b>LOSS</b>
 
 ${Number(closed.pnl || 0).toFixed(2)}%
 
 Market tricky...
 
-📊 Lesson: weak momentum or bad timing`,
-    gif: Number(closed.pnl || 0) > 0 ? pickNaturalGif("win") : pickNaturalGif("loss")
+${buildFinalNarrative(closed)}`,
+    gif:
+      Number(closed.pnl || 0) > 0
+        ? pickNaturalGif("win")
+        : pickNaturalGif("loss")
   });
 }
