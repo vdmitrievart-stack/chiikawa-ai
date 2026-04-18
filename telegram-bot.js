@@ -12,45 +12,28 @@ if (!TOKEN) {
 const bot = new TelegramBot(TOKEN, {
   polling: {
     interval: 2000,
-    autoStart: true,
-    params: {
-      timeout: 10
-    }
+    autoStart: true
   }
 });
 
 const parser = new Parser();
 
 /* =========================
-   GIF CONFIG
+   GIF (через ENV file_id)
 ========================= */
 
+function getEnvGifs(name) {
+  const raw = process.env[name];
+  if (!raw) return [];
+  return raw.split(",").map(s => s.trim()).filter(Boolean);
+}
+
 const GIFS = {
-  ENTRY: [
-    "https://tenor.com/vLMG1KGYUyT.gif",
-    "https://tenor.com/pp5GdrEl62Z.gif",
-    "https://tenor.com/sooKVCqgZq8.gif"
-  ],
-  UPDATE: [
-    "https://tenor.com/ljj380KXDAP.gif",
-    "https://tenor.com/fUK8Huu1U7Q.gif",
-    "https://tenor.com/g9gHsoSlJt.gif",
-    "https://tenor.com/sNFBJfQy31T.gif",
-    "https://tenor.com/fMh0VLFKGyX.gif"
-  ],
-  EXIT: [
-    "https://tenor.com/piMOnfwNEoX.gif",
-    "https://tenor.com/iIn3jQbN5XN.gif",
-    "https://tenor.com/b1s9E.gif"
-  ],
-  WIN: [
-    "https://tenor.com/qZRXpxQ9cAd.gif",
-    "https://tenor.com/lidNFsvSOfi.gif"
-  ],
-  LOSS: [
-    "https://tenor.com/rWrXAZPADpT.gif",
-    "https://tenor.com/sEo1VH4xE8q.gif"
-  ]
+  ENTRY: getEnvGifs("GIF_ENTRY"),
+  UPDATE: getEnvGifs("GIF_UPDATE"),
+  EXIT: getEnvGifs("GIF_EXIT"),
+  WIN: getEnvGifs("GIF_WIN"),
+  LOSS: getEnvGifs("GIF_LOSS")
 };
 
 function rand(arr) {
@@ -60,6 +43,7 @@ function rand(arr) {
 async function sendGif(type) {
   try {
     const gif = rand(GIFS[type]);
+    if (!gif) return;
     await bot.sendAnimation(CHAT_ID, gif);
   } catch (e) {
     console.log("GIF error:", e.message);
@@ -67,7 +51,7 @@ async function sendGif(type) {
 }
 
 /* =========================
-   X WATCHER (OLD STYLE PRO)
+   X WATCHER (встроенный)
 ========================= */
 
 const WATCH_ACCOUNTS = ["chiikawa_kouhou"];
@@ -95,12 +79,11 @@ async function checkAccount(username) {
 
     lastSeen[item.id] = true;
 
-    console.log(`🚨 NEW POST from ${username}`);
+    console.log(`🚨 NEW POST: ${item.title}`);
 
     await bot.sendMessage(
       CHAT_ID,
-      `🚨 *NEW POST DETECTED*\n\n${item.title}`,
-      { parse_mode: "Markdown" }
+      `🚨 NEW POST\n\n${item.title}`
     );
 
     await sendGif("ENTRY");
@@ -109,26 +92,22 @@ async function checkAccount(username) {
 
 async function watcherLoop() {
   try {
+    console.log("👀 watching...");
     for (const acc of WATCH_ACCOUNTS) {
       await checkAccount(acc);
     }
-
     heartbeat();
   } catch (e) {
     console.log("Watcher error:", e.message);
   }
 }
 
-/* =========================
-   AUTO RESTART WATCHER
-========================= */
-
 function startWatcher() {
   if (watcherAlive) return;
 
   watcherAlive = true;
 
-  console.log("🚀 X WATCHER STARTED (IMMORTAL)");
+  console.log("🚀 X WATCHER STARTED");
 
   setInterval(watcherLoop, 15000);
 
@@ -137,7 +116,7 @@ function startWatcher() {
     const diff = Date.now() - lastHeartbeat;
 
     if (diff > 60000) {
-      console.log("♻️ WATCHER RESTART (freeze detected)");
+      console.log("♻️ WATCHER RESTART");
       watcherAlive = false;
       startWatcher();
     }
@@ -145,36 +124,23 @@ function startWatcher() {
 }
 
 /* =========================
-   BOT COMMANDS
+   BOT
 ========================= */
 
 bot.onText(/\/start/, async (msg) => {
   await bot.sendMessage(msg.chat.id, "🚀 Bot is alive");
 });
 
-bot.onText(/\/testgif/, async (msg) => {
-  await sendGif("WIN");
-});
-
-/* =========================
-   SAFE POLLING (ANTI 409)
-========================= */
-
 bot.on("polling_error", (err) => {
   console.log("Polling error:", err.message);
-
-  if (err.code === "ETELEGRAM") {
-    console.log("⚠️ Duplicate bot detected");
-  }
 });
 
 /* =========================
-   START SYSTEM
+   START
 ========================= */
 
 async function bootstrap() {
   console.log("🤖 BOT STARTED");
-
   startWatcher();
 }
 
