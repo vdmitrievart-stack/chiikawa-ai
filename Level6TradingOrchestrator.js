@@ -7,11 +7,11 @@ import Level6BubbleMapEngine from "./Level6BubbleMapEngine.js";
 import Level6PositionRiskEngine from "./Level6PositionRiskEngine.js";
 import Level6ExecutionGuard from "./Level6ExecutionGuard.js";
 import Level6SafetyEngine from "./Level6SafetyEngine.js";
+import Level6CandidateBuilder from "./Level6CandidateBuilder.js";
 
 export default class Level6TradingOrchestrator {
   constructor(options = {}) {
     this.logger = options.logger || console;
-
     this.baseDir = options.baseDir;
 
     this.deps = {
@@ -21,8 +21,7 @@ export default class Level6TradingOrchestrator {
       socialIntelProvider: options.socialIntelProvider || null,
       portfolioProvider: options.portfolioProvider || null,
       walletRegistryProvider: options.walletRegistryProvider || null,
-      executionProvider: options.executionProvider || null,
-      candidateBuilder: options.candidateBuilder || null
+      executionProvider: options.executionProvider || null
     };
 
     this.walletScoringEngine =
@@ -96,7 +95,23 @@ export default class Level6TradingOrchestrator {
         baseDir: this.baseDir
       });
 
+    this.candidateBuilder =
+      options.candidateBuilder ||
+      new Level6CandidateBuilder({
+        logger: this.logger,
+        marketDataProvider: options.marketDataProvider,
+        safetyDataProvider: options.safetyDataProvider,
+        bubbleMapProvider: options.bubbleMapProvider,
+        socialIntelProvider: options.socialIntelProvider,
+        portfolioProvider: options.portfolioProvider,
+        walletRegistryProvider: options.walletRegistryProvider,
+        executionProvider: options.executionProvider,
+        defaultWalletId: options.defaultWalletId || "wallet_1"
+      });
+
     this.config = {
+      enabled:
+        options.enabled !== undefined ? Boolean(options.enabled) : true,
       autoExecuteEntries:
         options.autoExecuteEntries !== undefined
           ? Boolean(options.autoExecuteEntries)
@@ -107,18 +122,70 @@ export default class Level6TradingOrchestrator {
           : false,
       dryRun:
         options.dryRun !== undefined ? Boolean(options.dryRun) : true,
-      defaultWalletId: options.defaultWalletId || null
+      defaultWalletId: options.defaultWalletId || "wallet_1"
     };
   }
 
   async init() {
-    const result = await this.tradeJournal.init();
+    const journal = await this.tradeJournal.init();
 
     return {
       ok: true,
-      journal: result,
-      config: this.config
+      journal,
+      config: { ...this.config }
     };
+  }
+
+  getStatus() {
+    const trades = Array.isArray(this.tradeJournal?.state?.trades)
+      ? this.tradeJournal.state.trades
+      : [];
+    const openTrades = trades.filter(t => !t.lifecycle?.closed);
+
+    return {
+      enabled: this.config.enabled,
+      dryRun: this.config.dryRun,
+      autoEntries: this.config.autoExecuteEntries,
+      autoExits: this.config.autoExecuteExits,
+      openTrades: openTrades.length,
+      journalTrades: trades.length
+    };
+  }
+
+  setEnabled(value) {
+    this.config.enabled = Boolean(value);
+    return this.getStatus();
+  }
+
+  setDryRun(value) {
+    this.config.dryRun = Boolean(value);
+    return this.getStatus();
+  }
+
+  setAutoEntries(value) {
+    this.config.autoExecuteEntries = Boolean(value);
+    return this.getStatus();
+  }
+
+  setAutoExits(value) {
+    this.config.autoExecuteExits = Boolean(value);
+    return this.getStatus();
+  }
+
+  async summarizeJournal() {
+    return this.tradeJournal.summarizePerformance();
+  }
+
+  async getOpenTrades() {
+    return this.tradeJournal.getOpenTrades();
+  }
+
+  async getTradeById(tradeId) {
+    return this.tradeJournal.getTradeById(tradeId);
+  }
+
+  async buildCandidate(input = {}) {
+    return this.candidateBuilder.buildCandidate(input);
   }
 
   async evaluateTokenOpportunity(input = {}) {
@@ -133,6 +200,14 @@ export default class Level6TradingOrchestrator {
   }
 
   async processTokenOpportunity(input = {}) {
+    if (!this.config.enabled) {
+      return {
+        ok: true,
+        action: "SKIP",
+        reason: "level6_disabled"
+      };
+    }
+
     const candidate = await this.buildCandidate(input);
     const entryDecision = await this.entryEngine.evaluateEntry(candidate);
 
@@ -168,7 +243,7 @@ export default class Level6TradingOrchestrator {
       sizeTokenAmount: this.#num(entryDecision.sizedTokenAmount, 0)
     });
 
-    const entryRecord = {
+    const journalEntry = await this.tradeJournal.recordEntry({
       token: {
         ca: candidate.token.ca,
         symbol: candidate.token.symbol,
@@ -187,14 +262,8 @@ export default class Level6TradingOrchestrator {
         volumeIntel: candidate.volumeIntel,
         socialIntel: candidate.socialIntel,
         bubbleMapIntel: candidate.bubbleMapIntel
-      },
-      notes: [
-        `timing_urgency:${entryDecision.timing?.urgency || "unknown"}`,
-        `final_score:${this.#num(entryDecision.finalScore, 0).toFixed(4)}`
-      ]
-    };
-
-    const journalEntry = await this.tradeJournal.recordEntry(entryRecord);
+      }
+    });
 
     let executionResult = {
       ok: true,
@@ -260,10 +329,9 @@ export default class Level6TradingOrchestrator {
             reason: exitDecision.reason,
             action: exitDecision.action,
             exitPriceUsd: market.currentPriceUsd,
-            exitTokenAmount: this.#num(
-              trade.entryTokenAmount,
-              0
-            ) * this.#num(exitDecision.sellFraction, 1)
+            exitTokenAmount:
+              this.#num(trade.entryTokenAmount, 0) *
+              this.#num(exitDecision.sellFraction, 1)
           });
         } else if (
           exitDecision.action === "TP1_EXIT" &&
@@ -311,248 +379,6 @@ export default class Level6TradingOrchestrator {
     };
   }
 
-  async buildCandidate(input = {}) {
-    if (this.deps.candidateBuilder?.buildCandidate) {
-      return this.deps.candidateBuilder.buildCandidate(input);
-    }
-
-    const tokenInput =
-      input.token && typeof input.token === "object" ? input.token : {};
-
-    const walletId =
-      input.walletId ||
-      input.execution?.walletId ||
-      this.config.defaultWalletId ||
-      "wallet_1";
-
-    const token = await this.buildTokenIntel(tokenInput);
-    const walletIntel = await this.buildWalletIntel(input.walletIntel || {}, input);
-    const volumeIntel = await this.buildVolumeIntel(input.volumeIntel || {}, input);
-    const socialIntel = await this.buildSocialIntel(input.socialIntel || {}, input);
-    const bubbleMapIntel = await this.buildBubbleMapIntel(
-      input.bubbleMapIntel || {},
-      token,
-      input
-    );
-    const portfolio = await this.buildPortfolioState(
-      input.portfolio || {},
-      walletId,
-      token,
-      input
-    );
-    const execution = await this.buildExecutionContext(
-      input.execution || {},
-      walletId,
-      portfolio,
-      token,
-      input
-    );
-
-    return {
-      token,
-      walletIntel,
-      volumeIntel,
-      socialIntel,
-      bubbleMapIntel,
-      portfolio,
-      execution,
-      context:
-        input.context && typeof input.context === "object" ? input.context : {}
-    };
-  }
-
-  async buildTokenIntel(rawToken = {}, input = {}) {
-    const external =
-      this.deps.marketDataProvider?.getTokenIntel
-        ? await this.deps.marketDataProvider.getTokenIntel(rawToken.ca || rawToken.mint || "", input)
-        : {};
-
-    const merged = {
-      ...external,
-      ...rawToken
-    };
-
-    return {
-      ca: String(merged.ca || merged.mint || "").trim(),
-      symbol: String(merged.symbol || "UNKNOWN").trim(),
-      name: String(merged.name || "").trim(),
-      totalSupply: this.#num(merged.totalSupply, 0),
-      tokenPriceUsd: this.#num(merged.tokenPriceUsd, 0),
-      liquidityUsd: this.#num(merged.liquidityUsd, 0),
-      volume1mUsd: this.#num(merged.volume1mUsd, 0),
-      top10HolderPct: this.#num(merged.top10HolderPct, null),
-      creatorHolderPct: this.#num(merged.creatorHolderPct, null),
-      lpLockedPct: this.#num(merged.lpLockedPct, null),
-      mintAuthorityEnabled: this.#boolOrNull(merged.mintAuthorityEnabled),
-      freezeAuthorityEnabled: this.#boolOrNull(merged.freezeAuthorityEnabled),
-      transferRestrictionRisk: this.#boolOrNull(merged.transferRestrictionRisk),
-      blacklistRisk: this.#boolOrNull(merged.blacklistRisk),
-      whitelistRisk: this.#boolOrNull(merged.whitelistRisk),
-      honeypotLikeRisk: this.#boolOrNull(merged.honeypotLikeRisk),
-      canRemoveLiquidity: this.#boolOrNull(merged.canRemoveLiquidity),
-      topHolders: Array.isArray(merged.topHolders) ? merged.topHolders : []
-    };
-  }
-
-  async buildWalletIntel(rawWalletIntel = {}, input = {}) {
-    const sourceWalletIntel =
-      this.deps.walletRegistryProvider?.getWalletIntel
-        ? await this.deps.walletRegistryProvider.getWalletIntel(input)
-        : rawWalletIntel;
-
-    const scored =
-      sourceWalletIntel.trades && this.walletScoringEngine.evaluateWallet
-        ? this.walletScoringEngine.evaluateWallet(sourceWalletIntel)
-        : null;
-
-    if (scored?.ok) {
-      return {
-        ...rawWalletIntel,
-        ...sourceWalletIntel,
-        ...scored,
-        consensusLeaders: this.#num(
-          rawWalletIntel.consensusLeaders ?? sourceWalletIntel.consensusLeaders,
-          1
-        )
-      };
-    }
-
-    return {
-      winRate: this.#num(sourceWalletIntel.winRate, 0),
-      medianROI: this.#num(sourceWalletIntel.medianROI, 1),
-      averageROI: this.#num(sourceWalletIntel.averageROI, 1),
-      maxDrawdown: this.#num(sourceWalletIntel.maxDrawdown, 1),
-      tradesCount: this.#num(sourceWalletIntel.tradesCount, 0),
-      earlyEntryScore: this.#num(sourceWalletIntel.earlyEntryScore, 0.5),
-      chasePenalty: this.#num(sourceWalletIntel.chasePenalty, 0),
-      dumpPenalty: this.#num(sourceWalletIntel.dumpPenalty, 0),
-      consistencyScore: this.#num(sourceWalletIntel.consistencyScore, 0.5),
-      consensusLeaders: this.#num(sourceWalletIntel.consensusLeaders, 1)
-    };
-  }
-
-  async buildVolumeIntel(rawVolumeIntel = {}, input = {}) {
-    const external =
-      this.deps.marketDataProvider?.getVolumeIntel
-        ? await this.deps.marketDataProvider.getVolumeIntel(input)
-        : {};
-
-    const merged = {
-      ...external,
-      ...rawVolumeIntel
-    };
-
-    return {
-      growthRate1m: this.#num(merged.growthRate1m, 1),
-      buyPressure: this.#num(merged.buyPressure, 0.5),
-      uniqueBuyersDelta: this.#num(merged.uniqueBuyersDelta, 0),
-      repeatedBuyers: this.#num(merged.repeatedBuyers, 0),
-      sellPressure: this.#num(merged.sellPressure, 0.5),
-      dumpSpike: Boolean(merged.dumpSpike),
-      pump1mPct: this.#num(merged.pump1mPct, 0),
-      spreadHealthy:
-        merged.spreadHealthy !== undefined ? Boolean(merged.spreadHealthy) : true
-    };
-  }
-
-  async buildSocialIntel(rawSocialIntel = {}, input = {}) {
-    const external =
-      this.deps.socialIntelProvider?.getSocialIntel
-        ? await this.deps.socialIntelProvider.getSocialIntel(input)
-        : {};
-
-    const merged = {
-      ...external,
-      ...rawSocialIntel
-    };
-
-    return {
-      uniqueAuthors: this.#num(merged.uniqueAuthors, 0),
-      avgLikes: this.#num(merged.avgLikes, 0),
-      avgReplies: this.#num(merged.avgReplies, 0),
-      botPatternScore: this.#num(merged.botPatternScore, 0),
-      engagementDiversity: this.#num(merged.engagementDiversity, 0.5),
-      trustedMentions: this.#num(merged.trustedMentions, 0),
-      socialMomentum: this.#num(merged.socialMomentum, 0.5)
-    };
-  }
-
-  async buildBubbleMapIntel(rawBubbleMapIntel = {}, token = {}, input = {}) {
-    const external =
-      this.deps.bubbleMapProvider?.getBubbleMapIntel
-        ? await this.deps.bubbleMapProvider.getBubbleMapIntel(token.ca, input)
-        : {};
-
-    const merged = {
-      ...external,
-      ...rawBubbleMapIntel
-    };
-
-    return {
-      top10HolderPct: this.#num(merged.top10HolderPct ?? token.top10HolderPct, null),
-      holders: Array.isArray(merged.holders) ? merged.holders : [],
-      links: Array.isArray(merged.links) ? merged.links : []
-    };
-  }
-
-  async buildPortfolioState(rawPortfolio = {}, walletId, token = {}, input = {}) {
-    const external =
-      this.deps.portfolioProvider?.getPortfolioState
-        ? await this.deps.portfolioProvider.getPortfolioState({
-            walletId,
-            token,
-            input
-          })
-        : {};
-
-    const merged = {
-      ...external,
-      ...rawPortfolio
-    };
-
-    return {
-      existingWalletTokenAmount: this.#num(merged.existingWalletTokenAmount, 0),
-      existingAggregateTokenAmount: this.#num(
-        merged.existingAggregateTokenAmount,
-        0
-      ),
-      existingWalletUsd: this.#num(merged.existingWalletUsd, 0),
-      existingAggregateUsd: this.#num(merged.existingAggregateUsd, 0),
-      walletBalanceSol: this.#num(merged.walletBalanceSol, 0),
-      targetWallet: merged.targetWallet || null,
-      botWallets: Array.isArray(merged.botWallets) ? merged.botWallets : []
-    };
-  }
-
-  async buildExecutionContext(rawExecution = {}, walletId, portfolio = {}, token = {}, input = {}) {
-    const external =
-      this.deps.executionProvider?.getExecutionContext
-        ? await this.deps.executionProvider.getExecutionContext({
-            walletId,
-            portfolio,
-            token,
-            input
-          })
-        : {};
-
-    const merged = {
-      ...external,
-      ...rawExecution
-    };
-
-    return {
-      walletId,
-      baseDesiredUsd: this.#num(merged.baseDesiredUsd, 100),
-      expectedSlippagePct: this.#num(merged.expectedSlippagePct, 0),
-      walletBalanceSol: this.#num(
-        merged.walletBalanceSol,
-        portfolio.walletBalanceSol
-      ),
-      isTransfer: Boolean(merged.isTransfer),
-      targetWallet: merged.targetWallet || portfolio.targetWallet || null
-    };
-  }
-
   async validateEntryExecution(candidate, entryDecision) {
     const candidateExecution = candidate.execution || {};
     const candidatePortfolio = candidate.portfolio || {};
@@ -584,8 +410,6 @@ export default class Level6TradingOrchestrator {
         executed: false,
         dryRun: true,
         mode: "entry",
-        candidate,
-        entryDecision,
         meta
       };
     }
@@ -670,8 +494,6 @@ export default class Level6TradingOrchestrator {
   }
 
   async buildExitMarketSnapshot(trade, context = {}) {
-    const token = trade.token || {};
-
     if (this.deps.marketDataProvider?.getExitMarketSnapshot) {
       return this.deps.marketDataProvider.getExitMarketSnapshot(trade, context);
     }
@@ -699,18 +521,6 @@ export default class Level6TradingOrchestrator {
       safetyDegraded: Boolean(context.safetyDegraded),
       bubbleRiskIncreased: Boolean(context.bubbleRiskIncreased)
     };
-  }
-
-  async summarizeJournal() {
-    return this.tradeJournal.summarizePerformance();
-  }
-
-  async getOpenTrades() {
-    return this.tradeJournal.getOpenTrades();
-  }
-
-  async getTradeById(tradeId) {
-    return this.tradeJournal.getTradeById(tradeId);
   }
 
   #buildPositionForExitEngine(trade) {
@@ -746,15 +556,5 @@ export default class Level6TradingOrchestrator {
   #num(value, fallback = 0) {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
-  }
-
-  #boolOrNull(value) {
-    if (value === null || value === undefined || value === "") return null;
-    if (typeof value === "boolean") return value;
-    if (typeof value === "number") return value !== 0;
-    const v = String(value).trim().toLowerCase();
-    if (["true", "1", "yes", "y", "enabled"].includes(v)) return true;
-    if (["false", "0", "no", "n", "disabled"].includes(v)) return false;
-    return null;
   }
 }
