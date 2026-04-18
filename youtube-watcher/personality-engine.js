@@ -1,15 +1,17 @@
 export function buildYouTubeAnnouncement(input = {}) {
-  const title = String(input.title || "New episode");
+  const title = String(input.title || "New YouTube episode");
   const url = String(input.url || "");
-  return `📺 New YouTube episode detected!\n\n${title}\n\n${url}`;
-}
+  const moodLine = String(input.moodLine || "");
 
-export function buildYouTubeComment(input = {}) {
-  const title = String(input.title || "New episode");
-  return `Chiikawa found a new episode 🐹✨\n\n${title}`;
+  return `📺 NEW CHIIKAWA EPISODE!
+
+${title}
+
+${moodLine}
+
+${url}`.trim();
 }
 
 export default {
-  buildYouTubeAnnouncement,
-  buildYouTubeComment
+  buildYouTubeAnnouncement
 };
