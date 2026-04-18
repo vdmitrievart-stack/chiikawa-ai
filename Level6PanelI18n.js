@@ -1,166 +1,97 @@
-const LEVEL6_I18N = {
-  en: {
-    level6_panel_title: status => `🧠 Level 6 Panel
+// Level6PanelI18n.js
 
-enabled: ${status.enabled}
-dryRun: ${status.dryRun}
-autoEntries: ${status.autoEntries}
-autoExits: ${status.autoExits}
-openTrades: ${status.openTrades}
-journalTrades: ${status.journalTrades}`,
-
-    level6_status_title: summary => `🧠 Level 6 Status
-
-closedTrades: ${summary.closedTrades}
-winRate: ${this.#fmtPct ? this.#fmtPct(summary.winRate) : summary.winRate}
-averagePnlPct: ${summary.averagePnlPct}
-medianPnlPct: ${summary.medianPnlPct}
-totalPnlUsd: ${summary.totalPnlUsd}`,
-
-    btn_level6_panel: "🧠 Level 6",
-    btn_level6_status: "📊 Level 6 Status",
-    btn_level6_open_trades: "📂 Open Trades",
-    btn_level6_dryrun_on: "🟢 L6 Dry Run ON",
-    btn_level6_dryrun_off: "🔴 L6 Dry Run OFF",
-    btn_level6_auto_entries_on: "⚡ Auto Entries ON",
-    btn_level6_auto_entries_off: "⚡ Auto Entries OFF",
-    btn_level6_auto_exits_on: "🚪 Auto Exits ON",
-    btn_level6_auto_exits_off: "🚪 Auto Exits OFF",
-    btn_level6_refresh: "🔄 Refresh L6",
-    btn_back: "⬅️ Back",
-    btn_menu: "📋 Menu",
-
-    level6_open_trades_empty: "No open Level 6 trades.",
-    level6_open_trades_header: "📂 Open Level 6 Trades",
-    level6_dryrun_enabled: "Level 6 dry run enabled.",
-    level6_dryrun_disabled: "Level 6 dry run disabled.",
-    level6_auto_entries_enabled: "Level 6 auto entries enabled.",
-    level6_auto_entries_disabled: "Level 6 auto entries disabled.",
-    level6_auto_exits_enabled: "Level 6 auto exits enabled.",
-    level6_auto_exits_disabled: "Level 6 auto exits disabled.",
-    level6_not_ready: "Level 6 is not initialized yet."
-  },
-
-  ru: {
-    level6_panel_title: status => `🧠 Панель Level 6
-
-enabled: ${status.enabled}
-dryRun: ${status.dryRun}
-autoEntries: ${status.autoEntries}
-autoExits: ${status.autoExits}
-openTrades: ${status.openTrades}
-journalTrades: ${status.journalTrades}`,
-
-    level6_status_title: summary => `🧠 Статус Level 6
-
-closedTrades: ${summary.closedTrades}
-winRate: ${summary.winRate}
-averagePnlPct: ${summary.averagePnlPct}
-medianPnlPct: ${summary.medianPnlPct}
-totalPnlUsd: ${summary.totalPnlUsd}`,
-
-    btn_level6_panel: "🧠 Level 6",
-    btn_level6_status: "📊 Статус Level 6",
-    btn_level6_open_trades: "📂 Открытые сделки",
-    btn_level6_dryrun_on: "🟢 L6 Dry Run ON",
-    btn_level6_dryrun_off: "🔴 L6 Dry Run OFF",
-    btn_level6_auto_entries_on: "⚡ Автовходы ON",
-    btn_level6_auto_entries_off: "⚡ Автовходы OFF",
-    btn_level6_auto_exits_on: "🚪 Автовыходы ON",
-    btn_level6_auto_exits_off: "🚪 Автовыходы OFF",
-    btn_level6_refresh: "🔄 Обновить L6",
-    btn_back: "⬅️ Назад",
-    btn_menu: "📋 Меню",
-
-    level6_open_trades_empty: "Нет открытых сделок Level 6.",
-    level6_open_trades_header: "📂 Открытые сделки Level 6",
-    level6_dryrun_enabled: "Level 6 dry run включен.",
-    level6_dryrun_disabled: "Level 6 dry run выключен.",
-    level6_auto_entries_enabled: "Автовходы Level 6 включены.",
-    level6_auto_entries_disabled: "Автовходы Level 6 выключены.",
-    level6_auto_exits_enabled: "Автовыходы Level 6 включены.",
-    level6_auto_exits_disabled: "Автовыходы Level 6 выключены.",
-    level6_not_ready: "Level 6 ещё не инициализирован."
-  }
-};
-
-export function level6t(langCode, key, ...args) {
-  const lang = LEVEL6_I18N[langCode] || LEVEL6_I18N.en;
-  const fallback = LEVEL6_I18N.en[key];
-  const value = lang[key] ?? fallback;
-
-  if (typeof value === "function") {
-    return value(...args);
-  }
-
-  return value;
+export function fmtPct(v) {
+  if (typeof v !== "number") return v;
+  return (v * 100).toFixed(1) + "%";
 }
 
-export function buildLevel6PanelKeyboard(langCode, level6Status = {}) {
-  const dryRun = Boolean(level6Status.dryRun);
-  const autoEntries = Boolean(level6Status.autoEntries);
-  const autoExits = Boolean(level6Status.autoExits);
+export function level6t(lang, key, ...args) {
+  const dict = {
+    en: {
+      level6_panel_title: (rt) => `🧠 Level 6 Engine
 
+Enabled: ${rt.enabled}
+Dry Run: ${rt.dryRun}
+Auto Entries: ${rt.autoEntries}
+Auto Exits: ${rt.autoExits}
+Open Trades: ${rt.openTrades}
+Journal Trades: ${rt.journalTrades}`,
+
+      level6_status_title: (summary) => `📊 Level 6 Status
+
+Win Rate: ${fmtPct(summary.winRate)}
+Total Trades: ${summary.totalTrades}
+PnL: ${summary.pnl} SOL
+Avg Entry Score: ${summary.avgEntryScore}`,
+
+      no_open_trades: "No open trades",
+
+      btn_back: "⬅️ Back",
+      btn_menu: "🏠 Menu",
+      btn_level6_status: "📊 Status",
+      btn_level6_open_trades: "📂 Open Trades"
+    },
+
+    ru: {
+      level6_panel_title: (rt) => `🧠 Level 6 Engine
+
+Включен: ${rt.enabled}
+Dry Run: ${rt.dryRun}
+Авто-вход: ${rt.autoEntries}
+Авто-выход: ${rt.autoExits}
+Открытых сделок: ${rt.openTrades}
+Журнал: ${rt.journalTrades}`,
+
+      level6_status_title: (summary) => `📊 Статус Level 6
+
+WinRate: ${fmtPct(summary.winRate)}
+Всего сделок: ${summary.totalTrades}
+PnL: ${summary.pnl} SOL
+Средний скор входа: ${summary.avgEntryScore}`,
+
+      no_open_trades: "Нет открытых сделок",
+
+      btn_back: "⬅️ Назад",
+      btn_menu: "🏠 Меню",
+      btn_level6_status: "📊 Статус",
+      btn_level6_open_trades: "📂 Сделки"
+    }
+  };
+
+  const langDict = dict[lang] || dict.en;
+  const val = langDict[key];
+
+  if (typeof val === "function") return val(...args);
+  return val || key;
+}
+
+export function buildLevel6PanelKeyboard(lang, rt) {
   return {
     inline_keyboard: [
       [
-        { text: level6t(langCode, "btn_level6_status"), callback_data: "level6:status" },
-        { text: level6t(langCode, "btn_level6_open_trades"), callback_data: "level6:open_trades" }
+        { text: level6t(lang, "btn_level6_status"), callback_data: "level6:status" },
+        { text: level6t(lang, "btn_level6_open_trades"), callback_data: "level6:open_trades" }
       ],
       [
-        {
-          text: dryRun
-            ? level6t(langCode, "btn_level6_dryrun_off")
-            : level6t(langCode, "btn_level6_dryrun_on"),
-          callback_data: dryRun ? "level6:dryrun_off" : "level6:dryrun_on"
-        }
-      ],
-      [
-        {
-          text: autoEntries
-            ? level6t(langCode, "btn_level6_auto_entries_off")
-            : level6t(langCode, "btn_level6_auto_entries_on"),
-          callback_data: autoEntries
-            ? "level6:auto_entries_off"
-            : "level6:auto_entries_on"
-        },
-        {
-          text: autoExits
-            ? level6t(langCode, "btn_level6_auto_exits_off")
-            : level6t(langCode, "btn_level6_auto_exits_on"),
-          callback_data: autoExits
-            ? "level6:auto_exits_off"
-            : "level6:auto_exits_on"
-        }
-      ],
-      [
-        { text: level6t(langCode, "btn_level6_refresh"), callback_data: "level6:refresh" }
-      ],
-      [
-        { text: level6t(langCode, "btn_back"), callback_data: "tradepanel:open" },
-        { text: level6t(langCode, "btn_menu"), callback_data: "menu:open" }
+        { text: level6t(lang, "btn_menu"), callback_data: "menu:open" }
       ]
     ]
   };
 }
 
-export function formatLevel6OpenTrades(langCode, trades = []) {
-  if (!Array.isArray(trades) || !trades.length) {
-    return level6t(langCode, "level6_open_trades_empty");
+export function formatLevel6OpenTrades(lang, trades) {
+  if (!Array.isArray(trades) || trades.length === 0) {
+    return level6t(lang, "no_open_trades");
   }
 
-  const lines = [level6t(langCode, "level6_open_trades_header"), ""];
+  return `📂 Open Trades:
 
-  for (const trade of trades.slice(0, 12)) {
-    lines.push(
-      `${trade.token?.symbol || "UNKNOWN"} | ${trade.tradeId}`,
-      `wallet: ${trade.walletId || "n/a"}`,
-      `entryMode: ${trade.entryMode || "n/a"}`,
-      `entryPriceUsd: ${trade.entryPriceUsd || 0}`,
-      `entrySizeUsd: ${trade.entrySizeUsd || 0}`,
-      ""
-    );
-  }
-
-  return lines.join("\n").trim();
+${trades
+  .map(
+    (t, i) => `${i + 1}. ${t.token}
+Entry: ${t.entry}
+PnL: ${t.pnl} SOL
+Score: ${t.score}`
+  )
+  .join("\n\n")}`;
 }
