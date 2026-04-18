@@ -1,26 +1,13 @@
 {
-  "name": "chiikawa-ai",
-  "version": "2.3.0",
-  "description": "Chiikawa AI server + Telegram bot + X watcher + YouTube watcher + Buybot + Level5 execution",
-  "main": "server.js",
+  "name": "chiikawa-bot",
+  "version": "1.0.0",
   "type": "module",
+  "main": "telegram-bot.js",
   "scripts": {
-    "start": "node server.js",
-    "telegram": "node telegram-bot.js",
-    "x": "node x-watcher.js",
-    "youtube": "node youtube-watcher.js",
-    "buybot": "node buybot-worker.js",
-    "level5:test": "node level5.execution.example.js"
+    "start": "node telegram-bot.js"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.98.4",
-    "bs58": "^6.0.0",
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "node-fetch": "^3.3.2",
-    "openai": "^4.57.0"
-  },
-  "engines": {
-    "node": ">=18"
+    "node-telegram-bot-api": "^0.66.0",
+    "rss-parser": "^3.13.0"
   }
 }
