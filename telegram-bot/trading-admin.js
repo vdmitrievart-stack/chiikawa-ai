@@ -279,7 +279,8 @@ export async function simulateTradeFlow(sendToUser, sendToGroup = null) {
     return;
   }
 
-  const entryText = `🚀 <b>ENTRY</b>
+  const entryPayload = {
+    text: `🚀 <b>ENTRY</b>
 
 Token: ${trade.token}
 Price: ${trade.entry}
@@ -292,10 +293,7 @@ Fee reserve: ${tradingRuntime.feeReserveSol} SOL
 <b>Reasoning:</b>
 ${buildEntryReasoning(signal)}
 
-🧠 Smart entry detected`;
-
-  const entryPayload = {
-    text: entryText,
+🧠 Smart entry detected`,
     gif: pickNaturalGif("entry")
   };
 
