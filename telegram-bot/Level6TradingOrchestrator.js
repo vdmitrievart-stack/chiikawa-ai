@@ -5,10 +5,6 @@ export class Level6TradingOrchestrator {
     this.journal = [];
   }
 
-  /* =========================
-     ENTRY LOGIC
-  ========================= */
-
   tryEnter(signal) {
     const score = this.calculateScore(signal);
 
@@ -41,27 +37,16 @@ export class Level6TradingOrchestrator {
     return score;
   }
 
-  /* =========================
-     UPDATE
-  ========================= */
-
   updateTrade(trade, price) {
     trade.current = price;
-
-    const pnl = ((price - trade.entry) / trade.entry) * 100;
-    trade.pnl = pnl;
+    trade.pnl = ((price - trade.entry) / trade.entry) * 100;
   }
-
-  /* =========================
-     EXIT LOGIC
-  ========================= */
 
   shouldExit(trade) {
     if (trade.pnl >= 25) return "TAKE_PROFIT";
     if (trade.pnl <= -12) return "STOP_LOSS";
 
     const life = Date.now() - trade.createdAt;
-
     if (life > 15000) return "TIME_EXIT";
 
     return null;
@@ -80,10 +65,6 @@ export class Level6TradingOrchestrator {
 
     return closed;
   }
-
-  /* =========================
-     DATA
-  ========================= */
 
   getOpenTrades() {
     return this.openTrades;
