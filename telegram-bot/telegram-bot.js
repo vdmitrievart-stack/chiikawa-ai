@@ -108,19 +108,40 @@ async function sendTradePayload(chatId, payload, replyToMessageId = undefined) {
   const text = String(payload.text || "").trim();
   const gif = payload.gif || null;
 
-  if (gif) {
-    await sendAnimation(chatId, gif, {
-      caption: text.slice(0, 1024),
+  try {
+    if (gif && /^https?:\/\//i.test(gif)) {
+      await sendText(
+        chatId,
+        `${text}\n\n${gif}`.trim(),
+        {
+          parse_mode: "HTML",
+          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+        }
+      );
+      return;
+    }
+
+    if (gif) {
+      await sendAnimation(chatId, gif, {
+        caption: text.slice(0, 1024),
+        parse_mode: "HTML",
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+      });
+      return;
+    }
+
+    await sendText(chatId, text, {
       parse_mode: "HTML",
       ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
     });
-    return;
-  }
+  } catch (error) {
+    console.log(`sendTradePayload error: ${error.message}`);
 
-  await sendText(chatId, text, {
-    parse_mode: "HTML",
-    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
-  });
+    await sendText(chatId, text, {
+      parse_mode: "HTML",
+      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+    });
+  }
 }
 
 function buildMainMenuText() {
@@ -133,6 +154,7 @@ Trading: ${runtime.enabled ? "ON" : "OFF"}
 Mode: ${runtime.mode}
 Kill switch: ${runtime.killSwitch ? "ON" : "OFF"}
 Buy min: $${runtime.buybotAlertMinUsd}
+Dry run: ${runtime.dryRun ? "ON" : "OFF"}
 
 Level 6:
 WinRate: ${(s.winRate * 100).toFixed(1)}%
@@ -148,6 +170,8 @@ Commands:
 /trading_off
 /kill_switch
 /trade_mode
+/dryrun_on
+/dryrun_off
 /setbuy 25
 /level6_status
 /level6_open_trades`;
@@ -169,6 +193,7 @@ Trading: ${runtime.enabled ? "ON" : "OFF"}
 Mode: ${runtime.mode}
 Kill switch: ${runtime.killSwitch ? "ON" : "OFF"}
 Buy min: $${runtime.buybotAlertMinUsd}
+Dry run: ${runtime.dryRun ? "ON" : "OFF"}
 
 Level 6:
 WinRate: ${(s.winRate * 100).toFixed(1)}%
@@ -194,7 +219,8 @@ async function parseFeedWithFallback(username) {
 
     try {
       const feed = await parser.parseURL(url);
-      watcherState.lastHostIndex = (watcherState.lastHostIndex + i) % NITTER_HOSTS.length;
+      watcherState.lastHostIndex =
+        (watcherState.lastHostIndex + i) % NITTER_HOSTS.length;
       return feed;
     } catch (error) {
       lastError = error;
@@ -222,7 +248,9 @@ async function checkAccount(username) {
   if (!watcherState.firstSyncDone) {
     items.slice(0, 10).forEach(item => watcherState.seenIds.add(item.id));
     watcherState.firstSyncDone = true;
-    console.log(`[${nowIso()}] X first sync complete for ${username}, cached ${Math.min(items.length, 10)} posts`);
+    console.log(
+      `[${nowIso()}] X first sync complete for ${username}, cached ${Math.min(items.length, 10)} posts`
+    );
     return;
   }
 
