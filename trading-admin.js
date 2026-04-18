@@ -2,9 +2,6 @@
 
 import { Level6TradingOrchestrator } from "./Level6TradingOrchestrator.js";
 
-// ⛔️ если у тебя есть level4Kernel импорт — оставь его как есть
-import * as level4Kernel from "./level4-kernel.js";
-
 // ==============================
 // RUNTIME STATE
 // ==============================
@@ -37,19 +34,6 @@ let orchestrator = null;
 export async function initTradingAdmin() {
   console.log("🚀 Initializing Trading Admin...");
 
-  // ✅ SAFE INIT Level4 (фикс)
-  try {
-    if (level4Kernel && typeof level4Kernel.init === "function") {
-      await level4Kernel.init();
-      console.log("✅ Level4 kernel initialized");
-    } else {
-      console.log("⚠️ level4Kernel.init not found — skipping");
-    }
-  } catch (err) {
-    console.log("⚠️ Level4 init failed but continuing:", err.message);
-  }
-
-  // ✅ INIT Level6
   try {
     orchestrator = new Level6TradingOrchestrator({
       dryRun: level6Runtime.dryRun
@@ -144,7 +128,10 @@ export async function handleTradingCommand(text, userName) {
         message: trades
           .map(
             (t, i) =>
-              `${i + 1}. ${t.token}\nEntry: ${t.entry}\nPnL: ${t.pnl}\nScore: ${t.score}`
+              `${i + 1}. ${t.token}
+Entry: ${t.entry}
+PnL: ${t.pnl}
+Score: ${t.score}`
           )
           .join("\n\n")
       };
