@@ -19,6 +19,12 @@ const TELEGRAM_ALERT_CHAT_ID =
   process.env.FORCED_GROUP_CHAT_ID ||
   "-1003953010138";
 
+const X_DEFAULT_USERNAME = process.env.X_DEFAULT_USERNAME || "Chiikawa_CTO";
+const X_GIF_FILE_IDS = String(process.env.X_GIF_FILE_IDS || "")
+  .split(",")
+  .map(x => x.trim())
+  .filter(Boolean);
+
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY");
 }
@@ -97,7 +103,7 @@ function saveXWatcherState(state) {
   try {
     const next = {
       postedTweetIds: Array.isArray(state?.postedTweetIds)
-        ? state.postedTweetIds.slice(0, 500)
+        ? state.postedTweetIds.slice(0, 1000)
         : [],
       updatedAt: Date.now()
     };
@@ -121,7 +127,7 @@ function wasTweetPosted(tweetId) {
 
 function markTweetPosted(tweetId) {
   xWatcherState.postedTweetIds.unshift(String(tweetId));
-  xWatcherState.postedTweetIds = xWatcherState.postedTweetIds.slice(0, 500);
+  xWatcherState.postedTweetIds = xWatcherState.postedTweetIds.slice(0, 1000);
   xWatcherState.updatedAt = Date.now();
   saveXWatcherState(xWatcherState);
 }
@@ -134,23 +140,109 @@ function escapeHtml(text) {
 }
 
 function normalizeTweetText(text) {
-  return String(text || "").replace(/\r/g, "").trim();
+  return String(text || "")
+    .replace(/\r/g, "")
+    .trim();
 }
 
-function buildTelegramXPost(tweet) {
-  const username = String(tweet?.username || "").trim() || "unknown";
+function isRetweetText(text) {
+  return /^RT\s+@/i.test(String(text || "").trim());
+}
+
+function isReplyText(text) {
+  return /^@\w+/i.test(String(text || "").trim());
+}
+
+function pickRandomGifFileId() {
+  if (!X_GIF_FILE_IDS.length) return null;
+  const idx = Math.floor(Math.random() * X_GIF_FILE_IDS.length);
+  return X_GIF_FILE_IDS[idx];
+}
+
+function shortenText(text, maxLen = 900) {
+  const value = String(text || "").trim();
+  if (value.length <= maxLen) return value;
+  return `${value.slice(0, maxLen - 1)}…`;
+}
+
+function extractCas(text) {
+  const matches = String(text || "").match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g) || [];
+  return [...new Set(matches)];
+}
+
+async function buildChiikawaXComment(tweet) {
   const text = normalizeTweetText(tweet?.text || "");
+  const cas = extractCas(text);
+
+  if (!OPENAI_API_KEY) {
+    return cas.length
+      ? `Chiikawa spotted something shiny ✨\nCA: ${cas[0]}`
+      : `Chiikawa saw a fresh post ✨`;
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      temperature: 0.8,
+      max_tokens: 120,
+      messages: [
+        {
+          role: "system",
+          content: `You are Chiikawa writing a very short Telegram caption for a post from X.
+
+Rules:
+- 1 to 3 short lines
+- cute, sharp, natural
+- no hashtags
+- no quotation marks
+- do not say "I am Chiikawa"
+- if there is a Solana CA, mention it briefly
+- if the post is just casual/non-token content, keep it playful and short
+- output plain text only`
+        },
+        {
+          role: "user",
+          content: `Username: @${tweet?.username || X_DEFAULT_USERNAME}
+Tweet text:
+${text}
+
+Detected CAs:
+${cas.length ? cas.join(", ") : "none"}`
+        }
+      ]
+    });
+
+    return (
+      completion.choices?.[0]?.message?.content?.trim() ||
+      (cas.length
+        ? `Chiikawa spotted something shiny ✨\nCA: ${cas[0]}`
+        : `Chiikawa saw a fresh post ✨`)
+    );
+  } catch (error) {
+    console.error("buildChiikawaXComment error:", error.message);
+    return cas.length
+      ? `Chiikawa spotted something shiny ✨\nCA: ${cas[0]}`
+      : `Chiikawa saw a fresh post ✨`;
+  }
+}
+
+function buildTelegramCaption(tweet, aiComment) {
+  const username = String(tweet?.username || "").trim() || X_DEFAULT_USERNAME;
+  const text = shortenText(normalizeTweetText(tweet?.text || ""), 900);
   const url =
     String(tweet?.url || "").trim() ||
     (tweet?.id ? `https://x.com/${username}/status/${tweet.id}` : "");
-  const createdAt = String(tweet?.createdAt || "").trim();
+  const cas = extractCas(text);
 
-  const parts = [`🐦 <b>New X post</b>`, "", `<b>@${escapeHtml(username)}</b>`];
+  const parts = [];
 
-  if (createdAt) {
-    parts.push(escapeHtml(createdAt));
+  if (aiComment) {
+    parts.push(escapeHtml(aiComment));
+    parts.push("");
   }
 
+  parts.push(`🐦 <b>New X post</b>`);
+  parts.push(`<b>@${escapeHtml(username)}</b>`);
   parts.push("");
 
   if (text) {
@@ -158,34 +250,55 @@ function buildTelegramXPost(tweet) {
     parts.push("");
   }
 
+  if (cas.length) {
+    parts.push(`<b>CA:</b> <code>${escapeHtml(cas[0])}</code>`);
+    parts.push("");
+  }
+
   if (url) {
     parts.push(escapeHtml(url));
   }
 
-  return parts.join("\n");
+  return parts.join("\n").slice(0, 1024);
 }
 
-async function sendTelegramMessage(chatId, text) {
-  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+async function tg(method, body) {
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML",
-      disable_web_page_preview: false
-    })
+    body: JSON.stringify(body)
   });
 
   const data = await res.json();
 
   if (!res.ok || !data.ok) {
-    throw new Error(`Telegram sendMessage failed: ${JSON.stringify(data)}`);
+    throw new Error(`Telegram ${method} failed: ${JSON.stringify(data)}`);
   }
 
   return data.result;
+}
+
+async function sendTelegramXPost(tweet, aiComment) {
+  const caption = buildTelegramCaption(tweet, aiComment);
+  const gifFileId = pickRandomGifFileId();
+
+  if (gifFileId) {
+    return tg("sendAnimation", {
+      chat_id: TELEGRAM_ALERT_CHAT_ID,
+      animation: gifFileId,
+      caption,
+      parse_mode: "HTML"
+    });
+  }
+
+  return tg("sendMessage", {
+    chat_id: TELEGRAM_ALERT_CHAT_ID,
+    text: caption,
+    parse_mode: "HTML",
+    disable_web_page_preview: false
+  });
 }
 
 app.get("/", (req, res) => {
@@ -225,6 +338,10 @@ app.post("/runtime/config", (req, res) => {
   });
 });
 
+app.get("/watchers/x", (req, res) => {
+  return res.json({ ok: true, route: "/watchers/x", method: "GET" });
+});
+
 app.post("/watchers/x", async (req, res) => {
   try {
     const secret = String(req.body.secret || "");
@@ -243,6 +360,8 @@ app.post("/watchers/x", async (req, res) => {
     }
 
     const tweetId = String(tweet.id);
+    const username = String(tweet?.username || "").trim() || X_DEFAULT_USERNAME;
+    const rawText = normalizeTweetText(tweet.text);
 
     if (wasTweetPosted(tweetId)) {
       return res.json({ ok: true, deduped: true, tweetId });
@@ -256,21 +375,42 @@ app.post("/watchers/x", async (req, res) => {
       return res.status(500).json({ ok: false, error: "missing TELEGRAM_ALERT_CHAT_ID" });
     }
 
+    if (isRetweetText(rawText)) {
+      console.log("[X WATCHER] skipped retweet:", tweetId);
+      markTweetPosted(tweetId);
+      return res.json({ ok: true, skipped: true, reason: "retweet", tweetId });
+    }
+
+    if (isReplyText(rawText)) {
+      console.log("[X WATCHER] skipped reply-like post:", tweetId);
+      markTweetPosted(tweetId);
+      return res.json({ ok: true, skipped: true, reason: "reply_like", tweetId });
+    }
+
+    const fullTweet = {
+      ...tweet,
+      username,
+      url:
+        String(tweet?.url || "").trim() ||
+        `https://x.com/${username}/status/${tweetId}`
+    };
+
     console.log("[X WATCHER] incoming tweet:", {
       id: tweetId,
-      username: tweet?.username || null,
-      text: String(tweet.text).slice(0, 300)
+      username,
+      text: rawText.slice(0, 300)
     });
 
-    const message = buildTelegramXPost(tweet);
-    const sent = await sendTelegramMessage(TELEGRAM_ALERT_CHAT_ID, message);
+    const aiComment = await buildChiikawaXComment(fullTweet);
+    const sent = await sendTelegramXPost(fullTweet, aiComment);
 
     markTweetPosted(tweetId);
 
     return res.json({
       ok: true,
       tweetId,
-      telegramMessageId: sent?.message_id || null
+      telegramMessageId: sent?.message_id || null,
+      usedGif: Boolean(X_GIF_FILE_IDS.length)
     });
   } catch (error) {
     console.error("[X WATCHER] route error:", error);
