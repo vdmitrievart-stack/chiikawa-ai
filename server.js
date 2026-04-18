@@ -19,12 +19,6 @@ const TELEGRAM_ALERT_CHAT_ID =
   process.env.FORCED_GROUP_CHAT_ID ||
   "-1003953010138";
 
-const X_DEFAULT_USERNAME = process.env.X_DEFAULT_USERNAME || "Chiikawa_CTO";
-const X_GIF_FILE_IDS = String(process.env.X_GIF_FILE_IDS || "")
-  .split(",")
-  .map(x => x.trim())
-  .filter(Boolean);
-
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY");
 }
@@ -132,134 +126,21 @@ function markTweetPosted(tweetId) {
   saveXWatcherState(xWatcherState);
 }
 
-function escapeHtml(text) {
-  return String(text || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function normalizeTweetText(text) {
-  return String(text || "")
-    .replace(/\r/g, "")
-    .trim();
-}
-
-function isRetweetText(text) {
-  return /^RT\s+@/i.test(String(text || "").trim());
-}
-
-function isReplyText(text) {
-  return /^@\w+/i.test(String(text || "").trim());
-}
-
-function pickRandomGifFileId() {
-  if (!X_GIF_FILE_IDS.length) return null;
-  const idx = Math.floor(Math.random() * X_GIF_FILE_IDS.length);
-  return X_GIF_FILE_IDS[idx];
-}
-
-function shortenText(text, maxLen = 900) {
-  const value = String(text || "").trim();
-  if (value.length <= maxLen) return value;
-  return `${value.slice(0, maxLen - 1)}…`;
-}
-
-function extractCas(text) {
-  const matches = String(text || "").match(/[1-9A-HJ-NP-Za-km-z]{32,44}/g) || [];
-  return [...new Set(matches)];
-}
-
-async function buildChiikawaXComment(tweet) {
-  const text = normalizeTweetText(tweet?.text || "");
-  const cas = extractCas(text);
-
-  if (!OPENAI_API_KEY) {
-    return cas.length
-      ? `Chiikawa spotted something shiny ✨\nCA: ${cas[0]}`
-      : `Chiikawa saw a fresh post ✨`;
-  }
-
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
-      temperature: 0.8,
-      max_tokens: 120,
-      messages: [
-        {
-          role: "system",
-          content: `You are Chiikawa writing a very short Telegram caption for a post from X.
-
-Rules:
-- 1 to 3 short lines
-- cute, sharp, natural
-- no hashtags
-- no quotation marks
-- do not say "I am Chiikawa"
-- if there is a Solana CA, mention it briefly
-- if the post is just casual/non-token content, keep it playful and short
-- output plain text only`
-        },
-        {
-          role: "user",
-          content: `Username: @${tweet?.username || X_DEFAULT_USERNAME}
-Tweet text:
-${text}
-
-Detected CAs:
-${cas.length ? cas.join(", ") : "none"}`
-        }
-      ]
-    });
-
-    return (
-      completion.choices?.[0]?.message?.content?.trim() ||
-      (cas.length
-        ? `Chiikawa spotted something shiny ✨\nCA: ${cas[0]}`
-        : `Chiikawa saw a fresh post ✨`)
-    );
-  } catch (error) {
-    console.error("buildChiikawaXComment error:", error.message);
-    return cas.length
-      ? `Chiikawa spotted something shiny ✨\nCA: ${cas[0]}`
-      : `Chiikawa saw a fresh post ✨`;
-  }
-}
-
-function buildTelegramCaption(tweet, aiComment) {
-  const username = String(tweet?.username || "").trim() || X_DEFAULT_USERNAME;
-  const text = shortenText(normalizeTweetText(tweet?.text || ""), 900);
+function buildFallbackCaption(tweet) {
+  const username = String(tweet?.username || "Chiikawa_CTO").trim();
+  const text = String(tweet?.text || "").trim();
   const url =
     String(tweet?.url || "").trim() ||
     (tweet?.id ? `https://x.com/${username}/status/${tweet.id}` : "");
-  const cas = extractCas(text);
 
-  const parts = [];
-
-  if (aiComment) {
-    parts.push(escapeHtml(aiComment));
-    parts.push("");
-  }
-
-  parts.push(`🐦 <b>New X post</b>`);
-  parts.push(`<b>@${escapeHtml(username)}</b>`);
-  parts.push("");
-
-  if (text) {
-    parts.push(escapeHtml(text));
-    parts.push("");
-  }
-
-  if (cas.length) {
-    parts.push(`<b>CA:</b> <code>${escapeHtml(cas[0])}</code>`);
-    parts.push("");
-  }
-
-  if (url) {
-    parts.push(escapeHtml(url));
-  }
-
-  return parts.join("\n").slice(0, 1024);
+  return [
+    `🐦 <b>New X post detected</b>`,
+    `<b>@${username}</b>`,
+    "",
+    text,
+    "",
+    url
+  ].join("\n").slice(0, 1024);
 }
 
 async function tg(method, body) {
@@ -280,9 +161,12 @@ async function tg(method, body) {
   return data.result;
 }
 
-async function sendTelegramXPost(tweet, aiComment) {
-  const caption = buildTelegramCaption(tweet, aiComment);
-  const gifFileId = pickRandomGifFileId();
+async function sendStyledXPost(styledPost, fallbackTweet) {
+  const caption =
+    String(styledPost?.caption || "").trim() ||
+    buildFallbackCaption(fallbackTweet);
+
+  const gifFileId = String(styledPost?.gifFileId || "").trim();
 
   if (gifFileId) {
     return tg("sendAnimation", {
@@ -346,6 +230,7 @@ app.post("/watchers/x", async (req, res) => {
   try {
     const secret = String(req.body.secret || "");
     const tweet = req.body.tweet || {};
+    const styledPost = req.body.styledPost || {};
 
     if (!authOk(secret)) {
       return res.status(403).json({ ok: false, error: "unauthorized" });
@@ -359,14 +244,6 @@ app.post("/watchers/x", async (req, res) => {
       return res.status(400).json({ ok: false, error: "invalid tweet payload" });
     }
 
-    const tweetId = String(tweet.id);
-    const username = String(tweet?.username || "").trim() || X_DEFAULT_USERNAME;
-    const rawText = normalizeTweetText(tweet.text);
-
-    if (wasTweetPosted(tweetId)) {
-      return res.json({ ok: true, deduped: true, tweetId });
-    }
-
     if (!TELEGRAM_BOT_TOKEN) {
       return res.status(500).json({ ok: false, error: "missing TELEGRAM_BOT_TOKEN" });
     }
@@ -375,42 +252,26 @@ app.post("/watchers/x", async (req, res) => {
       return res.status(500).json({ ok: false, error: "missing TELEGRAM_ALERT_CHAT_ID" });
     }
 
-    if (isRetweetText(rawText)) {
-      console.log("[X WATCHER] skipped retweet:", tweetId);
-      markTweetPosted(tweetId);
-      return res.json({ ok: true, skipped: true, reason: "retweet", tweetId });
+    const tweetId = String(tweet.id);
+
+    if (wasTweetPosted(tweetId)) {
+      return res.json({ ok: true, deduped: true, tweetId });
     }
 
-    if (isReplyText(rawText)) {
-      console.log("[X WATCHER] skipped reply-like post:", tweetId);
-      markTweetPosted(tweetId);
-      return res.json({ ok: true, skipped: true, reason: "reply_like", tweetId });
-    }
-
-    const fullTweet = {
-      ...tweet,
-      username,
-      url:
-        String(tweet?.url || "").trim() ||
-        `https://x.com/${username}/status/${tweetId}`
-    };
-
-    console.log("[X WATCHER] incoming tweet:", {
-      id: tweetId,
-      username,
-      text: rawText.slice(0, 300)
+    console.log("[X WATCHER] incoming styled post:", {
+      tweetId,
+      username: tweet?.username || null,
+      hasGif: Boolean(styledPost?.gifFileId),
+      mode: styledPost?.mode || null
     });
 
-    const aiComment = await buildChiikawaXComment(fullTweet);
-    const sent = await sendTelegramXPost(fullTweet, aiComment);
-
+    const sent = await sendStyledXPost(styledPost, tweet);
     markTweetPosted(tweetId);
 
     return res.json({
       ok: true,
       tweetId,
-      telegramMessageId: sent?.message_id || null,
-      usedGif: Boolean(X_GIF_FILE_IDS.length)
+      telegramMessageId: sent?.message_id || null
     });
   } catch (error) {
     console.error("[X WATCHER] route error:", error);
