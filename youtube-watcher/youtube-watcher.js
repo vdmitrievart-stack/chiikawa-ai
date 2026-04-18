@@ -5,9 +5,9 @@ import personality from "./personality-engine.js";
 
 const parser = new Parser();
 
-const TELEGRAM_BOT_TOKEN =
+const TELEGRAM_SEND_BOT_TOKEN =
+  process.env.TELEGRAM_SEND_BOT_TOKEN ||
   process.env.TELEGRAM_BOT_TOKEN ||
-  process.env.BOT_TOKEN ||
   "";
 
 const TELEGRAM_ALERT_CHAT_ID =
@@ -19,8 +19,16 @@ const TELEGRAM_ALERT_CHAT_ID =
 const YOUTUBE_RSS_URL = (process.env.YOUTUBE_RSS_URL || "").trim();
 const POLL_INTERVAL_MS = Number(process.env.YOUTUBE_POLL_INTERVAL_MS || 60000);
 
-if (!TELEGRAM_BOT_TOKEN) {
-  console.error("Missing TELEGRAM_BOT_TOKEN");
+function getEnvList(name) {
+  const raw = process.env[name];
+  if (!raw) return [];
+  return raw.split(",").map(v => v.trim()).filter(Boolean);
+}
+
+const YOUTUBE_GIF_FILE_IDS = getEnvList("YOUTUBE_GIF_FILE_IDS");
+
+if (!TELEGRAM_SEND_BOT_TOKEN) {
+  console.error("Missing TELEGRAM_SEND_BOT_TOKEN");
   process.exit(1);
 }
 
@@ -40,8 +48,13 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function rand(arr) {
+  if (!Array.isArray(arr) || !arr.length) return null;
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
 async function sendTelegramMessage(text) {
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const url = `https://api.telegram.org/bot${TELEGRAM_SEND_BOT_TOKEN}/sendMessage`;
 
   const res = await fetch(url, {
     method: "POST",
@@ -50,7 +63,9 @@ async function sendTelegramMessage(text) {
     },
     body: JSON.stringify({
       chat_id: TELEGRAM_ALERT_CHAT_ID,
-      text: String(text || "").slice(0, 4096)
+      text: String(text || "").slice(0, 4096),
+      parse_mode: "HTML",
+      disable_web_page_preview: false
     })
   });
 
@@ -58,6 +73,37 @@ async function sendTelegramMessage(text) {
 
   if (!res.ok || !data.ok) {
     throw new Error(`Telegram API error: ${JSON.stringify(data)}`);
+  }
+
+  return data;
+}
+
+async function sendTelegramAnimation(caption) {
+  const fileId = rand(YOUTUBE_GIF_FILE_IDS);
+  if (!fileId) {
+    await sendTelegramMessage(caption);
+    return;
+  }
+
+  const url = `https://api.telegram.org/bot${TELEGRAM_SEND_BOT_TOKEN}/sendAnimation`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      chat_id: TELEGRAM_ALERT_CHAT_ID,
+      animation: fileId,
+      caption: String(caption || "").slice(0, 1024),
+      parse_mode: "HTML"
+    })
+  });
+
+  const data = await res.json();
+
+  if (!res.ok || !data.ok) {
+    throw new Error(`Telegram animation error: ${JSON.stringify(data)}`);
   }
 
   return data;
@@ -112,7 +158,7 @@ async function loop() {
           moodLine
         });
 
-        await sendTelegramMessage(text);
+        await sendTelegramAnimation(text);
 
         console.log("New YouTube episode sent:", video.title);
         lastSeenVideoId = video.id;
