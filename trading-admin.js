@@ -3,26 +3,14 @@
 import { Level6TradingOrchestrator } from "./Level6TradingOrchestrator.js";
 
 // ==============================
-// RUNTIME STATE
+// STATE
 // ==============================
 
 const tradingRuntime = {
   enabled: false,
   mode: "safe",
   killSwitch: false,
-  autoCopyEnabled: false,
-  level5DryRun: true,
-  buybotAlertMinUsd: 20,
-  trackedWallets: []
-};
-
-const level6Runtime = {
-  enabled: true,
-  dryRun: true,
-  autoEntries: true,
-  autoExits: true,
-  openTrades: 0,
-  journalTrades: 0
+  buybotAlertMinUsd: 20
 };
 
 let orchestrator = null;
@@ -32,17 +20,11 @@ let orchestrator = null;
 // ==============================
 
 export async function initTradingAdmin() {
-  console.log("🚀 Initializing Trading Admin...");
+  console.log("🚀 Trading Admin init");
 
-  try {
-    orchestrator = new Level6TradingOrchestrator({
-      dryRun: level6Runtime.dryRun
-    });
-
-    console.log("🧠 Level6 orchestrator initialized");
-  } catch (err) {
-    console.log("❌ Level6 init error:", err.message);
-  }
+  orchestrator = new Level6TradingOrchestrator({
+    dryRun: true
+  });
 }
 
 // ==============================
@@ -53,166 +35,101 @@ export function getTradingRuntime() {
   return tradingRuntime;
 }
 
-export function getLevel6Runtime() {
-  return {
-    ...level6Runtime,
-    openTrades: orchestrator?.getOpenTrades?.().length || 0,
-    journalTrades: orchestrator?.getJournal?.().length || 0
-  };
+// ==============================
+// TRADE REPORT FLOW
+// ==============================
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
+const GIFS = {
+  entry: [
+    "https://media.giphy.com/media/ICOgUNjpvO0PC/giphy.gif",
+    "https://media.giphy.com/media/l0HlNaQ6gWfllcjDO/giphy.gif"
+  ],
+  update: [
+    "https://media.giphy.com/media/3o7aCTfyhYawdOXcFW/giphy.gif"
+  ],
+  win: [
+    "https://media.giphy.com/media/111ebonMs90YLu/giphy.gif"
+  ],
+  loss: [
+    "https://media.giphy.com/media/26ufdipQqU2lhNA4g/giphy.gif"
+  ]
+};
+
 // ==============================
-// COMMAND HANDLER
+// SIMULATION (CORE)
 // ==============================
 
-export async function handleTradingCommand(text, userName) {
-  try {
-    if (text.startsWith("/trading_on")) {
-      tradingRuntime.enabled = true;
-      return { ok: true, message: "✅ Trading enabled" };
+export async function simulateTradeFlow(sendToTG) {
+  const trade = await orchestrator.tryEnter({
+    token: "CHI",
+    price: 1,
+    volumeSpike: true,
+    smartWallets: true,
+    liquidity: 20000,
+    hypeScore: 80
+  });
+
+  if (!trade) return;
+
+  await sendToTG({
+    text: `🚀 ENTRY
+
+Token: ${trade.token}
+Price: ${trade.entry}
+Score: ${trade.score}`,
+    gif: pick(GIFS.entry)
+  });
+
+  let price = 1;
+
+  for (let i = 0; i < 10; i++) {
+    await sleep(800);
+
+    price *= 1 + (Math.random() * 0.12 - 0.04);
+
+    orchestrator.updateTrade(trade, price);
+
+    await sendToTG({
+      text: `📈 Update
+
+PnL: ${trade.pnl.toFixed(2)}%
+Price: ${price.toFixed(4)}`,
+      gif: pick(GIFS.update)
+    });
+
+    const exit = orchestrator.shouldExit(trade);
+
+    if (exit) {
+      const closed = orchestrator.closeTrade(trade, exit);
+
+      await sendToTG({
+        text: `🏁 EXIT
+
+PnL: ${closed.pnl.toFixed(2)}%
+Reason: ${exit}`,
+      });
+
+      await sendToTG({
+        text:
+          closed.pnl > 0
+            ? `🎉 WIN\n+${closed.pnl.toFixed(2)}%\nChiikawa happy 🐹✨`
+            : `💀 LOSS\n${closed.pnl.toFixed(2)}%\nMarket tricky...`,
+        gif: closed.pnl > 0 ? pick(GIFS.win) : pick(GIFS.loss)
+      });
+
+      return;
     }
-
-    if (text.startsWith("/trading_off")) {
-      tradingRuntime.enabled = false;
-      return { ok: true, message: "⛔ Trading disabled" };
-    }
-
-    if (text.startsWith("/kill_switch")) {
-      tradingRuntime.killSwitch = !tradingRuntime.killSwitch;
-      return {
-        ok: true,
-        message: `🛑 Kill switch: ${tradingRuntime.killSwitch}`
-      };
-    }
-
-    if (text.startsWith("/trade_mode")) {
-      tradingRuntime.mode =
-        tradingRuntime.mode === "safe" ? "aggressive" : "safe";
-
-      return {
-        ok: true,
-        message: `⚙️ Mode: ${tradingRuntime.mode}`
-      };
-    }
-
-    if (text.startsWith("/setbuy")) {
-      const val = Number(text.split(" ")[1]);
-      if (!val || val <= 0) {
-        return { ok: false, error: "Invalid value" };
-      }
-
-      tradingRuntime.buybotAlertMinUsd = val;
-
-      return {
-        ok: true,
-        message: `💰 Buy min set: $${val}`
-      };
-    }
-
-    if (text.startsWith("/level6_status")) {
-      return {
-        ok: true,
-        message: formatLevel6Summary()
-      };
-    }
-
-    if (text.startsWith("/level6_open_trades")) {
-      const trades = orchestrator?.getOpenTrades?.() || [];
-
-      if (!trades.length) {
-        return { ok: true, message: "No open trades" };
-      }
-
-      return {
-        ok: true,
-        message: trades
-          .map(
-            (t, i) =>
-              `${i + 1}. ${t.token}
-Entry: ${t.entry}
-PnL: ${t.pnl}
-Score: ${t.score}`
-          )
-          .join("\n\n")
-      };
-    }
-
-    return { ok: false, error: "Unknown command" };
-  } catch (err) {
-    return { ok: false, error: err.message };
   }
 }
 
 // ==============================
-// CALLBACK HANDLER
+// HELPERS
 // ==============================
 
-export async function handleTradingAdminCallback(data) {
-  try {
-    if (data === "trade:toggle_enabled") {
-      tradingRuntime.enabled = !tradingRuntime.enabled;
-      return { ok: true, message: "Trading toggled" };
-    }
-
-    if (data === "trade:toggle_kill") {
-      tradingRuntime.killSwitch = !tradingRuntime.killSwitch;
-      return { ok: true, message: "Kill switch toggled" };
-    }
-
-    if (data === "trade:cycle_mode") {
-      tradingRuntime.mode =
-        tradingRuntime.mode === "safe" ? "aggressive" : "safe";
-
-      return { ok: true, message: `Mode: ${tradingRuntime.mode}` };
-    }
-
-    if (data === "trade:buymin_up") {
-      tradingRuntime.buybotAlertMinUsd += 5;
-      return {
-        ok: true,
-        message: `Buy min: $${tradingRuntime.buybotAlertMinUsd}`
-      };
-    }
-
-    return { ok: false, error: "Unknown action" };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-// ==============================
-// STATUS FORMATTERS
-// ==============================
-
-export function formatTradingStatus() {
-  return `📊 Trading Status
-
-Enabled: ${tradingRuntime.enabled}
-Mode: ${tradingRuntime.mode}
-Kill Switch: ${tradingRuntime.killSwitch}
-Buy Min: $${tradingRuntime.buybotAlertMinUsd}`;
-}
-
-export function getLevel6Summary() {
-  return {
-    winRate: 0.62,
-    totalTrades: 12,
-    pnl: 3.4,
-    avgEntryScore: 78
-  };
-}
-
-function formatLevel6Summary() {
-  const s = getLevel6Summary();
-
-  return `📊 Level 6 Summary
-
-WinRate: ${(s.winRate * 100).toFixed(1)}%
-Trades: ${s.totalTrades}
-PnL: ${s.pnl} SOL
-Score: ${s.avgEntryScore}`;
-}
-
-export function getLevel6OpenTrades() {
-  return orchestrator?.getOpenTrades?.() || [];
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
