@@ -1,12 +1,17 @@
 import http from "node:http";
 import TelegramBot from "node-telegram-bot-api";
-import { getBestTrade } from "./scan-engine.js";
+import { getBestTrade, getLatestTokenPrice } from "./scan-engine.js";
 import { enterTrade, exitTrade, getPortfolio, markToMarket } from "./portfolio.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "chiikawa_secret";
 const PATH = `/telegram/${WEBHOOK_SECRET}`;
+
+const AUTO_INTERVAL_MS = Number(process.env.AUTO_INTERVAL_MS || 60000);
+const AUTO_HOURS_DEFAULT = Number(process.env.AUTO_HOURS_DEFAULT || 4);
+const TRADE_COOLDOWN_MS = Number(process.env.TRADE_COOLDOWN_MS || 90 * 60 * 1000);
+const HOLD_MS = Number(process.env.HOLD_MS || 90 * 1000);
 
 if (!TOKEN) {
   console.error("BOT_TOKEN missing");
@@ -18,12 +23,22 @@ const bot = new TelegramBot(TOKEN, { polling: false });
 let intervalId = null;
 let autoStopId = null;
 let activeChatId = null;
+const recentlyTraded = new Map();
 
 async function send(chatId, text) {
   return bot.sendMessage(chatId, text, {
     parse_mode: "HTML",
     disable_web_page_preview: true
   });
+}
+
+function pruneRecentlyTraded() {
+  const now = Date.now();
+  for (const [ca, ts] of recentlyTraded.entries()) {
+    if (now - ts > TRADE_COOLDOWN_MS) {
+      recentlyTraded.delete(ca);
+    }
+  }
 }
 
 function formatAnalysis(best) {
@@ -49,9 +64,47 @@ function formatAnalysis(best) {
 ${best.reasons.map(r => `• ${r}`).join("\n")}`;
 }
 
+function stopAutoInternal() {
+  if (intervalId) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+  if (autoStopId) {
+    clearTimeout(autoStopId);
+    autoStopId = null;
+  }
+}
+
 async function runCycle(chatId) {
   try {
-    const best = await getBestTrade();
+    pruneRecentlyTraded();
+
+    const portfolio = getPortfolio();
+
+    if (portfolio.position) {
+      const latest = await getLatestTokenPrice(portfolio.position.ca);
+      if (!latest?.price) {
+        await send(chatId, `⏳ Open trade still active: ${portfolio.position.token}`);
+        return;
+      }
+
+      const mtm = markToMarket(latest.price);
+      await send(
+        chatId,
+        `📈 <b>OPEN POSITION UPDATE</b>
+
+<b>Token:</b> ${portfolio.position.token}
+<b>CA:</b> <code>${portfolio.position.ca}</code>
+<b>Entry:</b> ${portfolio.position.entry}
+<b>Current:</b> ${latest.price}
+<b>PnL:</b> ${mtm ? mtm.pnlPercent.toFixed(2) : "0.00"}%`
+      );
+      return;
+    }
+
+    const excludeCas = [...recentlyTraded.keys()];
+    const best = await getBestTrade({ excludeCas });
+
     if (!best) {
       await send(chatId, "❌ No candidates found");
       return;
@@ -66,23 +119,11 @@ async function runCycle(chatId) {
 
     const entry = enterTrade(best.token);
     if (!entry) {
-      const pf = getPortfolio();
-      if (pf.position) {
-        const mtm = markToMarket(best.token.price);
-        await send(
-          chatId,
-          `⏳ Already in trade
-
-<b>Token:</b> ${pf.position.token}
-<b>Entry:</b> ${pf.position.entry}
-<b>Current:</b> ${best.token.price}
-<b>PnL:</b> ${mtm ? mtm.pnlPercent.toFixed(2) : "0.00"}%`
-        );
-      } else {
-        await send(chatId, "⏳ Cannot enter trade right now");
-      }
+      await send(chatId, "⏳ Could not open position");
       return;
     }
+
+    recentlyTraded.set(entry.ca, Date.now());
 
     const afterEntry = getPortfolio();
 
@@ -99,13 +140,10 @@ async function runCycle(chatId) {
 
     setTimeout(async () => {
       try {
-        const fresh = await getBestTrade();
-        const simulatedExitPrice =
-          fresh?.token?.ca === entry.ca
-            ? fresh.token.price
-            : entry.entry * (1 + Math.max(-0.06, Math.min(0.08, (best.score - 60) / 500)));
+        const latest = await getLatestTokenPrice(entry.ca);
+        const exitPrice = latest?.price || entry.entry;
 
-        const exit = exitTrade(simulatedExitPrice, "SIM_EXIT");
+        const exit = exitTrade(exitPrice, "SIM_EXIT");
         if (!exit) return;
 
         await send(
@@ -121,31 +159,20 @@ async function runCycle(chatId) {
       } catch (error) {
         console.log("exit error:", error.message);
       }
-    }, 30000);
+    }, HOLD_MS);
   } catch (error) {
     console.log("cycle error:", error.message);
     await send(chatId, `⚠️ Cycle error: ${error.message}`);
   }
 }
 
-function stopAutoInternal() {
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = null;
-  }
-  if (autoStopId) {
-    clearTimeout(autoStopId);
-    autoStopId = null;
-  }
-}
-
-function startAuto(chatId, hours = 4) {
+function startAuto(chatId, hours = AUTO_HOURS_DEFAULT) {
   stopAutoInternal();
   activeChatId = chatId;
 
   intervalId = setInterval(() => {
     runCycle(chatId);
-  }, 60000);
+  }, AUTO_INTERVAL_MS);
 
   autoStopId = setTimeout(async () => {
     stopAutoInternal();
@@ -158,8 +185,6 @@ function startAuto(chatId, hours = 4) {
 async function handleMessage(msg) {
   const chatId = msg.chat.id;
   const text = String(msg.text || "").trim();
-
-  console.log("MSG:", text);
 
   if (text === "/start") {
     await send(chatId, "🤖 Bot ready. Commands: /run4h /stop /status /scan");
@@ -191,7 +216,8 @@ async function handleMessage(msg) {
 <b>Balance:</b> ${pf.balance.toFixed(4)} SOL
 <b>Position:</b> ${pf.position ? pf.position.token : "none"}
 <b>Auto mode:</b> ${intervalId ? "ON" : "OFF"}
-<b>Trades closed:</b> ${pf.tradeHistory.length}`
+<b>Trades closed:</b> ${pf.tradeHistory.length}
+<b>Recently traded cooldown list:</b> ${recentlyTraded.size}`
     );
     return;
   }
@@ -247,10 +273,6 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, async () => {
   console.log("🚀 Server started");
-
-  await bot.setWebHook(
-    `https://${process.env.RENDER_EXTERNAL_HOSTNAME}${PATH}`
-  );
-
+  await bot.setWebHook(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}${PATH}`);
   console.log("✅ Webhook set");
 });
