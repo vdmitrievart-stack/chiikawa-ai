@@ -12,7 +12,7 @@ export async function scanMarket() {
 
   if (!json.pairs) return [];
 
-  return json.pairs.slice(0, 10).map(p => ({
+  return json.pairs.slice(0, 15).map(p => ({
     name: p.baseToken.symbol,
     ca: p.baseToken.address,
     price: Number(p.priceUsd || 0),
@@ -33,6 +33,7 @@ export async function analyzeToken(token) {
 
   if (!rug.isRug) score += 30;
   score += wallet.score;
+
   if (!bots.isBotted) score += 20;
   if (sentiment.bullish) score += 20;
 
