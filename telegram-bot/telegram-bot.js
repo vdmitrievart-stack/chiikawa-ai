@@ -26,11 +26,6 @@ let loopId = null;
 let stopTimeoutId = null;
 const tempFiles = new Set();
 
-function safeNum(v, fallback = 0) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
 function keyboard() {
   return {
     keyboard: [
@@ -222,46 +217,30 @@ async function scheduleTempCleanup(filePath) {
 async function exportJson(chatId) {
   const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.json`);
   await fs.writeFile(filePath, JSON.stringify(kernel.getPortfolio(), null, 2), "utf8");
-  await bot.sendDocument(
-    chatId,
-    filePath,
-    {},
-    {
-      filename: path.basename(filePath),
-      contentType: "application/json"
-    }
-  );
+  await bot.sendDocument(chatId, filePath, {}, {
+    filename: path.basename(filePath),
+    contentType: "application/json"
+  });
   await scheduleTempCleanup(filePath);
 }
 
 async function exportCsv(chatId) {
   const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.csv`);
   await fs.writeFile(filePath, statsToCsv(), "utf8");
-  await bot.sendDocument(
-    chatId,
-    filePath,
-    {},
-    {
-      filename: path.basename(filePath),
-      contentType: "text/csv"
-    }
-  );
+  await bot.sendDocument(chatId, filePath, {}, {
+    filename: path.basename(filePath),
+    contentType: "text/csv"
+  });
   await scheduleTempCleanup(filePath);
 }
 
 async function exportXlsx(chatId) {
   const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.xlsx`);
   XLSX.writeFile(statsToXlsxWorkbook(), filePath);
-  await bot.sendDocument(
-    chatId,
-    filePath,
-    {},
-    {
-      filename: path.basename(filePath),
-      contentType:
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    }
-  );
+  await bot.sendDocument(chatId, filePath, {}, {
+    filename: path.basename(filePath),
+    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
   await scheduleTempCleanup(filePath);
 }
 
