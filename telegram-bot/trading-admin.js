@@ -71,7 +71,7 @@ export async function handleTradingCommand(cmd) {
 
 // 🔥 ФИКС simulateTradeFlow
 export async function simulateTradeFlow(userSend, groupSend) {
-  const token = "TEST_TOKEN"; // ← фикс
+  const token = "TEST_TOKEN";
 
   const trade = {
     token,
