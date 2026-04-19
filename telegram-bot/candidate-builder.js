@@ -1,17 +1,11 @@
 import { buildLevel6SocialIntel } from "./x-engine.js";
+import { fetchDexMarketSnapshot } from "./market-data.js";
+import { buildGMGNWalletIntel } from "./gmgn-wallet-intel.js";
+import { buildRugScamIntel } from "./rug-scam-engine.js";
 
 function safeNum(value, fallback = 0) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function round(value, digits = 2) {
-  const p = 10 ** digits;
-  return Math.round((safeNum(value) + Number.EPSILON) * p) / p;
 }
 
 function uniq(arr) {
@@ -20,6 +14,16 @@ function uniq(arr) {
 
 function stripText(text) {
   return String(text || "").trim();
+}
+
+function round(value, digits = 2) {
+  const p = 10 ** digits;
+  return Math.round((safeNum(value) + Number.EPSILON) * p) / p;
+}
+
+function pct(a, b) {
+  if (!b) return 0;
+  return (a / b) * 100;
 }
 
 function buildSymbolKeywords(symbol = "", name = "") {
@@ -40,12 +44,6 @@ function buildSymbolKeywords(symbol = "", name = "") {
 
   return uniq(out);
 }
-
-/**
- * =========================
- * DEFAULT PORTFOLIO RULES
- * =========================
- */
 
 function buildDefaultPortfolio(input = {}) {
   return {
@@ -78,129 +76,118 @@ function buildDefaultExecution(input = {}) {
   };
 }
 
-/**
- * =========================
- * TOKEN INTEL
- * =========================
- *
- * This is intentionally adapter-ready.
- * Right now:
- * - supports direct input
- * - normalizes token metadata
- * - estimates missing values safely
- *
- * Later we can swap internals for:
- * - DexScreener
- * - GMGN
- * - Pump.fun
- * - Birdeye
- * - on-chain RPC
- */
-
 export async function buildTokenIntel(input = {}) {
-  const ca = stripText(input.ca);
+  const ca = stripText(input.ca || input.contractAddress);
+  const chainId = stripText(input.chainId || process.env.DEFAULT_CHAIN_ID || "solana");
   const symbol = stripText(input.symbol || input.ticker);
   const name = stripText(input.name);
 
-  const tokenPriceUsd = safeNum(input.tokenPriceUsd, safeNum(input.priceUsd, 0));
-  const totalSupply = safeNum(input.totalSupply, 0);
-  const liquidityUsd = safeNum(input.liquidityUsd, 0);
-  const volume1mUsd = safeNum(input.volume1mUsd, 0);
-  const top10HolderPct = safeNum(input.top10HolderPct, 0);
-  const creatorHolderPct = safeNum(input.creatorHolderPct, 0);
-  const lpLockedPct = safeNum(input.lpLockedPct, 0);
+  let market = null;
+  if (ca) {
+    market = await fetchDexMarketSnapshot({
+      chainId,
+      tokenAddress: ca
+    });
+  }
+
+  const resolvedSymbol = symbol || market?.symbol || "";
+  const resolvedName = name || market?.name || "";
 
   return {
     ca,
-    symbol,
-    name,
+    chainId,
+    symbol: resolvedSymbol,
+    name: resolvedName,
     keywords: uniq([
-      ...buildSymbolKeywords(symbol, name),
+      ...buildSymbolKeywords(resolvedSymbol, resolvedName),
       ...(Array.isArray(input.keywords) ? input.keywords : [])
     ]),
-    totalSupply,
-    tokenPriceUsd,
-    liquidityUsd,
-    volume1mUsd,
-    top10HolderPct,
-    creatorHolderPct,
-    lpLockedPct,
+    totalSupply: safeNum(input.totalSupply, 0),
+    tokenPriceUsd: safeNum(input.tokenPriceUsd, market?.priceUsd || 0),
+    liquidityUsd: safeNum(input.liquidityUsd, market?.liquidityUsd || 0),
+    volume1mUsd: safeNum(input.volume1mUsd, market?.volume5mUsd || 0),
+    top10HolderPct: safeNum(input.top10HolderPct, 0),
+    creatorHolderPct: safeNum(input.creatorHolderPct, 0),
+    lpLockedPct: safeNum(input.lpLockedPct, 0),
     mintAuthorityEnabled: Boolean(input.mintAuthorityEnabled),
     freezeAuthorityEnabled: Boolean(input.freezeAuthorityEnabled),
     decimals: safeNum(input.decimals, 0),
-    fdvUsd: safeNum(input.fdvUsd, totalSupply && tokenPriceUsd ? totalSupply * tokenPriceUsd : 0),
-    marketCapUsd: safeNum(
-      input.marketCapUsd,
-      totalSupply && tokenPriceUsd ? totalSupply * tokenPriceUsd : 0
-    )
+    fdvUsd: safeNum(input.fdvUsd, market?.fdvUsd || 0),
+    marketCapUsd: safeNum(input.marketCapUsd, market?.marketCapUsd || 0),
+    pairAddress: stripText(input.pairAddress || market?.pairAddress || ""),
+    dexId: stripText(input.dexId || market?.dexId || ""),
+    marketSource: market?.source || "manual_or_default"
   };
 }
-
-/**
- * =========================
- * WALLET INTEL
- * =========================
- *
- * This is the smart-wallet / leader-tracking layer.
- * Right now it accepts precomputed metrics or falls back safely.
- *
- * Later adapters can pull from:
- * - GMGN
- * - Axiom
- * - custom wallet DB
- * - your own trade history
- */
 
 export async function buildWalletIntel(input = {}) {
-  return {
-    winRate: safeNum(input.winRate, 0),
-    medianROI: safeNum(input.medianROI, 1),
-    averageROI: safeNum(input.averageROI, 1),
-    maxDrawdown: safeNum(input.maxDrawdown, 0),
-    tradesCount: safeNum(input.tradesCount, 0),
-    earlyEntryScore: safeNum(input.earlyEntryScore, 0),
-    chasePenalty: safeNum(input.chasePenalty, 0),
-    dumpPenalty: safeNum(input.dumpPenalty, 0),
-    consistencyScore: safeNum(input.consistencyScore, 0),
-    consensusLeaders: safeNum(input.consensusLeaders, 0),
-    source: stripText(input.source || "manual_or_default")
-  };
-}
+  if (input.walletIntel && typeof input.walletIntel === "object") {
+    return {
+      winRate: safeNum(input.walletIntel.winRate, 0),
+      medianROI: safeNum(input.walletIntel.medianROI, 1),
+      averageROI: safeNum(input.walletIntel.averageROI, 1),
+      maxDrawdown: safeNum(input.walletIntel.maxDrawdown, 0),
+      tradesCount: safeNum(input.walletIntel.tradesCount, 0),
+      earlyEntryScore: safeNum(input.walletIntel.earlyEntryScore, 0),
+      chasePenalty: safeNum(input.walletIntel.chasePenalty, 0),
+      dumpPenalty: safeNum(input.walletIntel.dumpPenalty, 0),
+      consistencyScore: safeNum(input.walletIntel.consistencyScore, 0),
+      consensusLeaders: safeNum(input.walletIntel.consensusLeaders, 0),
+      source: stripText(input.walletIntel.source || "manual_or_default"),
+      leaders: Array.isArray(input.walletIntel.leaders) ? input.walletIntel.leaders : []
+    };
+  }
 
-/**
- * =========================
- * VOLUME INTEL
- * =========================
- */
+  const ca = stripText(input.ca || input.contractAddress);
+  const symbol = stripText(input.symbol || input.ticker);
+  const chain = stripText(input.chainId || process.env.DEFAULT_CHAIN_ID || "solana");
+
+  return buildGMGNWalletIntel({
+    ca,
+    symbol,
+    chainId: chain
+  });
+}
 
 export async function buildVolumeIntel(input = {}) {
+  const chainId = stripText(input.chainId || process.env.DEFAULT_CHAIN_ID || "solana");
+  const ca = stripText(input.ca || input.contractAddress);
+
+  let market = null;
+  if (ca) {
+    market = await fetchDexMarketSnapshot({
+      chainId,
+      tokenAddress: ca
+    });
+  }
+
+  const volume5m = safeNum(input.volume5mUsd, market?.volume5mUsd || 0);
+  const volume1h = safeNum(input.volume1hUsd, market?.volume1hUsd || 0);
+  const buys5m = safeNum(input.buys5m, market?.buys5m || 0);
+  const sells5m = safeNum(input.sells5m, market?.sells5m || 0);
+
+  const totalFlow = buys5m + sells5m;
+  const buyPressure = totalFlow > 0 ? buys5m / totalFlow : safeNum(input.buyPressure, 0);
+  const sellPressure = totalFlow > 0 ? sells5m / totalFlow : safeNum(input.sellPressure, 0);
+
+  const growthRate1m =
+    volume1h > 0 ? (volume5m * 12) / volume1h : safeNum(input.growthRate1m, 0);
+
   return {
-    growthRate1m: safeNum(input.growthRate1m, 0),
-    buyPressure: safeNum(input.buyPressure, 0),
+    growthRate1m: round(safeNum(input.growthRate1m, growthRate1m), 3),
+    buyPressure: round(safeNum(input.buyPressure, buyPressure), 3),
     uniqueBuyersDelta: safeNum(input.uniqueBuyersDelta, 0),
     repeatedBuyers: safeNum(input.repeatedBuyers, 0),
-    sellPressure: safeNum(input.sellPressure, 0),
+    sellPressure: round(safeNum(input.sellPressure, sellPressure), 3),
     dumpSpike: Boolean(input.dumpSpike),
     pump1mPct: safeNum(input.pump1mPct, 0),
-    source: stripText(input.source || "manual_or_default")
+    volume5mUsd: volume5m,
+    volume1hUsd: volume1h,
+    buys5m,
+    sells5m,
+    source: market?.source || stripText(input.source || "manual_or_default")
   };
 }
-
-/**
- * =========================
- * BUBBLE MAP / HOLDER GRAPH INTEL
- * =========================
- *
- * For now:
- * - supports direct input
- * - normalizes link density
- * - derives compact risk hints
- *
- * Later we can connect:
- * - BubbleMaps
- * - on-chain cluster heuristics
- * - wallet relation graph
- */
 
 export async function buildBubbleMapIntel(input = {}) {
   const holders = Array.isArray(input.holders) ? input.holders : [];
@@ -236,16 +223,6 @@ export async function buildBubbleMapIntel(input = {}) {
   };
 }
 
-/**
- * =========================
- * SOCIAL INTEL
- * =========================
- *
- * Main difference:
- * - if socialIntel is given directly -> normalize it
- * - otherwise build from x-engine using CA/symbol/keywords
- */
-
 export async function buildSocialIntel(input = {}) {
   if (input.socialIntel && typeof input.socialIntel === "object") {
     return {
@@ -260,7 +237,7 @@ export async function buildSocialIntel(input = {}) {
     };
   }
 
-  const ca = stripText(input.ca);
+  const ca = stripText(input.ca || input.contractAddress);
   const symbol = stripText(input.symbol || input.ticker);
   const name = stripText(input.name);
   const keywords = uniq([
@@ -289,17 +266,12 @@ export async function buildSocialIntel(input = {}) {
   }
 }
 
-/**
- * =========================
- * RISK FLAGS
- * =========================
- */
-
 export function buildRiskFlags(candidate = {}) {
   const token = candidate.token || {};
   const social = candidate.socialIntel || {};
   const bubble = candidate.bubbleMapIntel || {};
   const volume = candidate.volumeIntel || {};
+  const rug = candidate.rugScamIntel || {};
 
   const flags = {
     mintRisk: Boolean(token.mintAuthorityEnabled),
@@ -314,7 +286,9 @@ export function buildRiskFlags(candidate = {}) {
       Boolean(volume.dumpSpike) ||
       safeNum(volume.sellPressure, 0) >= 0.52,
     chaseRisk: safeNum(volume.pump1mPct, 0) >= 40,
-    bubbleClusterRisk: safeNum(bubble.denseClusterRisk, 0) >= 0.7
+    bubbleClusterRisk: safeNum(bubble.denseClusterRisk, 0) >= 0.7,
+    rugRisk: Boolean(rug.blocked),
+    rugScoreHigh: safeNum(rug.riskScore, 0) >= 70
   };
 
   flags.blocked =
@@ -322,16 +296,11 @@ export function buildRiskFlags(candidate = {}) {
     flags.freezeRisk ||
     flags.concentrationRisk ||
     flags.creatorRisk ||
-    flags.lpWeakRisk;
+    flags.lpWeakRisk ||
+    flags.rugRisk;
 
   return flags;
 }
-
-/**
- * =========================
- * ENTRY SIZING HINTS
- * =========================
- */
 
 export function buildSizingHints(candidate = {}) {
   const token = candidate.token || {};
@@ -342,8 +311,7 @@ export function buildSizingHints(candidate = {}) {
   const tokenPriceUsd = safeNum(token.tokenPriceUsd, 0);
   const desiredUsd = safeNum(execution.baseDesiredUsd, 0);
 
-  const desiredTokens =
-    tokenPriceUsd > 0 ? desiredUsd / tokenPriceUsd : 0;
+  const desiredTokens = tokenPriceUsd > 0 ? desiredUsd / tokenPriceUsd : 0;
 
   const walletPctAfter =
     totalSupply > 0
@@ -368,17 +336,6 @@ export function buildSizingHints(candidate = {}) {
   };
 }
 
-function pct(a, b) {
-  if (!b) return 0;
-  return (a / b) * 100;
-}
-
-/**
- * =========================
- * HUMAN SUMMARY
- * =========================
- */
-
 export function buildCandidateSummary(candidate = {}) {
   const token = candidate.token || {};
   const walletIntel = candidate.walletIntel || {};
@@ -389,6 +346,7 @@ export function buildCandidateSummary(candidate = {}) {
   const portfolio = candidate.portfolio || {};
   const riskFlags = candidate.riskFlags || {};
   const sizingHints = candidate.sizingHints || {};
+  const rug = candidate.rugScamIntel || {};
 
   return {
     headline: `${token.symbol || token.name || "UNKNOWN"} candidate`,
@@ -398,6 +356,8 @@ export function buildCandidateSummary(candidate = {}) {
       priceUsd: safeNum(token.tokenPriceUsd, 0),
       liquidityUsd: safeNum(token.liquidityUsd, 0),
       volume1mUsd: safeNum(token.volume1mUsd, 0),
+      fdvUsd: safeNum(token.fdvUsd, 0),
+      marketCapUsd: safeNum(token.marketCapUsd, 0),
       top10HolderPct: safeNum(token.top10HolderPct || bubble.top10HolderPct, 0),
       creatorHolderPct: safeNum(token.creatorHolderPct, 0),
       lpLockedPct: safeNum(token.lpLockedPct, 0)
@@ -406,7 +366,8 @@ export function buildCandidateSummary(candidate = {}) {
       winRate: safeNum(walletIntel.winRate, 0),
       medianROI: safeNum(walletIntel.medianROI, 1),
       consistencyScore: safeNum(walletIntel.consistencyScore, 0),
-      consensusLeaders: safeNum(walletIntel.consensusLeaders, 0)
+      consensusLeaders: safeNum(walletIntel.consensusLeaders, 0),
+      tradesCount: safeNum(walletIntel.tradesCount, 0)
     },
     volumeIntel: {
       buyPressure: safeNum(volumeIntel.buyPressure, 0),
@@ -423,6 +384,11 @@ export function buildCandidateSummary(candidate = {}) {
       trustedMentions: safeNum(socialIntel.trustedMentions, 0),
       suspiciousBurst: Boolean(socialIntel.suspiciousBurst),
       organicScore: safeNum(socialIntel.organicScore, 0)
+    },
+    rugScamIntel: {
+      riskScore: safeNum(rug.riskScore, 0),
+      blocked: Boolean(rug.blocked),
+      reasons: Array.isArray(rug.reasons) ? rug.reasons : []
     },
     bubbleMapIntel: {
       denseClusterRisk: safeNum(bubble.denseClusterRisk, 0),
@@ -442,36 +408,19 @@ export function buildCandidateSummary(candidate = {}) {
   };
 }
 
-/**
- * =========================
- * MAIN BUILDER
- * =========================
- *
- * Example:
- * const candidate = await buildLevel6Candidate({
- *   ca: "...",
- *   symbol: "TEST",
- *   totalSupply: 1_000_000_000,
- *   tokenPriceUsd: 0.00012,
- *   liquidityUsd: 18000,
- *   volume1mUsd: 4200,
- *   top10HolderPct: 42,
- *   creatorHolderPct: 6,
- *   lpLockedPct: 95,
- *   mintAuthorityEnabled: false,
- *   freezeAuthorityEnabled: false,
- *   walletIntel: {...},
- *   volumeIntel: {...},
- *   bubbleMapIntel: {...},
- *   portfolio: {...},
- *   execution: {...}
- * });
- */
-
 export async function buildLevel6Candidate(input = {}) {
   const token = await buildTokenIntel(input);
-  const walletIntel = await buildWalletIntel(input.walletIntel || input);
-  const volumeIntel = await buildVolumeIntel(input.volumeIntel || input);
+  const walletIntel = await buildWalletIntel({
+    ...input,
+    ca: token.ca,
+    symbol: token.symbol,
+    name: token.name
+  });
+  const volumeIntel = await buildVolumeIntel({
+    ...input,
+    ca: token.ca,
+    chainId: token.chainId
+  });
   const bubbleMapIntel = await buildBubbleMapIntel(input.bubbleMapIntel || input);
   const socialIntel = await buildSocialIntel({
     ...input,
@@ -479,6 +428,15 @@ export async function buildLevel6Candidate(input = {}) {
     symbol: token.symbol,
     name: token.name,
     keywords: token.keywords
+  });
+  const rugScamIntel = await buildRugScamIntel({
+    ...input,
+    ca: token.ca,
+    chainId: token.chainId,
+    token,
+    bubbleMapIntel,
+    socialIntel,
+    volumeIntel
   });
 
   const portfolio = buildDefaultPortfolio(input.portfolio || {});
@@ -490,6 +448,7 @@ export async function buildLevel6Candidate(input = {}) {
     volumeIntel,
     socialIntel,
     bubbleMapIntel,
+    rugScamIntel,
     portfolio,
     execution
   };
@@ -501,21 +460,13 @@ export async function buildLevel6Candidate(input = {}) {
   return candidate;
 }
 
-/**
- * =========================
- * PROPOSAL LAYER
- * =========================
- *
- * Human-friendly layer for Telegram UI / admin panel
- */
-
 export async function buildLevel6Proposal(input = {}) {
   const candidate = await buildLevel6Candidate(input);
   const summary = candidate.summary || {};
   const riskFlags = candidate.riskFlags || {};
   const sizingHints = candidate.sizingHints || {};
 
-  const proposal = {
+  return {
     ok: true,
     candidate,
     decisionHints: {
@@ -535,12 +486,12 @@ export async function buildLevel6Proposal(input = {}) {
       `Top10: ${safeNum(summary.token?.top10HolderPct, 0)}%`,
       `Creator: ${safeNum(summary.token?.creatorHolderPct, 0)}%`,
       `LP locked: ${safeNum(summary.token?.lpLockedPct, 0)}%`,
+      `Wallet winrate: ${safeNum(summary.walletIntel?.winRate, 0)}`,
       `Social organic score: ${safeNum(summary.socialIntel?.organicScore, 0)}`,
       `Social bot score: ${safeNum(summary.socialIntel?.botPatternScore, 0)}`,
+      `Rug risk score: ${safeNum(summary.rugScamIntel?.riskScore, 0)}`,
       `Desired size: $${safeNum(summary.execution?.baseDesiredUsd, 0)}`,
       `Wallet after entry: ${safeNum(summary.sizingHints?.walletPctAfter, 0)}%`
     ].join("\n")
   };
-
-  return proposal;
 }
