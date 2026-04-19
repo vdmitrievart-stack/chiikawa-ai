@@ -5,8 +5,8 @@ import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
 import * as XLSX from "xlsx";
 
-import TradingKernel from "./trading-kernel.js";
-import { buildBalanceText } from "./reporting-engine.js";
+import TradingKernel from "./core/trading-kernel.js";
+import { buildBalanceText } from "./core/reporting-engine.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
@@ -31,11 +31,6 @@ function safeNum(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function round(v, d = 4) {
-  const p = 10 ** d;
-  return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
-}
-
 function keyboard() {
   return {
     keyboard: [
@@ -55,6 +50,7 @@ function keyboard() {
 function normalizeAction(text) {
   const raw = String(text || "").toLowerCase().trim();
   if (!raw) return null;
+
   const pairs = [
     [["/start", "/menu"], "start"],
     [["/runmulti", "run multi", "▶️ run multi"], "runmulti"],
@@ -110,7 +106,10 @@ async function flushCycle(chatId) {
   }
 
   const rt = kernel.getRuntime();
-  const shouldReport = !rt.lastReportAt || Date.now() - rt.lastReportAt >= rt.activeConfig.reportIntervalMin * 60 * 1000;
+  const shouldReport =
+    !rt.lastReportAt ||
+    Date.now() - rt.lastReportAt >= rt.activeConfig.reportIntervalMin * 60 * 1000;
+
   if (shouldReport) {
     rt.lastReportAt = Date.now();
     await sendMessage(chatId, kernel.buildPeriodicReport());
@@ -126,6 +125,7 @@ async function flushCycle(chatId) {
 
 function startRun(chatId, userId, mode, strategyOnly = null) {
   stopLoop();
+
   const rt = kernel.start({ mode, chatId, userId, startBalance: 1 });
   if (strategyOnly) {
     rt.activeConfig.strategyEnabled = {
@@ -150,23 +150,71 @@ function startRun(chatId, userId, mode, strategyOnly = null) {
 
 function statsToCsv() {
   const closed = kernel.getPortfolio().closedTrades;
-  const header = ["id", "strategy", "walletId", "token", "ca", "entryRef", "exitRef", "amountSol", "netPnlPct", "netPnlSol", "reason", "openedAt", "closedAt", "durationMs", "balanceAfter"];
-  const rows = closed.map((t) => [t.id, t.strategy, t.walletId, t.token, t.ca, t.entryReferencePrice, t.exitReferencePrice, t.amountSol, t.netPnlPct, t.netPnlSol, t.reason, t.openedAt, t.closedAt, t.durationMs, t.balanceAfter]);
+  const header = [
+    "id",
+    "strategy",
+    "walletId",
+    "token",
+    "ca",
+    "entryRef",
+    "exitRef",
+    "amountSol",
+    "netPnlPct",
+    "netPnlSol",
+    "reason",
+    "openedAt",
+    "closedAt",
+    "durationMs",
+    "balanceAfter"
+  ];
+
+  const rows = closed.map((t) => [
+    t.id,
+    t.strategy,
+    t.walletId,
+    t.token,
+    t.ca,
+    t.entryReferencePrice,
+    t.exitReferencePrice,
+    t.amountSol,
+    t.netPnlPct,
+    t.netPnlSol,
+    t.reason,
+    t.openedAt,
+    t.closedAt,
+    t.durationMs,
+    t.balanceAfter
+  ]);
+
   return [header.join(","), ...rows.map((r) => r.join(","))].join("\n");
 }
 
 function statsToXlsxWorkbook() {
   const pf = kernel.getPortfolio();
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([{ metric: "equity", value: pf.equity }, { metric: "cash", value: pf.cash }, { metric: "realized", value: pf.realizedPnlSol }, { metric: "unrealized", value: pf.unrealizedPnlSol }]), "summary");
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      { metric: "equity", value: pf.equity },
+      { metric: "cash", value: pf.cash },
+      { metric: "realized", value: pf.realizedPnlSol },
+      { metric: "unrealized", value: pf.unrealizedPnlSol }
+    ]),
+    "summary"
+  );
+
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pf.closedTrades), "trades");
   return wb;
 }
 
 async function scheduleTempCleanup(filePath) {
   tempFiles.add(filePath);
+
   setTimeout(async () => {
-    try { await fs.unlink(filePath); } catch {}
+    try {
+      await fs.unlink(filePath);
+    } catch {}
     tempFiles.delete(filePath);
   }, 5 * 60 * 1000);
 }
@@ -174,164 +222,273 @@ async function scheduleTempCleanup(filePath) {
 async function exportJson(chatId) {
   const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.json`);
   await fs.writeFile(filePath, JSON.stringify(kernel.getPortfolio(), null, 2), "utf8");
-  await bot.sendDocument(chatId, filePath, {}, { filename: path.basename(filePath), contentType: "application/json" });
+  await bot.sendDocument(
+    chatId,
+    filePath,
+    {},
+    {
+      filename: path.basename(filePath),
+      contentType: "application/json"
+    }
+  );
   await scheduleTempCleanup(filePath);
 }
 
 async function exportCsv(chatId) {
   const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.csv`);
   await fs.writeFile(filePath, statsToCsv(), "utf8");
-  await bot.sendDocument(chatId, filePath, {}, { filename: path.basename(filePath), contentType: "text/csv" });
+  await bot.sendDocument(
+    chatId,
+    filePath,
+    {},
+    {
+      filename: path.basename(filePath),
+      contentType: "text/csv"
+    }
+  );
   await scheduleTempCleanup(filePath);
 }
 
 async function exportXlsx(chatId) {
   const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.xlsx`);
   XLSX.writeFile(statsToXlsxWorkbook(), filePath);
-  await bot.sendDocument(chatId, filePath, {}, { filename: path.basename(filePath), contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  await bot.sendDocument(
+    chatId,
+    filePath,
+    {},
+    {
+      filename: path.basename(filePath),
+      contentType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }
+  );
   await scheduleTempCleanup(filePath);
 }
 
 async function handleAction(chatId, userId, action) {
   if (action === "start") {
-    await sendMessage(chatId, "🤖 <b>Bot ready</b>\n\nUse the menu below.", { reply_markup: keyboard() });
+    await sendMessage(chatId, "🤖 <b>Bot ready</b>\n\nUse the menu below.", {
+      reply_markup: keyboard()
+    });
     return;
   }
+
   if (action === "runmulti") {
-    await sendMessage(chatId, "🚀 Starting multi-strategy engine from 1 SOL", { reply_markup: keyboard() });
+    await sendMessage(chatId, "🚀 Starting multi-strategy engine from 1 SOL", {
+      reply_markup: keyboard()
+    });
     startRun(chatId, userId, "infinite");
     return;
   }
+
   if (action === "runstrategy") {
-    await sendMessage(chatId, "🎯 Send one of: scalp / reversal / runner / copytrade only", { reply_markup: keyboard() });
+    await sendMessage(chatId, "🎯 Send one of: scalp / reversal / runner / copytrade only", {
+      reply_markup: keyboard()
+    });
     return;
   }
+
   if (action.startsWith("run_")) {
     const strategy = action.replace("run_", "");
-    await sendMessage(chatId, `🚀 Starting ${strategy} only mode`, { reply_markup: keyboard() });
+    await sendMessage(chatId, `🚀 Starting ${strategy} only mode`, {
+      reply_markup: keyboard()
+    });
     startRun(chatId, userId, "infinite", strategy);
     return;
   }
+
   if (action === "stop") {
     kernel.requestStop();
-    await sendMessage(chatId, "🛑 Stop requested. Bot will stop after natural exits.", { reply_markup: keyboard() });
+    await sendMessage(chatId, "🛑 Stop requested. Bot will stop after natural exits.", {
+      reply_markup: keyboard()
+    });
     return;
   }
+
   if (action === "kill") {
     stopLoop();
     const closed = await kernel.killAllPositions("KILL_SWITCH");
-    await sendMessage(chatId, `☠️ <b>KILL EXECUTED</b>\nClosed positions: ${closed.length}`, { reply_markup: keyboard() });
+    await sendMessage(chatId, `☠️ <b>KILL EXECUTED</b>\nClosed positions: ${closed.length}`, {
+      reply_markup: keyboard()
+    });
     await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
     return;
   }
+
   if (action === "status") {
     await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
     return;
   }
+
   if (action === "balance") {
-    await sendMessage(chatId, buildBalanceText(kernel.getPortfolio()), { reply_markup: keyboard() });
+    await sendMessage(chatId, buildBalanceText(kernel.getPortfolio()), {
+      reply_markup: keyboard()
+    });
     return;
   }
+
   if (action === "scan") {
     await flushCycle(chatId);
     return;
   }
+
   if (action === "budget") {
     const cfg = kernel.getRuntime().activeConfig.strategyBudget;
-    await sendMessage(chatId, `🧮 <b>BUDGET</b>\n\nSCALP ${round(cfg.scalp * 100, 0)}%\nREVERSAL ${round(cfg.reversal * 100, 0)}%\nRUNNER ${round(cfg.runner * 100, 0)}%\nCOPYTRADE ${round(cfg.copytrade * 100, 0)}%\n\nSend: budget 25 25 25 25`, { reply_markup: keyboard() });
+    await sendMessage(
+      chatId,
+      `<b>Current budget</b>\nscalp: ${Math.round(cfg.scalp * 100)}%\nreversal: ${Math.round(
+        cfg.reversal * 100
+      )}%\nrunner: ${Math.round(cfg.runner * 100)}%\ncopytrade: ${Math.round(
+        cfg.copytrade * 100
+      )}%\n\nSend: <code>budget 25 25 25 25</code>`,
+      { reply_markup: keyboard() }
+    );
     return;
   }
+
   if (action === "budget_equal") {
-    kernel.queueConfigPatch({ strategyBudget: { scalp: 0.25, reversal: 0.25, runner: 0.25, copytrade: 0.25 } }, "equal_budget");
-    await sendMessage(chatId, "✅ Pending budget set to 25/25/25/25. It will apply after natural exits or Kill.", { reply_markup: keyboard() });
+    kernel.queueConfigPatch({
+      strategyBudget: {
+        scalp: 0.25,
+        reversal: 0.25,
+        runner: 0.25,
+        copytrade: 0.25
+      }
+    }, "budget_equal");
+    await sendMessage(chatId, "🧮 Pending budget queued: 25 / 25 / 25 / 25", {
+      reply_markup: keyboard()
+    });
     return;
   }
+
   if (action === "language") {
-    await sendMessage(chatId, "🌐 Language commands: lang ru / lang en", { reply_markup: keyboard() });
+    await sendMessage(chatId, "🌐 Send: <code>lang ru</code> or <code>lang en</code>", {
+      reply_markup: keyboard()
+    });
     return;
   }
+
   if (action === "lang_ru" || action === "lang_en") {
     const lang = action === "lang_ru" ? "ru" : "en";
-    kernel.queueConfigPatch({ language: lang }, "language_change");
-    await sendMessage(chatId, `✅ Pending language set to ${lang}.`, { reply_markup: keyboard() });
+    kernel.queueConfigPatch({ language: lang }, `lang_${lang}`);
+    kernel.getRuntime().activeConfig.language = lang;
+    await sendMessage(chatId, `🌐 Language set: ${lang.toUpperCase()}`, {
+      reply_markup: keyboard()
+    });
     return;
   }
+
   if (action === "copytrade") {
     const copyCfg = kernel.getRuntime().activeConfig.copytrade;
-    await sendMessage(chatId, `📋 <b>COPYTRADE</b>\n\nEnabled: ${copyCfg.enabled}\nGMGN enabled: ${copyCfg.gmgnEnabled}\nMin leader score: ${copyCfg.minLeaderScore}\nCooldown: ${copyCfg.cooldownMinutes}m`, { reply_markup: keyboard() });
+    await sendMessage(
+      chatId,
+      `<b>Copytrade</b>\nEnabled: ${copyCfg.enabled}\nRescoring: ${copyCfg.rescoringEnabled}\nMin leader score: ${copyCfg.minLeaderScore}\nCooldown min: ${copyCfg.cooldownMinutes}`,
+      { reply_markup: keyboard() }
+    );
     return;
   }
+
   if (action === "wallets") {
     const wallets = kernel.getRuntime().activeConfig.wallets;
-    const text = Object.entries(wallets).map(([id, row]) => `• <b>${id}</b> — ${row.label} | ${row.role} | ${row.executionMode} | enabled=${row.enabled}`).join("\n");
-    await sendMessage(chatId, `👛 <b>WALLETS</b>\n\n${text}`, { reply_markup: keyboard() });
+    const text = Object.entries(wallets)
+      .map(
+        ([id, w]) =>
+          `• <b>${id}</b>\nlabel: ${w.label}\nrole: ${w.role}\nenabled: ${w.enabled}\nmode: ${w.executionMode}\nstrategies: ${(w.allowedStrategies || []).join(", ")}`
+      )
+      .join("\n\n");
+
+    await sendMessage(chatId, `<b>Wallets</b>\n${text}`, { reply_markup: keyboard() });
     return;
   }
-  if (action === "exportcsv") return exportCsv(chatId);
-  if (action === "exportjson") return exportJson(chatId);
-  if (action === "exportxlsx") return exportXlsx(chatId);
-  await sendMessage(chatId, "Команды через меню ниже.", { reply_markup: keyboard() });
+
+  if (action === "exportcsv") {
+    await exportCsv(chatId);
+    return;
+  }
+
+  if (action === "exportjson") {
+    await exportJson(chatId);
+    return;
+  }
+
+  if (action === "exportxlsx") {
+    await exportXlsx(chatId);
+    return;
+  }
+
+  await sendMessage(chatId, "Unknown command", { reply_markup: keyboard() });
 }
 
 async function processMessage(msg) {
   const chatId = msg.chat.id;
   const userId = msg.from?.id || chatId;
-  const text = msg.text || "";
+  const text = String(msg.text || "").trim();
+  const action = normalizeAction(text);
 
-  const budgetMatch = text.trim().match(/^budget\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/i);
+  if (action) {
+    await handleAction(chatId, userId, action);
+    return;
+  }
+
+  const budgetMatch = text.match(/^budget\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/i);
   if (budgetMatch) {
     const [_, a, b, c, d] = budgetMatch;
-    kernel.queueConfigPatch({ strategyBudget: { scalp: Number(a) / 100, reversal: Number(b) / 100, runner: Number(c) / 100, copytrade: Number(d) / 100 } }, "budget_manual");
-    await sendMessage(chatId, "✅ Pending budget updated. It will apply after natural exits or Kill.", { reply_markup: keyboard() });
+    const total = Number(a) + Number(b) + Number(c) + Number(d);
+    if (total !== 100) {
+      await sendMessage(chatId, "Budget must sum to 100.");
+      return;
+    }
+
+    kernel.queueConfigPatch({
+      strategyBudget: {
+        scalp: Number(a) / 100,
+        reversal: Number(b) / 100,
+        runner: Number(c) / 100,
+        copytrade: Number(d) / 100
+      }
+    }, "manual_budget_update");
+
+    await sendMessage(chatId, "🧮 Pending budget update queued.", { reply_markup: keyboard() });
     return;
   }
 
-  const action = normalizeAction(text);
-  if (!action) {
-    await sendMessage(chatId, "Команды через меню ниже.", { reply_markup: keyboard() });
-    return;
-  }
-  await handleAction(chatId, userId, action);
+  await sendMessage(chatId, "Use the menu below.", { reply_markup: keyboard() });
 }
 
-async function processUpdate(update) {
-  if (update.message) return processMessage(update.message);
-  return null;
-}
+bot.on("message", (msg) => {
+  processMessage(msg).catch((err) => {
+    console.log("message error:", err.message);
+  });
+});
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === "GET" && req.url === "/") {
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Chiikawa Telegram Bot is running");
-    return;
-  }
-
   if (req.method === "POST" && req.url === WEBHOOK_PATH) {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
       try {
-        const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-        const update = JSON.parse(raw);
-        await processUpdate(update);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true }));
+        const update = JSON.parse(body);
+        bot.processUpdate(update);
+        res.writeHead(200);
+        res.end("ok");
       } catch (error) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: error.message }));
+        res.writeHead(500);
+        res.end(error.message);
       }
     });
     return;
   }
 
-  res.writeHead(404, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: false, error: "not_found" }));
+  if (req.method === "GET" && req.url === "/healthz") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end("not found");
 });
 
 server.listen(PORT, async () => {
-  console.log(`Telegram bot listening on ${PORT}`);
-  if (process.env.WEBHOOK_URL) {
-    await bot.setWebHook(`${process.env.WEBHOOK_URL}${WEBHOOK_PATH}`);
-    console.log("Webhook set");
-  }
+  console.log(`Telegram bot server listening on port ${PORT}`);
 });
