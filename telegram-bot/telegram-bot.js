@@ -5,25 +5,8 @@ import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
 import * as XLSX from "xlsx";
 
-import {
-  getBestTrade,
-  getLatestTokenPrice,
-  recordTradeOutcomeFromSignalContext
-} from "./scan-engine.js";
-
-import {
-  getPortfolio,
-  getPositions,
-  getClosedTrades,
-  getStrategyConfig,
-  resetPortfolio,
-  openPosition,
-  closePosition,
-  markPosition,
-  maybeTakeRunnerPartial
-} from "./portfolio.js";
-
-import { buildStrategyPlans } from "./strategy-engine.js";
+import TradingKernel from "./trading-kernel.js";
+import { buildBalanceText } from "./reporting-engine.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
@@ -37,20 +20,10 @@ if (!TOKEN) {
 }
 
 const bot = new TelegramBot(TOKEN, { polling: false });
+const kernel = new TradingKernel({ logger: console });
 
 let loopId = null;
 let stopTimeoutId = null;
-let currentMode = "stopped";
-let activeChatId = null;
-let activeUserId = null;
-
-let runState = {
-  runId: null,
-  startedAt: null,
-  mode: "stopped"
-};
-
-const recentlyTraded = new Map();
 const tempFiles = new Set();
 
 function safeNum(v, fallback = 0) {
@@ -63,20 +36,15 @@ function round(v, d = 4) {
   return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
 }
 
-function escapeHtml(input) {
-  return String(input ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
 function keyboard() {
   return {
     keyboard: [
-      ["▶️ Run 4h", "♾️ Run Infinite"],
-      ["🛑 Stop", "📊 Status"],
-      ["🔎 Scan", "📈 Export CSV"],
+      ["▶️ Run Multi", "🎯 Run Strategy"],
+      ["💰 Balance", "📊 Status"],
+      ["🧮 Budget", "🌐 Language"],
+      ["📋 Copytrade", "👛 Wallets"],
+      ["🔎 Scan", "🛑 Stop"],
+      ["☠️ Kill", "📈 Export CSV"],
       ["📦 Export JSON", "📊 Export XLSX"]
     ],
     resize_keyboard: true,
@@ -87,25 +55,34 @@ function keyboard() {
 function normalizeAction(text) {
   const raw = String(text || "").toLowerCase().trim();
   if (!raw) return null;
+  const pairs = [
+    [["/start", "/menu"], "start"],
+    [["/runmulti", "run multi", "▶️ run multi"], "runmulti"],
+    [["/runstrategy", "🎯 run strategy"], "runstrategy"],
+    [["/stop", "🛑 stop", "стоп"], "stop"],
+    [["/kill", "☠️ kill"], "kill"],
+    [["/status", "📊 status", "статус"], "status"],
+    [["/scan", "🔎 scan", "скан"], "scan"],
+    [["/balance", "💰 balance"], "balance"],
+    [["/budget", "🧮 budget"], "budget"],
+    [["/language", "🌐 language"], "language"],
+    [["/copytrade", "📋 copytrade"], "copytrade"],
+    [["/wallets", "👛 wallets"], "wallets"],
+    [["/exportcsv"], "exportcsv"],
+    [["/exportjson"], "exportjson"],
+    [["/exportxlsx"], "exportxlsx"],
+    [["scalp", "run scalp"], "run_scalp"],
+    [["reversal", "run reversal"], "run_reversal"],
+    [["runner", "run runner"], "run_runner"],
+    [["copytrade only", "run copytrade"], "run_copytrade"],
+    [["budget 25 25 25 25"], "budget_equal"],
+    [["lang ru"], "lang_ru"],
+    [["lang en"], "lang_en"]
+  ];
 
-  if (raw === "/start" || raw === "/menu") return "start";
-  if (raw === "/run4h") return "run4h";
-  if (raw === "/runinfinite") return "runinfinite";
-  if (raw === "/stop") return "stop";
-  if (raw === "/status") return "status";
-  if (raw === "/scan") return "scan";
-  if (raw === "/exportcsv") return "exportcsv";
-  if (raw === "/exportjson" || raw === "/exportstats") return "exportjson";
-  if (raw === "/exportxlsx") return "exportxlsx";
-
-  if (raw.includes("run 4h") || raw.includes("4ч") || raw.includes("run4h")) return "run4h";
-  if (raw.includes("infinite") || raw.includes("бескон")) return "runinfinite";
-  if (raw.includes("stop") || raw.includes("стоп")) return "stop";
-  if (raw.includes("status") || raw.includes("статус")) return "status";
-  if (raw.includes("scan") || raw.includes("скан")) return "scan";
-  if (raw.includes("csv")) return "exportcsv";
-  if (raw.includes("json")) return "exportjson";
-  if (raw.includes("xlsx")) return "exportxlsx";
+  for (const [aliases, action] of pairs) {
+    if (aliases.some((x) => raw === x || raw.includes(x))) return action;
+  }
 
   return null;
 }
@@ -118,527 +95,182 @@ async function sendMessage(chatId, text, extra = {}) {
   });
 }
 
-async function sendPhotoOrText(chatId, imageUrl, caption) {
-  const safeCaption = caption.slice(0, 1024);
-
-  if (imageUrl) {
-    try {
-      await bot.sendPhoto(chatId, imageUrl, {
-        caption: safeCaption,
-        parse_mode: "HTML"
-      });
-      return;
-    } catch (error) {
-      console.log("sendPhoto fallback:", error.message);
-    }
-  }
-
-  await sendMessage(chatId, caption);
-}
-
-function pruneRecentlyTraded() {
-  const now = Date.now();
-  for (const [ca, ts] of recentlyTraded.entries()) {
-    if (now - ts > 2 * 60 * 60 * 1000) {
-      recentlyTraded.delete(ca);
-    }
-  }
-}
-
 function stopLoop() {
   if (loopId) clearInterval(loopId);
   if (stopTimeoutId) clearTimeout(stopTimeoutId);
   loopId = null;
   stopTimeoutId = null;
-  currentMode = "stopped";
-  runState.mode = "stopped";
 }
 
-function buildDashboard() {
-  const pf = getPortfolio();
-  const cfg = getStrategyConfig();
-
-  const totalClosed = pf.closedTrades.length;
-  const wins = pf.closedTrades.filter(t => t.netPnlPct > 0).length;
-  const winrate = totalClosed ? (wins / totalClosed) * 100 : 0;
-
-  const lines = [
-    `📊 <b>BOT DASHBOARD</b>`,
-    ``,
-    `<b>Run ID:</b> ${escapeHtml(runState.runId || "-")}`,
-    `<b>Mode:</b> ${escapeHtml(currentMode.toUpperCase())}`,
-    `<b>Start balance:</b> ${round(pf.startBalance, 4)} SOL`,
-    `<b>Cash:</b> ${round(pf.cash, 4)} SOL`,
-    `<b>Equity:</b> ${round(pf.equity, 4)} SOL`,
-    `<b>Realized PnL:</b> ${round(pf.realizedPnlSol, 4)} SOL`,
-    `<b>Unrealized PnL:</b> ${round(pf.unrealizedPnlSol, 4)} SOL`,
-    `<b>Open positions:</b> ${pf.positions.length}`,
-    `<b>Closed trades:</b> ${totalClosed}`,
-    `<b>Winrate:</b> ${round(winrate, 2)}%`,
-    ``,
-    `<b>Strategy buckets</b>`
-  ];
-
-  for (const key of Object.keys(cfg)) {
-    const row = pf.byStrategy[key];
-    lines.push(
-      `• <b>${escapeHtml(cfg[key].label)}</b> — alloc ${round(cfg[key].allocationPct * 100, 0)}% | available ${round(row.availableSol, 4)} SOL | open ${row.openPositions} | closed ${row.closedTrades} | pnl ${round(row.realizedPnlSol, 4)} SOL`
-    );
+async function flushCycle(chatId) {
+  const events = await kernel.cycle();
+  for (const event of events) {
+    const text = kernel.renderEventText(event);
+    if (text) await sendMessage(chatId, text);
   }
 
-  return lines.join("\n");
-}
-
-function buildAnalysisText(analyzed, plans) {
-  const t = analyzed.token;
-  const reasons = analyzed.reasons.slice(0, 12).map(r => `• ${escapeHtml(r)}`).join("\n");
-
-  const plansText = plans.length
-    ? plans.map(
-        p =>
-          `• <b>${escapeHtml(p.strategyKey.toUpperCase())}</b> | edge ${round(p.expectedEdgePct, 2)}% | hold ${Math.round(p.plannedHoldMs / 60000)}m | SL ${p.stopLossPct}% | TP ${p.takeProfitPct || "runner"}`
-      ).join("\n")
-    : "• none";
-
-  return `🔎 <b>ANALYSIS</b>
-
-<b>Token:</b> ${escapeHtml(t.name)}
-<b>CA:</b> <code>${escapeHtml(t.ca)}</code>
-<b>Score:</b> ${round(analyzed.score, 2)}
-
-<b>Price:</b> ${escapeHtml(t.price)}
-<b>Liquidity:</b> ${escapeHtml(t.liquidity)}
-<b>Volume 24h:</b> ${escapeHtml(t.volume)}
-<b>Txns 24h:</b> ${escapeHtml(t.txns)}
-<b>FDV:</b> ${escapeHtml(t.fdv)}
-
-⚠️ <b>Rug:</b> ${analyzed.rug.risk}
-🧠 <b>Smart Money:</b> ${analyzed.wallet.smartMoney}
-👥 <b>Concentration:</b> ${round(analyzed.wallet.concentration, 2)}
-🤖 <b>Bot Activity:</b> ${analyzed.bots.botActivity}
-🐦 <b>Sentiment:</b> ${analyzed.sentiment.sentiment}
-☠️ <b>Corpse Score:</b> ${analyzed.corpse.score}
-👨‍💻 <b>Dev Verdict:</b> ${escapeHtml(analyzed.developer.verdict)}
-🧾 <b>Narrative:</b> ${escapeHtml(analyzed.narrative.verdict)}
-🌐 <b>Socials:</b> ${escapeHtml(analyzed.socials.notes.join(", ") || "none")}
-
-<b>Narrative summary:</b>
-${escapeHtml(analyzed.narrative.summary || "none")}
-
-📈 <b>Delta</b>
-<b>Price Δ:</b> ${round(analyzed.delta.priceDeltaPct, 2)}%
-<b>Volume Δ:</b> ${round(analyzed.delta.volumeDeltaPct, 2)}%
-<b>Txns Δ:</b> ${round(analyzed.delta.txnsDeltaPct, 2)}%
-<b>Liquidity Δ:</b> ${round(analyzed.delta.liquidityDeltaPct, 2)}%
-<b>Buy Pressure Δ:</b> ${round(analyzed.delta.buyPressureDelta, 3)}
-
-🎯 <b>Available plans</b>
-${plansText}
-
-<b>Reasons:</b>
-${reasons}`;
-}
-
-function buildEntryText(position) {
-  return `🚀 <b>ENTRY</b>
-
-<b>Strategy:</b> ${escapeHtml(position.strategy.toUpperCase())}
-<b>Token:</b> ${escapeHtml(position.token)}
-<b>CA:</b> <code>${escapeHtml(position.ca)}</code>
-
-<b>Entry ref:</b> ${position.entryReferencePrice}
-<b>Entry effective:</b> ${position.entryEffectivePrice}
-<b>Size:</b> ${round(position.amountSol, 4)} SOL
-<b>Expected edge:</b> ${round(position.expectedEdgePct, 2)}%
-
-<b>Thesis:</b>
-${escapeHtml(position.thesis)}
-
-<b>Entry costs:</b> ${round(position.entryCosts.totalSol, 6)} SOL`;
-}
-
-function buildPositionUpdateText(position, mark, status) {
-  return `📈 <b>POSITION UPDATE</b>
-
-<b>Strategy:</b> ${escapeHtml(position.strategy.toUpperCase())}
-<b>Token:</b> ${escapeHtml(position.token)}
-<b>CA:</b> <code>${escapeHtml(position.ca)}</code>
-
-<b>Entry ref:</b> ${position.entryReferencePrice}
-<b>Current:</b> ${mark.currentPrice}
-<b>Gross PnL:</b> ${round(mark.grossPnlPct, 2)}%
-<b>Net PnL:</b> ${round(mark.netPnlPct, 2)}%
-<b>Age:</b> ${Math.round(mark.ageMs / 1000)}s
-<b>Status:</b> ${escapeHtml(status)}`;
-}
-
-function buildExitText(trade) {
-  return `🏁 <b>EXIT</b>
-
-<b>Strategy:</b> ${escapeHtml(trade.strategy.toUpperCase())}
-<b>Token:</b> ${escapeHtml(trade.token)}
-<b>CA:</b> <code>${escapeHtml(trade.ca)}</code>
-
-<b>Entry ref:</b> ${trade.entryReferencePrice}
-<b>Entry effective:</b> ${trade.entryEffectivePrice}
-<b>Exit ref:</b> ${trade.exitReferencePrice}
-
-<b>Net PnL:</b> ${round(trade.netPnlPct, 2)}%
-<b>Net PnL SOL:</b> ${round(trade.netPnlSol, 6)}
-<b>Reason:</b> ${escapeHtml(trade.reason)}
-<b>Balance after:</b> ${round(trade.balanceAfter, 4)} SOL`;
-}
-
-function shouldClosePosition(position, analyzedNow) {
-  const mark = position.lastMark;
-  if (!mark) return { close: false, reason: "NO_MARK" };
-
-  const ageMs = mark.ageMs;
-
-  if (position.strategy === "scalp") {
-    if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "SCALP_STOP" };
-    if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "SCALP_TP" };
-    if (ageMs >= position.plannedHoldMs) return { close: true, reason: "SCALP_TIME_EXIT" };
-    return { close: false, reason: "SCALP_HOLD" };
+  const rt = kernel.getRuntime();
+  const shouldReport = !rt.lastReportAt || Date.now() - rt.lastReportAt >= rt.activeConfig.reportIntervalMin * 60 * 1000;
+  if (shouldReport) {
+    rt.lastReportAt = Date.now();
+    await sendMessage(chatId, kernel.buildPeriodicReport());
   }
 
-  if (position.strategy === "reversal") {
-    if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "REVERSAL_STOP" };
-    if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "REVERSAL_TP" };
-    if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 8) return { close: true, reason: "REVERSAL_TIME_EXIT" };
-    if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "REVERSAL_CORPSE_EXIT" };
-    return { close: false, reason: "REVERSAL_HOLD" };
-  }
-
-  if (position.strategy === "runner") {
-    if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "RUNNER_STOP" };
-
-    const pullbackFromHighPct =
-      position.highestPrice > 0
-        ? ((position.highestPrice - mark.currentPrice) / position.highestPrice) * 100
-        : 0;
-
-    if (mark.grossPnlPct > 25 && pullbackFromHighPct > 12) {
-      return { close: true, reason: "RUNNER_TRAIL_EXIT" };
-    }
-
-    if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "RUNNER_CORPSE_EXIT" };
-    return { close: false, reason: "RUNNER_HOLD" };
-  }
-
-  return { close: false, reason: "HOLD" };
-}
-
-async function scheduleTempCleanup(filePath) {
-  tempFiles.add(filePath);
-
-  setTimeout(async () => {
-    try {
-      await fs.unlink(filePath);
-    } catch {}
-    tempFiles.delete(filePath);
-  }, 5 * 60 * 1000);
-}
-
-function statsToCsv() {
-  const closed = getClosedTrades();
-  const header = [
-    "id",
-    "strategy",
-    "token",
-    "ca",
-    "entryRef",
-    "entryEffective",
-    "exitRef",
-    "amountSol",
-    "netPnlPct",
-    "netPnlSol",
-    "reason",
-    "openedAt",
-    "closedAt",
-    "durationMs",
-    "balanceAfter"
-  ];
-
-  const rows = closed.map(t => [
-    t.id,
-    t.strategy,
-    t.token,
-    t.ca,
-    t.entryReferencePrice,
-    t.entryEffectivePrice,
-    t.exitReferencePrice,
-    t.amountSol,
-    t.netPnlPct,
-    t.netPnlSol,
-    t.reason,
-    t.openedAt,
-    t.closedAt,
-    t.durationMs,
-    t.balanceAfter
-  ]);
-
-  return [header.join(","), ...rows.map(r => r.join(","))].join("\n");
-}
-
-function statsToXlsxWorkbook() {
-  const pf = getPortfolio();
-
-  const summaryRows = [
-    { metric: "runId", value: runState.runId || "" },
-    { metric: "mode", value: currentMode },
-    { metric: "startBalance", value: pf.startBalance },
-    { metric: "cash", value: pf.cash },
-    { metric: "equity", value: pf.equity },
-    { metric: "realizedPnlSol", value: pf.realizedPnlSol },
-    { metric: "unrealizedPnlSol", value: pf.unrealizedPnlSol },
-    { metric: "closedTrades", value: pf.closedTrades.length }
-  ];
-
-  const tradesRows = pf.closedTrades.map(t => ({
-    id: t.id,
-    strategy: t.strategy,
-    token: t.token,
-    ca: t.ca,
-    entryReferencePrice: t.entryReferencePrice,
-    entryEffectivePrice: t.entryEffectivePrice,
-    exitReferencePrice: t.exitReferencePrice,
-    amountSol: t.amountSol,
-    netPnlPct: t.netPnlPct,
-    netPnlSol: t.netPnlSol,
-    reason: t.reason,
-    openedAt: t.openedAt,
-    closedAt: t.closedAt,
-    durationMs: t.durationMs,
-    balanceAfter: t.balanceAfter
-  }));
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "summary");
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tradesRows), "trades");
-  return wb;
-}
-
-async function exportJson(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.json`);
-  await fs.writeFile(filePath, JSON.stringify(getPortfolio(), null, 2), "utf8");
-  await bot.sendDocument(chatId, filePath, {}, {
-    filename: path.basename(filePath),
-    contentType: "application/json"
-  });
-  await scheduleTempCleanup(filePath);
-}
-
-async function exportCsv(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.csv`);
-  await fs.writeFile(filePath, statsToCsv(), "utf8");
-  await bot.sendDocument(chatId, filePath, {}, {
-    filename: path.basename(filePath),
-    contentType: "text/csv"
-  });
-  await scheduleTempCleanup(filePath);
-}
-
-async function exportXlsx(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.xlsx`);
-  XLSX.writeFile(statsToXlsxWorkbook(), filePath);
-  await bot.sendDocument(chatId, filePath, {}, {
-    filename: path.basename(filePath),
-    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  });
-  await scheduleTempCleanup(filePath);
-}
-
-async function cycle(chatId, userId) {
-  pruneRecentlyTraded();
-
-  const positions = getPositions();
-
-  for (const p of positions) {
-    const latest = await getLatestTokenPrice(p.ca);
-    if (!latest?.price) continue;
-
-    const mark = markPosition(p, latest.price);
-    if (!mark) continue;
-
-    const partial = maybeTakeRunnerPartial(p, latest.price);
-    if (partial) {
-      await sendMessage(
-        chatId,
-        `🎯 <b>RUNNER PARTIAL</b>
-
-<b>Token:</b> ${escapeHtml(p.token)}
-<b>Target:</b> ${partial.targetPct}%
-<b>Sold fraction:</b> ${round(partial.soldFraction * 100, 0)}%
-<b>Cash added:</b> ${round(partial.netValueSol, 4)} SOL`
-      );
-    }
-
-    const analyzedNow = await getBestTrade({ excludeCas: [] }).catch(() => null);
-    const verdict = shouldClosePosition(p, analyzedNow?.token?.ca === p.ca ? analyzedNow : null);
-
-    await sendMessage(chatId, buildPositionUpdateText(p, mark, verdict.reason));
-
-    if (verdict.close) {
-      const closed = closePosition(p.id, latest.price, verdict.reason);
-      if (closed) {
-        recentlyTraded.set(closed.ca, Date.now());
-        await recordTradeOutcomeFromSignalContext(closed.signalContext, closed.netPnlPct);
-        await sendPhotoOrText(chatId, closed.signalContext?.imageUrl || null, buildExitText(closed));
-      }
-    }
-  }
-
-  const candidate = await getBestTrade({
-    excludeCas: [...recentlyTraded.keys(), ...getPositions().map(p => p.ca)]
-  });
-
-  if (!candidate) {
-    await sendMessage(chatId, "❌ No candidates found");
-    return;
-  }
-
-  const plans = buildStrategyPlans(candidate);
-  await sendPhotoOrText(chatId, candidate.token.imageUrl || null, buildAnalysisText(candidate, plans));
-
-  for (const plan of plans) {
-    const alreadyOpenSameStrategy = getPositions().some(p => p.strategy === plan.strategyKey);
-    if (alreadyOpenSameStrategy) continue;
-    if (candidate.corpse.isCorpse) continue;
-    if (candidate.falseBounce.rejected) continue;
-    if (candidate.developer.verdict === "Bad") continue;
-    if (candidate.score < 85) continue;
-
-    const position = openPosition({
-      strategy: plan.strategyKey,
-      token: candidate.token,
-      thesis: plan.thesis,
-      plannedHoldMs: plan.plannedHoldMs,
-      stopLossPct: plan.stopLossPct,
-      takeProfitPct: plan.takeProfitPct,
-      runnerTargetsPct: plan.runnerTargetsPct,
-      signalScore: candidate.score,
-      expectedEdgePct: plan.expectedEdgePct,
-      signalContext: {
-        imageUrl: candidate.token.imageUrl || null,
-        narrative: candidate.narrative,
-        socials: candidate.socials,
-        developer: candidate.developer,
-        reasons: candidate.reasons,
-        baseStrategy: candidate.strategy,
-        chosenPlan: plan
-      }
-    });
-
-    if (position) {
-      await sendPhotoOrText(chatId, candidate.token.imageUrl || null, buildEntryText(position));
-    }
+  if (rt.stopRequested && kernel.getPortfolio().positions.length === 0) {
+    stopLoop();
+    rt.mode = "stopped";
+    await sendMessage(chatId, "🛑 <b>STOP COMPLETE</b>\nNo open positions left.");
+    await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
   }
 }
 
-function startRun(chatId, userId, mode) {
+function startRun(chatId, userId, mode, strategyOnly = null) {
   stopLoop();
-
-  activeChatId = chatId;
-  activeUserId = userId;
-  currentMode = mode;
-  runState = {
-    runId: `run-${Date.now()}`,
-    startedAt: Date.now(),
-    mode
-  };
-
-  if (mode === "4h") {
-    resetPortfolio(1);
+  const rt = kernel.start({ mode, chatId, userId, startBalance: 1 });
+  if (strategyOnly) {
+    rt.activeConfig.strategyEnabled = {
+      scalp: strategyOnly === "scalp",
+      reversal: strategyOnly === "reversal",
+      runner: strategyOnly === "runner",
+      copytrade: strategyOnly === "copytrade"
+    };
   }
 
   loopId = setInterval(() => {
-    cycle(chatId, userId).catch(err => {
-      console.log("cycle error:", err.message);
-    });
+    flushCycle(chatId).catch((err) => console.log("cycle error:", err.message));
   }, AUTO_INTERVAL_MS);
 
   if (mode === "4h") {
     stopTimeoutId = setTimeout(async () => {
-      stopLoop();
-      await sendMessage(chatId, "🛑 <b>AUTO STOPPED</b> (4h finished)");
-      await sendMessage(chatId, buildDashboard(), { reply_markup: keyboard() });
+      kernel.requestStop();
+      await sendMessage(chatId, "🛑 <b>AUTO STOP REQUESTED</b>\nWaiting natural exits.");
     }, 4 * 60 * 60 * 1000);
   }
 }
 
+function statsToCsv() {
+  const closed = kernel.getPortfolio().closedTrades;
+  const header = ["id", "strategy", "walletId", "token", "ca", "entryRef", "exitRef", "amountSol", "netPnlPct", "netPnlSol", "reason", "openedAt", "closedAt", "durationMs", "balanceAfter"];
+  const rows = closed.map((t) => [t.id, t.strategy, t.walletId, t.token, t.ca, t.entryReferencePrice, t.exitReferencePrice, t.amountSol, t.netPnlPct, t.netPnlSol, t.reason, t.openedAt, t.closedAt, t.durationMs, t.balanceAfter]);
+  return [header.join(","), ...rows.map((r) => r.join(","))].join("\n");
+}
+
+function statsToXlsxWorkbook() {
+  const pf = kernel.getPortfolio();
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([{ metric: "equity", value: pf.equity }, { metric: "cash", value: pf.cash }, { metric: "realized", value: pf.realizedPnlSol }, { metric: "unrealized", value: pf.unrealizedPnlSol }]), "summary");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pf.closedTrades), "trades");
+  return wb;
+}
+
+async function scheduleTempCleanup(filePath) {
+  tempFiles.add(filePath);
+  setTimeout(async () => {
+    try { await fs.unlink(filePath); } catch {}
+    tempFiles.delete(filePath);
+  }, 5 * 60 * 1000);
+}
+
+async function exportJson(chatId) {
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.json`);
+  await fs.writeFile(filePath, JSON.stringify(kernel.getPortfolio(), null, 2), "utf8");
+  await bot.sendDocument(chatId, filePath, {}, { filename: path.basename(filePath), contentType: "application/json" });
+  await scheduleTempCleanup(filePath);
+}
+
+async function exportCsv(chatId) {
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.csv`);
+  await fs.writeFile(filePath, statsToCsv(), "utf8");
+  await bot.sendDocument(chatId, filePath, {}, { filename: path.basename(filePath), contentType: "text/csv" });
+  await scheduleTempCleanup(filePath);
+}
+
+async function exportXlsx(chatId) {
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.xlsx`);
+  XLSX.writeFile(statsToXlsxWorkbook(), filePath);
+  await bot.sendDocument(chatId, filePath, {}, { filename: path.basename(filePath), contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  await scheduleTempCleanup(filePath);
+}
+
 async function handleAction(chatId, userId, action) {
-  console.log("handleAction:", action, "chat:", chatId);
-
   if (action === "start") {
-    await sendMessage(
-      chatId,
-      `🤖 <b>Bot ready</b>
-
-Commands:
-/run4h
-/runinfinite
-/stop
-/status
-/scan
-/exportcsv
-/exportjson
-/exportxlsx`,
-      { reply_markup: keyboard() }
-    );
+    await sendMessage(chatId, "🤖 <b>Bot ready</b>\n\nUse the menu below.", { reply_markup: keyboard() });
     return;
   }
-
-  if (action === "run4h") {
-    await sendMessage(chatId, "🚀 Starting 4h multi-strategy simulation from 1 SOL", {
-      reply_markup: keyboard()
-    });
-    startRun(chatId, userId, "4h");
-    return;
-  }
-
-  if (action === "runinfinite") {
-    if (!getPortfolio().startBalance) resetPortfolio(1);
-    await sendMessage(chatId, "♾️ Starting infinite multi-strategy run", {
-      reply_markup: keyboard()
-    });
+  if (action === "runmulti") {
+    await sendMessage(chatId, "🚀 Starting multi-strategy engine from 1 SOL", { reply_markup: keyboard() });
     startRun(chatId, userId, "infinite");
     return;
   }
-
+  if (action === "runstrategy") {
+    await sendMessage(chatId, "🎯 Send one of: scalp / reversal / runner / copytrade only", { reply_markup: keyboard() });
+    return;
+  }
+  if (action.startsWith("run_")) {
+    const strategy = action.replace("run_", "");
+    await sendMessage(chatId, `🚀 Starting ${strategy} only mode`, { reply_markup: keyboard() });
+    startRun(chatId, userId, "infinite", strategy);
+    return;
+  }
   if (action === "stop") {
+    kernel.requestStop();
+    await sendMessage(chatId, "🛑 Stop requested. Bot will stop after natural exits.", { reply_markup: keyboard() });
+    return;
+  }
+  if (action === "kill") {
     stopLoop();
-    await sendMessage(chatId, "🛑 Bot stopped", { reply_markup: keyboard() });
-    await sendMessage(chatId, buildDashboard(), { reply_markup: keyboard() });
+    const closed = await kernel.killAllPositions("KILL_SWITCH");
+    await sendMessage(chatId, `☠️ <b>KILL EXECUTED</b>\nClosed positions: ${closed.length}`, { reply_markup: keyboard() });
+    await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
     return;
   }
-
   if (action === "status") {
-    await sendMessage(chatId, buildDashboard(), { reply_markup: keyboard() });
+    await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
     return;
   }
-
+  if (action === "balance") {
+    await sendMessage(chatId, buildBalanceText(kernel.getPortfolio()), { reply_markup: keyboard() });
+    return;
+  }
   if (action === "scan") {
-    await cycle(chatId, userId);
+    await flushCycle(chatId);
     return;
   }
-
-  if (action === "exportcsv") {
-    await exportCsv(chatId);
+  if (action === "budget") {
+    const cfg = kernel.getRuntime().activeConfig.strategyBudget;
+    await sendMessage(chatId, `🧮 <b>BUDGET</b>\n\nSCALP ${round(cfg.scalp * 100, 0)}%\nREVERSAL ${round(cfg.reversal * 100, 0)}%\nRUNNER ${round(cfg.runner * 100, 0)}%\nCOPYTRADE ${round(cfg.copytrade * 100, 0)}%\n\nSend: budget 25 25 25 25`, { reply_markup: keyboard() });
     return;
   }
-
-  if (action === "exportjson") {
-    await exportJson(chatId);
+  if (action === "budget_equal") {
+    kernel.queueConfigPatch({ strategyBudget: { scalp: 0.25, reversal: 0.25, runner: 0.25, copytrade: 0.25 } }, "equal_budget");
+    await sendMessage(chatId, "✅ Pending budget set to 25/25/25/25. It will apply after natural exits or Kill.", { reply_markup: keyboard() });
     return;
   }
-
-  if (action === "exportxlsx") {
-    await exportXlsx(chatId);
+  if (action === "language") {
+    await sendMessage(chatId, "🌐 Language commands: lang ru / lang en", { reply_markup: keyboard() });
     return;
   }
-
-  await sendMessage(chatId, "Команды:", { reply_markup: keyboard() });
+  if (action === "lang_ru" || action === "lang_en") {
+    const lang = action === "lang_ru" ? "ru" : "en";
+    kernel.queueConfigPatch({ language: lang }, "language_change");
+    await sendMessage(chatId, `✅ Pending language set to ${lang}.`, { reply_markup: keyboard() });
+    return;
+  }
+  if (action === "copytrade") {
+    const copyCfg = kernel.getRuntime().activeConfig.copytrade;
+    await sendMessage(chatId, `📋 <b>COPYTRADE</b>\n\nEnabled: ${copyCfg.enabled}\nGMGN enabled: ${copyCfg.gmgnEnabled}\nMin leader score: ${copyCfg.minLeaderScore}\nCooldown: ${copyCfg.cooldownMinutes}m`, { reply_markup: keyboard() });
+    return;
+  }
+  if (action === "wallets") {
+    const wallets = kernel.getRuntime().activeConfig.wallets;
+    const text = Object.entries(wallets).map(([id, row]) => `• <b>${id}</b> — ${row.label} | ${row.role} | ${row.executionMode} | enabled=${row.enabled}`).join("\n");
+    await sendMessage(chatId, `👛 <b>WALLETS</b>\n\n${text}`, { reply_markup: keyboard() });
+    return;
+  }
+  if (action === "exportcsv") return exportCsv(chatId);
+  if (action === "exportjson") return exportJson(chatId);
+  if (action === "exportxlsx") return exportXlsx(chatId);
+  await sendMessage(chatId, "Команды через меню ниже.", { reply_markup: keyboard() });
 }
 
 async function processMessage(msg) {
@@ -646,69 +278,60 @@ async function processMessage(msg) {
   const userId = msg.from?.id || chatId;
   const text = msg.text || "";
 
-  console.log("incoming message text:", text);
-
-  const action = normalizeAction(text);
-  if (!action) {
-    await sendMessage(chatId, "Команды:", { reply_markup: keyboard() });
+  const budgetMatch = text.trim().match(/^budget\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/i);
+  if (budgetMatch) {
+    const [_, a, b, c, d] = budgetMatch;
+    kernel.queueConfigPatch({ strategyBudget: { scalp: Number(a) / 100, reversal: Number(b) / 100, runner: Number(c) / 100, copytrade: Number(d) / 100 } }, "budget_manual");
+    await sendMessage(chatId, "✅ Pending budget updated. It will apply after natural exits or Kill.", { reply_markup: keyboard() });
     return;
   }
 
+  const action = normalizeAction(text);
+  if (!action) {
+    await sendMessage(chatId, "Команды через меню ниже.", { reply_markup: keyboard() });
+    return;
+  }
   await handleAction(chatId, userId, action);
 }
 
 async function processUpdate(update) {
-  console.log("incoming telegram update type:", Object.keys(update || {}));
-
-  if (update?.message?.text) {
-    await processMessage(update.message);
-    return;
-  }
+  if (update.message) return processMessage(update.message);
+  return null;
 }
 
-const server = http.createServer((req, res) => {
-  console.log("incoming request:", req.method, req.url);
+const server = http.createServer(async (req, res) => {
+  if (req.method === "GET" && req.url === "/") {
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Chiikawa Telegram Bot is running");
+    return;
+  }
 
   if (req.method === "POST" && req.url === WEBHOOK_PATH) {
-    let body = "";
-
-    req.on("data", chunk => {
-      body += chunk;
-    });
-
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", async () => {
-      res.writeHead(200);
-      res.end("OK");
-
       try {
-        const update = JSON.parse(body);
-        console.log("incoming telegram update payload:", JSON.stringify(update).slice(0, 500));
+        const raw = Buffer.concat(chunks).toString("utf8") || "{}";
+        const update = JSON.parse(raw);
         await processUpdate(update);
-      } catch (err) {
-        console.log("webhook parse error:", err.message);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: error.message }));
       }
     });
-
     return;
   }
 
-  if (req.url === "/health") {
-    res.writeHead(200);
-    res.end("OK");
-    return;
-  }
-
-  res.writeHead(404);
-  res.end();
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ ok: false, error: "not_found" }));
 });
 
 server.listen(PORT, async () => {
-  console.log(`🚀 Server started on port ${PORT}`);
-
-  try {
-    await bot.setWebHook(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}${WEBHOOK_PATH}`);
-    console.log("✅ Webhook set");
-  } catch (err) {
-    console.log("setWebHook error:", err.message);
+  console.log(`Telegram bot listening on ${PORT}`);
+  if (process.env.WEBHOOK_URL) {
+    await bot.setWebHook(`${process.env.WEBHOOK_URL}${WEBHOOK_PATH}`);
+    console.log("Webhook set");
   }
 });
