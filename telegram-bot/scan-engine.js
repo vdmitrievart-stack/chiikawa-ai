@@ -1,6 +1,8 @@
 const SEARCH_API = "https://api.dexscreener.com/latest/dex/search";
 const TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
 
+const tokenSnapshotStore = new Map();
+
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -41,29 +43,50 @@ function normalizePair(p) {
   };
 }
 
+function getSnapshot(ca) {
+  return tokenSnapshotStore.get(ca) || null;
+}
+
+function putSnapshot(token) {
+  tokenSnapshotStore.set(token.ca, {
+    price: token.price,
+    volume: token.volume,
+    liquidity: token.liquidity,
+    txns: token.txns,
+    buys: token.buys,
+    sells: token.sells,
+    ts: Date.now()
+  });
+}
+
 export function detectRug(token) {
   let risk = 0;
   const reasons = [];
 
-  if (token.liquidity < 8000) {
+  if (token.liquidity < 12000) {
     risk += 25;
     reasons.push("Low liquidity");
   }
 
-  if (token.volume < 20000) {
+  if (token.volume < 30000) {
     risk += 20;
     reasons.push("Low 24h volume");
   }
 
   const fdvToLiquidity = token.liquidity > 0 ? token.fdv / token.liquidity : 999999;
-  if (fdvToLiquidity > 50) {
+  if (fdvToLiquidity > 35) {
     risk += 25;
     reasons.push("FDV/liquidity ratio too high");
   }
 
-  if (token.txns < 120) {
+  if (token.txns < 180) {
     risk += 15;
     reasons.push("Weak transaction activity");
+  }
+
+  if (token.liquidity < 7000 && token.txns > 1500) {
+    risk += 20;
+    reasons.push("Too much activity for thin liquidity");
   }
 
   return {
@@ -79,10 +102,10 @@ export function analyzeWallets(token) {
     : 100;
 
   const smartMoney =
-    token.txns > 300 && token.volume > 100000
-      ? 75
-      : token.txns > 180 && token.volume > 50000
-      ? 60
+    token.txns > 600 && token.volume > 150000
+      ? 78
+      : token.txns > 250 && token.volume > 70000
+      ? 62
       : 35;
 
   let score = 0;
@@ -93,7 +116,7 @@ export function analyzeWallets(token) {
     reasons.push("Smart money proxy looks strong");
   }
 
-  if (concentration < 40) {
+  if (concentration < 30) {
     score += 20;
     reasons.push("Holder concentration proxy acceptable");
   } else {
@@ -112,17 +135,17 @@ export function detectBots(token) {
   let botActivity = 0;
   const reasons = [];
 
-  if (token.txns > 500 && token.volume < 20000) {
-    botActivity += 40;
+  if (token.txns > 1200 && token.volume < 40000) {
+    botActivity += 45;
     reasons.push("Too many txns for weak volume");
   }
 
-  if (token.volume > 200000 && token.txns < 100) {
+  if (token.volume > 300000 && token.txns < 140) {
     botActivity += 30;
-    reasons.push("Volume spike without broad activity");
+    reasons.push("Volume spike without broad participation");
   }
 
-  if (token.liquidity < 5000 && token.txns > 250) {
+  if (token.liquidity < 9000 && token.txns > 500) {
     botActivity += 20;
     reasons.push("Suspicious activity on thin liquidity");
   }
@@ -138,17 +161,17 @@ export function getSentiment(token) {
   let sentiment = 0;
   const reasons = [];
 
-  if (token.volume > 100000) {
+  if (token.volume > 120000) {
     sentiment += 40;
     reasons.push("Strong 24h volume");
   }
 
-  if (token.txns > 300) {
+  if (token.txns > 350) {
     sentiment += 30;
     reasons.push("High transaction participation");
   }
 
-  if (token.liquidity > 20000) {
+  if (token.liquidity > 25000) {
     sentiment += 20;
     reasons.push("Healthy liquidity");
   }
@@ -160,34 +183,48 @@ export function getSentiment(token) {
   };
 }
 
-function buildStrategy(token) {
+function buildStrategy(token, delta) {
   const volumeToLiquidity = token.liquidity > 0 ? token.volume / token.liquidity : 0;
   const buyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
 
   let expectedEdgePct = 0;
-  let intendedHoldMs = 120000;
-  let takeProfitPct = 3.2;
-  let stopLossPct = 2.2;
+  let intendedHoldMs = 180000;
+  let takeProfitPct = 4.5;
+  let stopLossPct = 2.4;
   let reason = "BASE_SETUP";
 
-  if (volumeToLiquidity > 25 && buyPressure > 1.2) {
-    expectedEdgePct += 2.2;
-    takeProfitPct = 4.2;
-    stopLossPct = 2.4;
-    intendedHoldMs = 180000;
-    reason = "MOMENTUM_BREAKOUT";
+  if (volumeToLiquidity > 8) {
+    expectedEdgePct += 0.8;
   }
-
-  if (token.txns > 1200) {
-    expectedEdgePct += 1.0;
+  if (volumeToLiquidity > 15) {
+    expectedEdgePct += 0.8;
   }
-
-  if (token.liquidity > 25000) {
+  if (buyPressure > 1.15) {
+    expectedEdgePct += 0.8;
+  }
+  if (buyPressure > 1.35) {
     expectedEdgePct += 0.8;
   }
 
-  if (token.fdv > 0 && token.liquidity > 0 && token.fdv / token.liquidity < 20) {
-    expectedEdgePct += 0.7;
+  if (delta.volumeDeltaPct > 12) {
+    expectedEdgePct += 1.0;
+  }
+  if (delta.txnsDeltaPct > 10) {
+    expectedEdgePct += 0.8;
+  }
+  if (delta.priceDeltaPct > 1.5 && delta.priceDeltaPct < 12) {
+    expectedEdgePct += 0.8;
+  }
+
+  if (delta.liquidityDeltaPct >= 0) {
+    expectedEdgePct += 0.4;
+  }
+
+  if (delta.volumeDeltaPct > 20 && delta.txnsDeltaPct > 15) {
+    takeProfitPct = 5.5;
+    stopLossPct = 2.8;
+    intendedHoldMs = 240000;
+    reason = "MOMENTUM_EXPANSION";
   }
 
   return {
@@ -199,6 +236,57 @@ function buildStrategy(token) {
   };
 }
 
+function computeDelta(token) {
+  const prev = getSnapshot(token.ca);
+
+  if (!prev) {
+    return {
+      hasHistory: false,
+      priceDeltaPct: 0,
+      volumeDeltaPct: 0,
+      txnsDeltaPct: 0,
+      liquidityDeltaPct: 0,
+      buyPressureDelta: 0
+    };
+  }
+
+  const prevBuyPressure = prev.sells > 0 ? prev.buys / prev.sells : prev.buys;
+  const currBuyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
+
+  return {
+    hasHistory: true,
+    priceDeltaPct: prev.price > 0 ? ((token.price - prev.price) / prev.price) * 100 : 0,
+    volumeDeltaPct: prev.volume > 0 ? ((token.volume - prev.volume) / prev.volume) * 100 : 0,
+    txnsDeltaPct: prev.txns > 0 ? ((token.txns - prev.txns) / prev.txns) * 100 : 0,
+    liquidityDeltaPct: prev.liquidity > 0 ? ((token.liquidity - prev.liquidity) / prev.liquidity) * 100 : 0,
+    buyPressureDelta: currBuyPressure - prevBuyPressure
+  };
+}
+
+function detectFalseBounce(token, delta) {
+  const reasons = [];
+  let rejected = false;
+
+  if (delta.hasHistory) {
+    if (delta.priceDeltaPct > 0 && delta.volumeDeltaPct < 3 && delta.txnsDeltaPct < 3) {
+      rejected = true;
+      reasons.push("Price bounce without participation");
+    }
+
+    if (delta.priceDeltaPct > 0 && delta.liquidityDeltaPct < -2) {
+      rejected = true;
+      reasons.push("Bounce while liquidity deteriorates");
+    }
+
+    if (delta.priceDeltaPct > 0 && delta.buyPressureDelta < 0) {
+      rejected = true;
+      reasons.push("Bounce while buy pressure weakens");
+    }
+  }
+
+  return { rejected, reasons };
+}
+
 function isEligibleBaseToken(token) {
   if (!token.ca || !token.name || token.price <= 0) return false;
 
@@ -207,9 +295,9 @@ function isEligibleBaseToken(token) {
     return false;
   }
 
-  if (token.liquidity < 3000) return false;
-  if (token.volume < 10000) return false;
-  if (token.txns < 80) return false;
+  if (token.liquidity < 8000) return false;
+  if (token.volume < 25000) return false;
+  if (token.txns < 120) return false;
 
   return true;
 }
@@ -237,11 +325,13 @@ export async function scanMarket() {
 }
 
 export async function analyzeToken(token) {
+  const delta = computeDelta(token);
   const rug = detectRug(token);
   const wallet = analyzeWallets(token);
   const bots = detectBots(token);
   const sentiment = getSentiment(token);
-  const strategy = buildStrategy(token);
+  const falseBounce = detectFalseBounce(token, delta);
+  const strategy = buildStrategy(token, delta);
 
   let score = 0;
   const reasons = [];
@@ -280,16 +370,48 @@ export async function analyzeToken(token) {
     reasons.push("FDV/liquidity ratio acceptable");
   }
 
-  return {
+  if (delta.hasHistory) {
+    if (delta.volumeDeltaPct > 12) {
+      score += 10;
+      reasons.push("Volume is accelerating");
+    }
+    if (delta.txnsDeltaPct > 10) {
+      score += 8;
+      reasons.push("Transaction activity is accelerating");
+    }
+    if (delta.buyPressureDelta > 0.08) {
+      score += 8;
+      reasons.push("Buy pressure improving");
+    }
+    if (delta.priceDeltaPct > 1 && delta.priceDeltaPct < 12) {
+      score += 6;
+      reasons.push("Healthy price expansion");
+    }
+  } else {
+    score -= 12;
+    reasons.push("No historical delta yet");
+  }
+
+  if (falseBounce.rejected) {
+    score -= 30;
+    reasons.push(...falseBounce.reasons);
+  }
+
+  const analyzed = {
     token: { ...token, score },
     rug,
     wallet,
     bots,
     sentiment,
+    delta,
+    falseBounce,
     strategy,
     score,
     reasons
   };
+
+  putSnapshot(token);
+  return analyzed;
 }
 
 export async function getBestTrade({ excludeCas = [] } = {}) {
@@ -298,7 +420,10 @@ export async function getBestTrade({ excludeCas = [] } = {}) {
 
   const analyzed = [];
   for (const token of list) {
-    if (exclude.has(token.ca)) continue;
+    if (exclude.has(token.ca)) {
+      putSnapshot(token);
+      continue;
+    }
     analyzed.push(await analyzeToken(token));
   }
 
@@ -308,8 +433,12 @@ export async function getBestTrade({ excludeCas = [] } = {}) {
   });
 
   const tradable = analyzed.filter(item => {
-    if (item.score < 60) return false;
-    if (item.strategy.expectedEdgePct < 2.0) return false;
+    if (item.score < 75) return false;
+    if (item.strategy.expectedEdgePct < 2.4) return false;
+    if (item.falseBounce.rejected) return false;
+    if (!item.delta.hasHistory) return false;
+    if (item.delta.volumeDeltaPct < 5) return false;
+    if (item.delta.txnsDeltaPct < 4) return false;
     return true;
   });
 
