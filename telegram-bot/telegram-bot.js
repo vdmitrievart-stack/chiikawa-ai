@@ -1,7 +1,15 @@
 import http from "node:http";
 import TelegramBot from "node-telegram-bot-api";
 import { getBestTrade, getLatestTokenPrice } from "./scan-engine.js";
-import { enterTrade, exitTrade, getPortfolio, markToMarket } from "./portfolio.js";
+import {
+  enterTrade,
+  exitTrade,
+  getPortfolio,
+  markToMarket,
+  shouldExitPosition,
+  updatePositionMarket,
+  estimateRoundTripCostPct
+} from "./portfolio.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
@@ -11,7 +19,6 @@ const PATH = `/telegram/${WEBHOOK_SECRET}`;
 const AUTO_INTERVAL_MS = Number(process.env.AUTO_INTERVAL_MS || 60000);
 const AUTO_HOURS_DEFAULT = Number(process.env.AUTO_HOURS_DEFAULT || 4);
 const TRADE_COOLDOWN_MS = Number(process.env.TRADE_COOLDOWN_MS || 90 * 60 * 1000);
-const HOLD_MS = Number(process.env.HOLD_MS || 90 * 1000);
 
 if (!TOKEN) {
   console.error("BOT_TOKEN missing");
@@ -41,6 +48,17 @@ function pruneRecentlyTraded() {
   }
 }
 
+function stopAutoInternal() {
+  if (intervalId) {
+    clearInterval(intervalId);
+    intervalId = null;
+  }
+  if (autoStopId) {
+    clearTimeout(autoStopId);
+    autoStopId = null;
+  }
+}
+
 function formatAnalysis(best) {
   return `🔎 <b>ANALYSIS</b>
 
@@ -60,45 +78,74 @@ function formatAnalysis(best) {
 🤖 <b>Bot Activity:</b> ${best.bots.botActivity}
 🐦 <b>Sentiment:</b> ${best.sentiment.sentiment}
 
+🎯 <b>Strategy</b>
+<b>Expected edge:</b> ${best.strategy.expectedEdgePct}%
+<b>Round-trip costs:</b> ${estimateRoundTripCostPct()}%
+<b>Hold target:</b> ${(best.strategy.intendedHoldMs / 1000).toFixed(0)}s
+<b>TP:</b> ${best.strategy.takeProfitPct}%
+<b>SL:</b> ${best.strategy.stopLossPct}%
+<b>Setup:</b> ${best.strategy.reason}
+
 <b>Reasons:</b>
 ${best.reasons.map(r => `• ${r}`).join("\n")}`;
-}
-
-function stopAutoInternal() {
-  if (intervalId) {
-    clearInterval(intervalId);
-    intervalId = null;
-  }
-  if (autoStopId) {
-    clearTimeout(autoStopId);
-    autoStopId = null;
-  }
 }
 
 async function runCycle(chatId) {
   try {
     pruneRecentlyTraded();
 
-    const portfolio = getPortfolio();
+    const pf = getPortfolio();
 
-    if (portfolio.position) {
-      const latest = await getLatestTokenPrice(portfolio.position.ca);
+    if (pf.position) {
+      const latest = await getLatestTokenPrice(pf.position.ca);
       if (!latest?.price) {
-        await send(chatId, `⏳ Open trade still active: ${portfolio.position.token}`);
+        await send(chatId, `⏳ Open position still active: ${pf.position.token}`);
         return;
       }
 
+      updatePositionMarket(latest.price);
       const mtm = markToMarket(latest.price);
+      const exitCheck = shouldExitPosition(latest.price);
+
       await send(
         chatId,
-        `📈 <b>OPEN POSITION UPDATE</b>
+        `📈 <b>POSITION UPDATE</b>
 
-<b>Token:</b> ${portfolio.position.token}
-<b>CA:</b> <code>${portfolio.position.ca}</code>
-<b>Entry:</b> ${portfolio.position.entry}
+<b>Token:</b> ${pf.position.token}
+<b>CA:</b> <code>${pf.position.ca}</code>
+<b>Entry:</b> ${pf.position.entryReferencePrice}
 <b>Current:</b> ${latest.price}
-<b>PnL:</b> ${mtm ? mtm.pnlPercent.toFixed(2) : "0.00"}%`
+<b>Gross PnL:</b> ${mtm.grossPnlPct.toFixed(2)}%
+<b>Net PnL:</b> ${mtm.netPnlPct.toFixed(2)}%
+<b>Age:</b> ${(mtm.ageMs / 1000).toFixed(0)}s
+<b>Status:</b> ${exitCheck.reason}`
       );
+
+      if (exitCheck.shouldExit) {
+        const closed = exitTrade(latest.price, exitCheck.reason);
+        if (closed) {
+          recentlyTraded.set(closed.ca, Date.now());
+
+          await send(
+            chatId,
+            `🏁 <b>EXIT</b>
+
+<b>Token:</b> ${closed.token}
+<b>CA:</b> <code>${closed.ca}</code>
+<b>Entry ref:</b> ${closed.entryReferencePrice}
+<b>Entry effective:</b> ${closed.entryEffectivePrice}
+<b>Exit ref:</b> ${closed.exitReferencePrice}
+
+<b>Entry costs:</b> ${(closed.entryCosts.totalSol).toFixed(6)} SOL
+<b>Exit costs:</b> ${(closed.exitCosts.totalSol).toFixed(6)} SOL
+
+<b>Net PnL:</b> ${closed.netPnlPct.toFixed(2)}%
+<b>Balance:</b> ${closed.balance.toFixed(4)} SOL
+<b>Reason:</b> ${closed.reason}`
+          );
+        }
+      }
+
       return;
     }
 
@@ -117,13 +164,28 @@ async function runCycle(chatId) {
       return;
     }
 
-    const entry = enterTrade(best.token);
+    if (best.strategy.expectedEdgePct < estimateRoundTripCostPct()) {
+      await send(
+        chatId,
+        `❌ Skip (expected edge ${best.strategy.expectedEdgePct}% does not beat costs ${estimateRoundTripCostPct()}%)`
+      );
+      return;
+    }
+
+    const entry = enterTrade({
+      token: best.token,
+      intendedHoldMs: best.strategy.intendedHoldMs,
+      expectedEdgePct: best.strategy.expectedEdgePct,
+      stopLossPct: best.strategy.stopLossPct,
+      takeProfitPct: best.strategy.takeProfitPct,
+      reason: best.strategy.reason,
+      signalScore: best.score
+    });
+
     if (!entry) {
       await send(chatId, "⏳ Could not open position");
       return;
     }
-
-    recentlyTraded.set(entry.ca, Date.now());
 
     const afterEntry = getPortfolio();
 
@@ -133,33 +195,17 @@ async function runCycle(chatId) {
 
 <b>Token:</b> ${entry.token}
 <b>CA:</b> <code>${entry.ca}</code>
-<b>Price:</b> ${entry.entry}
+<b>Signal score:</b> ${entry.signalScore}
+<b>Setup:</b> ${entry.reason}
+
+<b>Entry ref:</b> ${entry.entryReferencePrice}
+<b>Entry effective:</b> ${entry.entryEffectivePrice}
 <b>Size:</b> ${entry.amountSol.toFixed(4)} SOL
+<b>Expected edge:</b> ${entry.expectedEdgePct}%
+
+<b>Entry costs:</b> ${(entry.entryCosts.totalSol).toFixed(6)} SOL
 <b>Balance after entry:</b> ${afterEntry.balance.toFixed(4)} SOL`
     );
-
-    setTimeout(async () => {
-      try {
-        const latest = await getLatestTokenPrice(entry.ca);
-        const exitPrice = latest?.price || entry.entry;
-
-        const exit = exitTrade(exitPrice, "SIM_EXIT");
-        if (!exit) return;
-
-        await send(
-          chatId,
-          `🏁 <b>EXIT</b>
-
-<b>Token:</b> ${exit.token}
-<b>Entry:</b> ${exit.entry}
-<b>Exit:</b> ${exit.exit}
-<b>PnL:</b> ${exit.pnlPercent.toFixed(2)}%
-<b>Balance:</b> ${exit.balance.toFixed(4)} SOL`
-        );
-      } catch (error) {
-        console.log("exit error:", error.message);
-      }
-    }, HOLD_MS);
   } catch (error) {
     console.log("cycle error:", error.message);
     await send(chatId, `⚠️ Cycle error: ${error.message}`);
@@ -224,7 +270,6 @@ async function handleMessage(msg) {
 
   if (text === "/scan") {
     await runCycle(chatId);
-    return;
   }
 }
 
