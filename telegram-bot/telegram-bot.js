@@ -5,7 +5,12 @@ import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
 import * as XLSX from "xlsx";
 
-import { getBestTrade, getLatestTokenPrice, recordTradeOutcomeFromSignalContext } from "./scan-engine.js";
+import {
+  getBestTrade,
+  getLatestTokenPrice,
+  recordTradeOutcomeFromSignalContext
+} from "./scan-engine.js";
+
 import {
   getPortfolio,
   getPositions,
@@ -15,9 +20,9 @@ import {
   openPosition,
   closePosition,
   markPosition,
-  maybeTakeRunnerPartial,
-  estimateRoundTripCostPct
+  maybeTakeRunnerPartial
 } from "./portfolio.js";
+
 import { buildStrategyPlans } from "./strategy-engine.js";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -32,19 +37,21 @@ if (!TOKEN) {
 }
 
 const bot = new TelegramBot(TOKEN, { polling: false });
-const tempFiles = new Set();
 
-let activeChatId = null;
-let activeUserId = null;
 let loopId = null;
 let stopTimeoutId = null;
 let currentMode = "stopped";
-let recentlyTraded = new Map();
+let activeChatId = null;
+let activeUserId = null;
+
 let runState = {
   runId: null,
   startedAt: null,
   mode: "stopped"
 };
+
+const recentlyTraded = new Map();
+const tempFiles = new Set();
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -64,27 +71,6 @@ function escapeHtml(input) {
     .replace(/"/g, "&quot;");
 }
 
-function normalizeAction(text) {
-  const raw = String(text || "").toLowerCase().trim();
-  if (!raw) return null;
-
-  if (raw.startsWith("/")) {
-    return raw.slice(1);
-  }
-
-  if (raw.includes("4h") || raw.includes("4ч")) return "run4h";
-  if (raw.includes("infinite") || raw.includes("бескон")) return "runinfinite";
-  if (raw.includes("stop") || raw.includes("стоп")) return "stop";
-  if (raw.includes("status") || raw.includes("статус")) return "status";
-  if (raw.includes("scan") || raw.includes("скан")) return "scan";
-  if (raw.includes("csv")) return "exportcsv";
-  if (raw.includes("json")) return "exportjson";
-  if (raw.includes("xlsx")) return "exportxlsx";
-  if (raw.includes("start") || raw.includes("старт")) return "start";
-
-  return null;
-}
-
 function keyboard() {
   return {
     keyboard: [
@@ -98,6 +84,32 @@ function keyboard() {
   };
 }
 
+function normalizeAction(text) {
+  const raw = String(text || "").toLowerCase().trim();
+  if (!raw) return null;
+
+  if (raw === "/start" || raw === "/menu") return "start";
+  if (raw === "/run4h") return "run4h";
+  if (raw === "/runinfinite") return "runinfinite";
+  if (raw === "/stop") return "stop";
+  if (raw === "/status") return "status";
+  if (raw === "/scan") return "scan";
+  if (raw === "/exportcsv") return "exportcsv";
+  if (raw === "/exportjson" || raw === "/exportstats") return "exportjson";
+  if (raw === "/exportxlsx") return "exportxlsx";
+
+  if (raw.includes("run 4h") || raw.includes("4ч") || raw.includes("run4h")) return "run4h";
+  if (raw.includes("infinite") || raw.includes("бескон")) return "runinfinite";
+  if (raw.includes("stop") || raw.includes("стоп")) return "stop";
+  if (raw.includes("status") || raw.includes("статус")) return "status";
+  if (raw.includes("scan") || raw.includes("скан")) return "scan";
+  if (raw.includes("csv")) return "exportcsv";
+  if (raw.includes("json")) return "exportjson";
+  if (raw.includes("xlsx")) return "exportxlsx";
+
+  return null;
+}
+
 async function sendMessage(chatId, text, extra = {}) {
   return bot.sendMessage(chatId, text, {
     parse_mode: "HTML",
@@ -108,6 +120,7 @@ async function sendMessage(chatId, text, extra = {}) {
 
 async function sendPhotoOrText(chatId, imageUrl, caption) {
   const safeCaption = caption.slice(0, 1024);
+
   if (imageUrl) {
     try {
       await bot.sendPhoto(chatId, imageUrl, {
@@ -115,10 +128,11 @@ async function sendPhotoOrText(chatId, imageUrl, caption) {
         parse_mode: "HTML"
       });
       return;
-    } catch (e) {
-      console.log("sendPhoto fallback:", e.message);
+    } catch (error) {
+      console.log("sendPhoto fallback:", error.message);
     }
   }
+
   await sendMessage(chatId, caption);
 }
 
@@ -158,6 +172,7 @@ function buildDashboard() {
     `<b>Equity:</b> ${round(pf.equity, 4)} SOL`,
     `<b>Realized PnL:</b> ${round(pf.realizedPnlSol, 4)} SOL`,
     `<b>Unrealized PnL:</b> ${round(pf.unrealizedPnlSol, 4)} SOL`,
+    `<b>Open positions:</b> ${pf.positions.length}`,
     `<b>Closed trades:</b> ${totalClosed}`,
     `<b>Winrate:</b> ${round(winrate, 2)}%`,
     ``,
@@ -176,16 +191,14 @@ function buildDashboard() {
 
 function buildAnalysisText(analyzed, plans) {
   const t = analyzed.token;
-  const narrativeSummary = escapeHtml(analyzed.narrative.summary || "");
   const reasons = analyzed.reasons.slice(0, 12).map(r => `• ${escapeHtml(r)}`).join("\n");
+
   const plansText = plans.length
-    ? plans
-        .map(
-          p =>
-            `• <b>${escapeHtml(p.strategyKey.toUpperCase())}</b> | edge ${round(p.expectedEdgePct, 2)}% | hold ${Math.round(p.plannedHoldMs / 60000)}m | SL ${p.stopLossPct}% | TP ${p.takeProfitPct || "runner"}`
-        )
-        .join("\n")
-    : `• none`;
+    ? plans.map(
+        p =>
+          `• <b>${escapeHtml(p.strategyKey.toUpperCase())}</b> | edge ${round(p.expectedEdgePct, 2)}% | hold ${Math.round(p.plannedHoldMs / 60000)}m | SL ${p.stopLossPct}% | TP ${p.takeProfitPct || "runner"}`
+      ).join("\n")
+    : "• none";
 
   return `🔎 <b>ANALYSIS</b>
 
@@ -210,7 +223,7 @@ function buildAnalysisText(analyzed, plans) {
 🌐 <b>Socials:</b> ${escapeHtml(analyzed.socials.notes.join(", ") || "none")}
 
 <b>Narrative summary:</b>
-${narrativeSummary || "none"}
+${escapeHtml(analyzed.narrative.summary || "none")}
 
 📈 <b>Delta</b>
 <b>Price Δ:</b> ${round(analyzed.delta.priceDeltaPct, 2)}%
@@ -256,8 +269,7 @@ function buildPositionUpdateText(position, mark, status) {
 <b>Gross PnL:</b> ${round(mark.grossPnlPct, 2)}%
 <b>Net PnL:</b> ${round(mark.netPnlPct, 2)}%
 <b>Age:</b> ${Math.round(mark.ageMs / 1000)}s
-<b>Status:</b> ${escapeHtml(status)}
-`;
+<b>Status:</b> ${escapeHtml(status)}`;
 }
 
 function buildExitText(trade) {
@@ -311,7 +323,6 @@ function shouldClosePosition(position, analyzedNow) {
     }
 
     if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "RUNNER_CORPSE_EXIT" };
-
     return { close: false, reason: "RUNNER_HOLD" };
   }
 
@@ -320,6 +331,7 @@ function shouldClosePosition(position, analyzedNow) {
 
 async function scheduleTempCleanup(filePath) {
   tempFiles.add(filePath);
+
   setTimeout(async () => {
     try {
       await fs.unlink(filePath);
@@ -371,6 +383,7 @@ function statsToCsv() {
 
 function statsToXlsxWorkbook() {
   const pf = getPortfolio();
+
   const summaryRows = [
     { metric: "runId", value: runState.runId || "" },
     { metric: "mode", value: currentMode },
@@ -452,7 +465,12 @@ async function cycle(chatId, userId) {
     if (partial) {
       await sendMessage(
         chatId,
-        `🎯 <b>RUNNER PARTIAL</b>\n\n<b>Token:</b> ${escapeHtml(p.token)}\n<b>Target:</b> ${partial.targetPct}%\n<b>Sold fraction:</b> ${round(partial.soldFraction * 100, 0)}%\n<b>Cash added:</b> ${round(partial.netValueSol, 4)} SOL`
+        `🎯 <b>RUNNER PARTIAL</b>
+
+<b>Token:</b> ${escapeHtml(p.token)}
+<b>Target:</b> ${partial.targetPct}%
+<b>Sold fraction:</b> ${round(partial.soldFraction * 100, 0)}%
+<b>Cash added:</b> ${round(partial.netValueSol, 4)} SOL`
       );
     }
 
@@ -536,7 +554,7 @@ function startRun(chatId, userId, mode) {
 
   loopId = setInterval(() => {
     cycle(chatId, userId).catch(err => {
-      console.log("cycle error", err.message);
+      console.log("cycle error:", err.message);
     });
   }, AUTO_INTERVAL_MS);
 
@@ -550,10 +568,22 @@ function startRun(chatId, userId, mode) {
 }
 
 async function handleAction(chatId, userId, action) {
+  console.log("handleAction:", action, "chat:", chatId);
+
   if (action === "start") {
     await sendMessage(
       chatId,
-      `🤖 <b>Bot ready</b>\n\nCommands: /run4h /runinfinite /stop /status /scan /exportcsv /exportjson /exportxlsx`,
+      `🤖 <b>Bot ready</b>
+
+Commands:
+/run4h
+/runinfinite
+/stop
+/status
+/scan
+/exportcsv
+/exportjson
+/exportxlsx`,
       { reply_markup: keyboard() }
     );
     return;
@@ -593,32 +623,52 @@ async function handleAction(chatId, userId, action) {
     return;
   }
 
-  if (action === "exportjson") {
-    await exportJson(chatId);
-    return;
-  }
-
   if (action === "exportcsv") {
     await exportCsv(chatId);
     return;
   }
 
+  if (action === "exportjson") {
+    await exportJson(chatId);
+    return;
+  }
+
   if (action === "exportxlsx") {
     await exportXlsx(chatId);
+    return;
   }
+
+  await sendMessage(chatId, "Команды:", { reply_markup: keyboard() });
 }
 
 async function processMessage(msg) {
   const chatId = msg.chat.id;
   const userId = msg.from?.id || chatId;
   const text = msg.text || "";
-  const action = normalizeAction(text);
 
-  if (!action) return;
+  console.log("incoming message text:", text);
+
+  const action = normalizeAction(text);
+  if (!action) {
+    await sendMessage(chatId, "Команды:", { reply_markup: keyboard() });
+    return;
+  }
+
   await handleAction(chatId, userId, action);
 }
 
+async function processUpdate(update) {
+  console.log("incoming telegram update type:", Object.keys(update || {}));
+
+  if (update?.message?.text) {
+    await processMessage(update.message);
+    return;
+  }
+}
+
 const server = http.createServer((req, res) => {
+  console.log("incoming request:", req.method, req.url);
+
   if (req.method === "POST" && req.url === WEBHOOK_PATH) {
     let body = "";
 
@@ -632,11 +682,10 @@ const server = http.createServer((req, res) => {
 
       try {
         const update = JSON.parse(body);
-        if (update?.message) {
-          await processMessage(update.message);
-        }
+        console.log("incoming telegram update payload:", JSON.stringify(update).slice(0, 500));
+        await processUpdate(update);
       } catch (err) {
-        console.log("webhook parse error", err.message);
+        console.log("webhook parse error:", err.message);
       }
     });
 
@@ -654,7 +703,12 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, async () => {
-  console.log("🚀 Server started");
-  await bot.setWebHook(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}${WEBHOOK_PATH}`);
-  console.log("✅ Webhook set");
+  console.log(`🚀 Server started on port ${PORT}`);
+
+  try {
+    await bot.setWebHook(`https://${process.env.RENDER_EXTERNAL_HOSTNAME}${WEBHOOK_PATH}`);
+    console.log("✅ Webhook set");
+  } catch (err) {
+    console.log("setWebHook error:", err.message);
+  }
 });
