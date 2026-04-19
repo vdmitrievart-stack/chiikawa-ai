@@ -78,6 +78,13 @@ function formatAnalysis(best) {
 🤖 <b>Bot Activity:</b> ${best.bots.botActivity}
 🐦 <b>Sentiment:</b> ${best.sentiment.sentiment}
 
+📈 <b>Delta</b>
+<b>Price Δ:</b> ${best.delta.priceDeltaPct.toFixed(2)}%
+<b>Volume Δ:</b> ${best.delta.volumeDeltaPct.toFixed(2)}%
+<b>Txns Δ:</b> ${best.delta.txnsDeltaPct.toFixed(2)}%
+<b>Liquidity Δ:</b> ${best.delta.liquidityDeltaPct.toFixed(2)}%
+<b>Buy Pressure Δ:</b> ${best.delta.buyPressureDelta.toFixed(3)}
+
 🎯 <b>Strategy</b>
 <b>Expected edge:</b> ${best.strategy.expectedEdgePct}%
 <b>Round-trip costs:</b> ${estimateRoundTripCostPct()}%
@@ -113,7 +120,7 @@ async function runCycle(chatId) {
 
 <b>Token:</b> ${pf.position.token}
 <b>CA:</b> <code>${pf.position.ca}</code>
-<b>Entry:</b> ${pf.position.entryReferencePrice}
+<b>Entry ref:</b> ${pf.position.entryReferencePrice}
 <b>Current:</b> ${latest.price}
 <b>Gross PnL:</b> ${mtm.grossPnlPct.toFixed(2)}%
 <b>Net PnL:</b> ${mtm.netPnlPct.toFixed(2)}%
@@ -136,8 +143,8 @@ async function runCycle(chatId) {
 <b>Entry effective:</b> ${closed.entryEffectivePrice}
 <b>Exit ref:</b> ${closed.exitReferencePrice}
 
-<b>Entry costs:</b> ${(closed.entryCosts.totalSol).toFixed(6)} SOL
-<b>Exit costs:</b> ${(closed.exitCosts.totalSol).toFixed(6)} SOL
+<b>Entry costs:</b> ${closed.entryCosts.totalSol.toFixed(6)} SOL
+<b>Exit costs:</b> ${closed.exitCosts.totalSol.toFixed(6)} SOL
 
 <b>Net PnL:</b> ${closed.netPnlPct.toFixed(2)}%
 <b>Balance:</b> ${closed.balance.toFixed(4)} SOL
@@ -159,8 +166,13 @@ async function runCycle(chatId) {
 
     await send(chatId, formatAnalysis(best));
 
-    if (best.score < 60) {
+    if (best.score < 75) {
       await send(chatId, "❌ Skip (score below threshold)");
+      return;
+    }
+
+    if (best.falseBounce.rejected) {
+      await send(chatId, `❌ Skip (false bounce): ${best.falseBounce.reasons.join(", ")}`);
       return;
     }
 
@@ -203,7 +215,7 @@ async function runCycle(chatId) {
 <b>Size:</b> ${entry.amountSol.toFixed(4)} SOL
 <b>Expected edge:</b> ${entry.expectedEdgePct}%
 
-<b>Entry costs:</b> ${(entry.entryCosts.totalSol).toFixed(6)} SOL
+<b>Entry costs:</b> ${entry.entryCosts.totalSol.toFixed(6)} SOL
 <b>Balance after entry:</b> ${afterEntry.balance.toFixed(4)} SOL`
     );
   } catch (error) {
