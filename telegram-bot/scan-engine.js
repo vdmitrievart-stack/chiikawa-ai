@@ -1,74 +1,63 @@
 import fetch from "node-fetch";
+import { detectRug } from "./rug-detector.js";
+import { analyzeWallets } from "./wallet-intel.js";
+import { detectBots } from "./bot-filter.js";
+import { getSentiment } from "./sentiment.js";
 
-const DEX_API = "https://api.dexscreener.com/latest/dex/search";
+const API = "https://api.dexscreener.com/latest/dex/search";
 
-export async function findCandidates() {
-  const queries = ["chiikawa", "solana", "pump"];
+export async function scanMarket() {
+  const res = await fetch(`${API}?q=solana`);
+  const json = await res.json();
 
-  let all = [];
+  if (!json.pairs) return [];
 
-  for (const q of queries) {
-    try {
-      const res = await fetch(`${DEX_API}?q=${q}`);
-      const json = await res.json();
+  return json.pairs.slice(0, 10).map(p => ({
+    name: p.baseToken.symbol,
+    ca: p.baseToken.address,
+    price: Number(p.priceUsd || 0),
+    liquidity: Number(p.liquidity?.usd || 0),
+    volume: Number(p.volume?.h24 || 0),
+    txns: p.txns?.h24?.buys || 0,
+    fdv: Number(p.fdv || 0)
+  }));
+}
 
-      if (!json.pairs) continue;
+export async function analyzeToken(token) {
+  const rug = detectRug(token);
+  const wallet = analyzeWallets(token);
+  const bots = detectBots(token);
+  const sentiment = getSentiment(token);
 
-      for (const p of json.pairs) {
-        if (!p.baseToken?.address) continue;
+  let score = 0;
 
-        all.push({
-          ca: p.baseToken.address,
-          name: p.baseToken.symbol,
-          price: Number(p.priceUsd || 0),
-          liquidity: Number(p.liquidity?.usd || 0),
-          volume: Number(p.volume?.h24 || 0),
-          fdv: Number(p.fdv || 0),
-          txns: p.txns?.h24?.buys || 0
-        });
-      }
-    } catch (e) {
-      console.log("scan error:", e.message);
+  if (!rug.isRug) score += 30;
+  score += wallet.score;
+  if (!bots.isBotted) score += 20;
+  if (sentiment.bullish) score += 20;
+
+  return {
+    token,
+    rug,
+    wallet,
+    bots,
+    sentiment,
+    score
+  };
+}
+
+export async function getBestTrade() {
+  const list = await scanMarket();
+
+  let best = null;
+
+  for (const t of list) {
+    const a = await analyzeToken(t);
+
+    if (!best || a.score > best.score) {
+      best = a;
     }
   }
 
-  return dedupe(all);
-}
-
-function dedupe(arr) {
-  const map = new Map();
-  arr.forEach(a => map.set(a.ca, a));
-  return [...map.values()];
-}
-
-// ================= SCORE =================
-
-export function scoreToken(t) {
-  let score = 0;
-
-  if (t.liquidity > 10000) score += 20;
-  if (t.volume > 50000) score += 20;
-  if (t.txns > 200) score += 20;
-  if (t.fdv < 2000000) score += 10;
-
-  if (t.price > 0) score += 10;
-
-  return score;
-}
-
-// ================= PICK =================
-
-export async function getBestToken() {
-  const list = await findCandidates();
-
-  if (!list.length) return null;
-
-  const scored = list.map(t => ({
-    ...t,
-    score: scoreToken(t)
-  }));
-
-  scored.sort((a, b) => b.score - a.score);
-
-  return scored[0];
+  return best;
 }
