@@ -7,7 +7,10 @@ const tokenSnapshotStore = new Map();
 const mediaCache = new Map();
 let mediaCacheLoadedAt = 0;
 
+const corpseBlacklist = new Map();
+
 const SAFETY_MARGIN_PCT = 1.2;
+const CORPSE_BLACKLIST_MS = 6 * 60 * 60 * 1000;
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -61,6 +64,7 @@ function putSnapshot(token) {
     txns: token.txns,
     buys: token.buys,
     sells: token.sells,
+    fdv: token.fdv,
     ts: Date.now()
   });
 }
@@ -68,6 +72,28 @@ function putSnapshot(token) {
 function isStableLike(symbol) {
   const s = String(symbol || "").toUpperCase();
   return ["SOL", "USDC", "USDT", "PUMP", "JUP", "RAY"].includes(s);
+}
+
+function pruneCorpseBlacklist() {
+  const now = Date.now();
+  for (const [ca, item] of corpseBlacklist.entries()) {
+    if (!item?.until || item.until <= now) {
+      corpseBlacklist.delete(ca);
+    }
+  }
+}
+
+function getCorpseBlacklistItem(ca) {
+  pruneCorpseBlacklist();
+  return corpseBlacklist.get(ca) || null;
+}
+
+function addToCorpseBlacklist(ca, reason) {
+  if (!ca) return;
+  corpseBlacklist.set(ca, {
+    reason,
+    until: Date.now() + CORPSE_BLACKLIST_MS
+  });
 }
 
 function computeDelta(token) {
@@ -80,6 +106,7 @@ function computeDelta(token) {
       volumeDeltaPct: 0,
       txnsDeltaPct: 0,
       liquidityDeltaPct: 0,
+      fdvDeltaPct: 0,
       buyPressureDelta: 0
     };
   }
@@ -93,6 +120,7 @@ function computeDelta(token) {
     volumeDeltaPct: prev.volume > 0 ? ((token.volume - prev.volume) / prev.volume) * 100 : 0,
     txnsDeltaPct: prev.txns > 0 ? ((token.txns - prev.txns) / prev.txns) * 100 : 0,
     liquidityDeltaPct: prev.liquidity > 0 ? ((token.liquidity - prev.liquidity) / prev.liquidity) * 100 : 0,
+    fdvDeltaPct: prev.fdv > 0 ? ((token.fdv - prev.fdv) / prev.fdv) * 100 : 0,
     buyPressureDelta: currBuyPressure - prevBuyPressure
   };
 }
@@ -328,6 +356,69 @@ function detectFalseBounce(token, delta, accumulation, distribution) {
   return { rejected, reasons };
 }
 
+function detectCorpse(token, delta) {
+  let score = 0;
+  const reasons = [];
+
+  const volumeToFdv = token.fdv > 0 ? token.volume / token.fdv : 999999;
+  const txnsToLiquidity = token.liquidity > 0 ? token.txns / token.liquidity : 999999;
+  const fdvToLiquidity = token.liquidity > 0 ? token.fdv / token.liquidity : 999999;
+  const isPumpAddress = String(token.ca || "").toLowerCase().endsWith("pump");
+
+  if (volumeToFdv > 8 && token.liquidity < 15000) {
+    score += 28;
+    reasons.push("Volume massively exceeds current FDV on thin structure");
+  }
+
+  if (token.txns > 1800 && token.liquidity < 9000) {
+    score += 24;
+    reasons.push("Corpse-like activity on very thin liquidity");
+  }
+
+  if (token.fdv < 25000 && token.volume > 200000) {
+    score += 22;
+    reasons.push("Very low FDV with oversized churn");
+  }
+
+  if (fdvToLiquidity < 3 && token.volume > 120000 && token.liquidity < 15000) {
+    score += 16;
+    reasons.push("Collapsed structure still farming flow");
+  }
+
+  if (delta.hasHistory) {
+    if (delta.priceDeltaPct < -12 && delta.liquidityDeltaPct < -6) {
+      score += 28;
+      reasons.push("Recent structural collapse detected");
+    }
+
+    if (delta.priceDeltaPct < -8 && delta.volumeDeltaPct >= 0 && delta.buyPressureDelta <= 0) {
+      score += 20;
+      reasons.push("Dead bounce / selling into residual activity");
+    }
+
+    if (delta.priceDeltaPct <= 0 && delta.txnsDeltaPct > 5 && delta.liquidityDeltaPct < 0) {
+      score += 16;
+      reasons.push("Activity persists while structure keeps decaying");
+    }
+
+    if (delta.fdvDeltaPct < -15 && delta.volumeDeltaPct > -5) {
+      score += 18;
+      reasons.push("FDV collapse not matched by recovery quality");
+    }
+  }
+
+  if (isPumpAddress && token.liquidity < 12000 && token.volume > 150000) {
+    score += 12;
+    reasons.push("Pump tail-risk on low liquidity after churn");
+  }
+
+  return {
+    score,
+    reasons,
+    isCorpse: score >= 45
+  };
+}
+
 function buildExceptionalOverride(token, accumulation, distribution, absorption) {
   let score = 0;
   const reasons = [];
@@ -354,7 +445,7 @@ function buildExceptionalOverride(token, accumulation, distribution, absorption)
   };
 }
 
-function buildStrategy(token, delta, accumulation, distribution, absorption, override) {
+function buildStrategy(token, delta, accumulation, distribution, absorption, override, corpse) {
   const volumeToLiquidity = token.liquidity > 0 ? token.volume / token.liquidity : 0;
   const buyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
 
@@ -377,8 +468,9 @@ function buildStrategy(token, delta, accumulation, distribution, absorption, ove
   expectedEdgePct += accumulation.score / 60;
   expectedEdgePct += absorption.score / 80;
   expectedEdgePct -= distribution.score / 90;
+  expectedEdgePct -= corpse.score / 50;
 
-  if (override.active) {
+  if (override.active && !corpse.isCorpse) {
     expectedEdgePct += 0.8;
     intendedHoldMs = 210000;
     takeProfitPct = 5.2;
@@ -387,7 +479,8 @@ function buildStrategy(token, delta, accumulation, distribution, absorption, ove
   } else if (
     delta.volumeDeltaPct > 20 &&
     delta.txnsDeltaPct > 15 &&
-    delta.buyPressureDelta > 0.08
+    delta.buyPressureDelta > 0.08 &&
+    !corpse.isCorpse
   ) {
     intendedHoldMs = 240000;
     takeProfitPct = 5.5;
@@ -482,6 +575,8 @@ export async function scanMarket() {
 }
 
 export async function analyzeToken(token) {
+  const blacklistItem = getCorpseBlacklistItem(token.ca);
+
   const delta = computeDelta(token);
   const rug = detectRug(token);
   const wallet = analyzeWallets(token);
@@ -490,9 +585,18 @@ export async function analyzeToken(token) {
   const accumulation = detectAccumulation(token, delta);
   const distribution = detectDistribution(token, delta);
   const absorption = detectAbsorption(token, delta);
+  const corpse = detectCorpse(token, delta);
   const exceptionalOverride = buildExceptionalOverride(token, accumulation, distribution, absorption);
   const falseBounce = detectFalseBounce(token, delta, accumulation, distribution);
-  const strategy = buildStrategy(token, delta, accumulation, distribution, absorption, exceptionalOverride);
+  const strategy = buildStrategy(
+    token,
+    delta,
+    accumulation,
+    distribution,
+    absorption,
+    exceptionalOverride,
+    corpse
+  );
 
   let score = 0;
   const reasons = [];
@@ -556,10 +660,21 @@ export async function analyzeToken(token) {
   score += Math.round(accumulation.score / 4);
   score += Math.round(absorption.score / 5);
   score -= Math.round(distribution.score / 4);
+  score -= Math.round(corpse.score / 3);
 
   if (exceptionalOverride.active) {
     score += 15;
     reasons.push(...exceptionalOverride.reasons);
+  }
+
+  if (corpse.isCorpse) {
+    reasons.push(...corpse.reasons);
+    addToCorpseBlacklist(token.ca, corpse.reasons[0] || "Corpse filter");
+  }
+
+  if (blacklistItem) {
+    score -= 100;
+    reasons.push(`Corpse blacklist active: ${blacklistItem.reason}`);
   }
 
   if (falseBounce.rejected) {
@@ -579,6 +694,7 @@ export async function analyzeToken(token) {
     accumulation,
     distribution,
     absorption,
+    corpse,
     exceptionalOverride,
     falseBounce,
     strategy,
@@ -612,6 +728,8 @@ export async function getBestTrade({ excludeCas = [] } = {}) {
     if (item.score < 85) return false;
     if (!item.delta.hasHistory) return false;
     if (item.falseBounce.rejected) return false;
+    if (item.corpse.isCorpse) return false;
+    if (getCorpseBlacklistItem(item.token.ca)) return false;
 
     const strictLowLiquidity = item.token.liquidity < 15000;
     if (strictLowLiquidity && !item.exceptionalOverride.active) return false;
