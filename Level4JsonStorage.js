@@ -1,7 +1,9 @@
-import fs from "fs";
-import fsp from "fs/promises";
-import path from "path";
-import crypto from "crypto";
+'use strict';
+
+const fs = require('fs');
+const fsp = require('fs/promises');
+const path = require('path');
+const crypto = require('crypto');
 
 class Level4JsonStorage {
   /**
@@ -14,8 +16,8 @@ class Level4JsonStorage {
    * @param {Console|Object} [options.logger=console]
    */
   constructor(options = {}) {
-    this.baseDir = options.baseDir || path.join(process.cwd(), "data", "level4");
-    this.namespace = options.namespace || "level4";
+    this.baseDir = options.baseDir || path.join(process.cwd(), 'data', 'level4');
+    this.namespace = options.namespace || 'level4';
     this.pretty = options.pretty !== false;
     this.backupLimit = Number.isInteger(options.backupLimit) ? options.backupLimit : 20;
     this.enableBackups = options.enableBackups !== false;
@@ -25,8 +27,8 @@ class Level4JsonStorage {
     this._ready = false;
 
     this.dataDir = path.join(this.baseDir, this.namespace);
-    this.backupDir = path.join(this.dataDir, "_backups");
-    this.tempDir = path.join(this.dataDir, "_tmp");
+    this.backupDir = path.join(this.dataDir, '_backups');
+    this.tempDir = path.join(this.dataDir, '_tmp');
   }
 
   async init() {
@@ -50,12 +52,12 @@ class Level4JsonStorage {
   }
 
   getTempFilePath(collection) {
-    const random = crypto.randomBytes(6).toString("hex");
+    const random = crypto.randomBytes(6).toString('hex');
     return path.join(this.tempDir, `${collection}.${Date.now()}.${random}.tmp`);
   }
 
   getBackupFilePath(collection) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     return path.join(this.backupDir, `${collection}.${stamp}.bak.json`);
   }
 
@@ -65,10 +67,10 @@ class Level4JsonStorage {
       namespace: this.namespace,
       updatedAt: new Date().toISOString(),
       meta: {
-        createdBy: "Level4JsonStorage",
-        ...meta
+        createdBy: 'Level4JsonStorage',
+        ...meta,
       },
-      data
+      data,
     };
   }
 
@@ -90,7 +92,7 @@ class Level4JsonStorage {
     const envelope = this.buildEnvelope(defaultData, {
       schema: meta.schema || collection,
       createdAt: new Date().toISOString(),
-      ...meta
+      ...meta,
     });
 
     await this.write(collection, envelope);
@@ -102,25 +104,25 @@ class Level4JsonStorage {
     const filePath = this.getCollectionPath(collection);
 
     try {
-      const raw = await fsp.readFile(filePath, "utf8");
+      const raw = await fsp.readFile(filePath, 'utf8');
       const parsed = JSON.parse(raw);
 
-      if (!parsed || typeof parsed !== "object") {
+      if (!parsed || typeof parsed !== 'object') {
         throw new Error(`Collection "${collection}" is not a valid object`);
       }
 
-      if (!Object.prototype.hasOwnProperty.call(parsed, "data")) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, 'data')) {
         throw new Error(`Collection "${collection}" missing "data" field`);
       }
 
       return parsed;
     } catch (error) {
-      if (error.code === "ENOENT") {
+      if (error.code === 'ENOENT') {
         if (fallbackEnvelope) return fallbackEnvelope;
         return null;
       }
 
-      this._safeLog("error", `[Level4JsonStorage] read() failed for "${collection}": ${error.message}`);
+      this._safeLog('error', `[Level4JsonStorage] read() failed for "${collection}": ${error.message}`);
 
       if (fallbackEnvelope) {
         return fallbackEnvelope;
@@ -131,8 +133,9 @@ class Level4JsonStorage {
   }
 
   async readData(collection, fallbackData = null, meta = {}) {
-    const fallbackEnvelope =
-      fallbackData === null ? null : this.buildEnvelope(fallbackData, meta);
+    const fallbackEnvelope = fallbackData === null
+      ? null
+      : this.buildEnvelope(fallbackData, meta);
 
     const envelope = await this.read(collection, fallbackEnvelope);
     return envelope ? envelope.data : null;
@@ -141,11 +144,7 @@ class Level4JsonStorage {
   async write(collection, envelope) {
     await this.ensureReady();
 
-    if (
-      !envelope ||
-      typeof envelope !== "object" ||
-      !Object.prototype.hasOwnProperty.call(envelope, "data")
-    ) {
+    if (!envelope || typeof envelope !== 'object' || !Object.prototype.hasOwnProperty.call(envelope, 'data')) {
       throw new Error(`write("${collection}") expects envelope object with "data" field`);
     }
 
@@ -158,7 +157,7 @@ class Level4JsonStorage {
         namespace: envelope.namespace || this.namespace,
         updatedAt: new Date().toISOString(),
         meta: envelope.meta || {},
-        data: envelope.data
+        data: envelope.data,
       };
 
       const content = this.pretty
@@ -171,7 +170,7 @@ class Level4JsonStorage {
         await this._createBackup(collection);
       }
 
-      await fsp.writeFile(tempPath, content, "utf8");
+      await fsp.writeFile(tempPath, content, 'utf8');
       await fsp.rename(tempPath, filePath);
 
       return payload;
@@ -184,11 +183,11 @@ class Level4JsonStorage {
   }
 
   async update(collection, updater, options = {}) {
-    if (typeof updater !== "function") {
+    if (typeof updater !== 'function') {
       throw new Error(`update("${collection}") requires updater function`);
     }
 
-    const fallbackData = Object.prototype.hasOwnProperty.call(options, "fallbackData")
+    const fallbackData = Object.prototype.hasOwnProperty.call(options, 'fallbackData')
       ? options.fallbackData
       : {};
 
@@ -203,18 +202,15 @@ class Level4JsonStorage {
       );
 
       const currentData = currentEnvelope ? currentEnvelope.data : fallbackData;
-      const nextData = await updater(
-        this._deepClone(currentData),
-        this._deepClone(currentEnvelope)
-      );
+      const nextData = await updater(this._deepClone(currentData), this._deepClone(currentEnvelope));
 
-      if (typeof nextData === "undefined") {
+      if (typeof nextData === 'undefined') {
         throw new Error(`update("${collection}") updater returned undefined`);
       }
 
       const nextEnvelope = this.buildEnvelope(nextData, {
         ...currentEnvelope?.meta,
-        ...meta
+        ...meta,
       });
 
       const filePath = this.getCollectionPath(collection);
@@ -229,7 +225,7 @@ class Level4JsonStorage {
         ? JSON.stringify(nextEnvelope, null, 2)
         : JSON.stringify(nextEnvelope);
 
-      await fsp.writeFile(tempPath, content, "utf8");
+      await fsp.writeFile(tempPath, content, 'utf8');
       await fsp.rename(tempPath, filePath);
 
       return nextEnvelope;
@@ -241,13 +237,13 @@ class Level4JsonStorage {
     return this._enqueueWrite(collection, async () => {
       const filePath = this.getCollectionPath(collection);
       try {
-        if (this.enableBackups && (await this.exists(collection))) {
+        if (this.enableBackups && await this.exists(collection)) {
           await this._createBackup(collection);
         }
         await fsp.unlink(filePath);
         return true;
       } catch (error) {
-        if (error.code === "ENOENT") return false;
+        if (error.code === 'ENOENT') return false;
         throw error;
       }
     });
@@ -258,8 +254,8 @@ class Level4JsonStorage {
     const entries = await fsp.readdir(this.dataDir, { withFileTypes: true });
 
     return entries
-      .filter(e => e.isFile() && e.name.endsWith(".json"))
-      .map(e => e.name.replace(/\.json$/i, ""))
+      .filter((e) => e.isFile() && e.name.endsWith('.json'))
+      .map((e) => e.name.replace(/\.json$/i, ''))
       .sort();
   }
 
@@ -274,16 +270,16 @@ class Level4JsonStorage {
         size: stat.size,
         createdAt: stat.birthtime?.toISOString?.() || null,
         updatedAt: stat.mtime?.toISOString?.() || null,
-        filePath
+        filePath,
       };
     } catch (error) {
-      if (error.code === "ENOENT") {
+      if (error.code === 'ENOENT') {
         return {
           exists: false,
           size: 0,
           createdAt: null,
           updatedAt: null,
-          filePath
+          filePath,
         };
       }
       throw error;
@@ -295,20 +291,20 @@ class Level4JsonStorage {
 
     const entries = await fsp.readdir(this.backupDir, { withFileTypes: true });
     const files = entries
-      .filter(e => e.isFile() && e.name.endsWith(".bak.json"))
-      .map(e => e.name);
+      .filter((e) => e.isFile() && e.name.endsWith('.bak.json'))
+      .map((e) => e.name);
 
     const grouped = new Map();
 
     for (const file of files) {
-      const firstDot = file.indexOf(".");
-      const collection = firstDot === -1 ? "unknown" : file.slice(0, firstDot);
+      const firstDot = file.indexOf('.');
+      const collection = firstDot === -1 ? 'unknown' : file.slice(0, firstDot);
 
       if (!grouped.has(collection)) grouped.set(collection, []);
       grouped.get(collection).push(file);
     }
 
-    for (const [, fileList] of grouped.entries()) {
+    for (const [collection, fileList] of grouped.entries()) {
       fileList.sort().reverse();
 
       const toDelete = fileList.slice(this.backupLimit);
@@ -317,7 +313,7 @@ class Level4JsonStorage {
         try {
           await fsp.unlink(fullPath);
         } catch (error) {
-          this._safeLog("warn", `[Level4JsonStorage] failed deleting old backup "${fullPath}": ${error.message}`);
+          this._safeLog('warn', `[Level4JsonStorage] failed deleting old backup "${fullPath}": ${error.message}`);
         }
       }
     }
@@ -336,12 +332,12 @@ class Level4JsonStorage {
       backupDir: this.backupDir,
       tempDir: this.tempDir,
       checkedAt: new Date().toISOString(),
-      writable: true
+      writable: true,
     };
 
     try {
       const tempProbe = path.join(this.tempDir, `healthcheck.${Date.now()}.tmp`);
-      await fsp.writeFile(tempProbe, "ok", "utf8");
+      await fsp.writeFile(tempProbe, 'ok', 'utf8');
       await fsp.unlink(tempProbe);
     } catch (error) {
       result.ok = false;
@@ -357,12 +353,12 @@ class Level4JsonStorage {
     const backupPath = this.getBackupFilePath(collection);
 
     try {
-      const raw = await fsp.readFile(filePath, "utf8");
-      await fsp.writeFile(backupPath, raw, "utf8");
+      const raw = await fsp.readFile(filePath, 'utf8');
+      await fsp.writeFile(backupPath, raw, 'utf8');
       await this.compactBackups();
     } catch (error) {
-      if (error.code !== "ENOENT") {
-        this._safeLog("warn", `[Level4JsonStorage] backup failed for "${collection}": ${error.message}`);
+      if (error.code !== 'ENOENT') {
+        this._safeLog('warn', `[Level4JsonStorage] backup failed for "${collection}": ${error.message}`);
       }
     }
   }
@@ -389,7 +385,7 @@ class Level4JsonStorage {
 
   _safeLog(method, message) {
     try {
-      if (this.logger && typeof this.logger[method] === "function") {
+      if (this.logger && typeof this.logger[method] === 'function') {
         this.logger[method](message);
       } else if (console[method]) {
         console[method](message);
@@ -402,4 +398,4 @@ class Level4JsonStorage {
   }
 }
 
-export default Level4JsonStorage;
+module.exports = Level4JsonStorage;
