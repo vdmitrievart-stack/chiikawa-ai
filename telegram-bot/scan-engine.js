@@ -2,6 +2,7 @@ const SEARCH_API = "https://api.dexscreener.com/latest/dex/search";
 const TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
 
 const tokenSnapshotStore = new Map();
+const SAFETY_MARGIN_PCT = 1.2;
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -61,7 +62,7 @@ function putSnapshot(token) {
 
 function isStableLike(symbol) {
   const s = String(symbol || "").toUpperCase();
-  return ["SOL", "USDC", "USDT", "PUMP", "JUP", "RAY", "BONK"].includes(s);
+  return ["SOL", "USDC", "USDT", "PUMP", "JUP", "RAY"].includes(s);
 }
 
 function computeDelta(token) {
@@ -242,10 +243,7 @@ function detectAccumulation(token, delta) {
     }
   }
 
-  return {
-    score,
-    reasons
-  };
+  return { score, reasons };
 }
 
 function detectDistribution(token, delta) {
@@ -271,10 +269,7 @@ function detectDistribution(token, delta) {
     }
   }
 
-  return {
-    score,
-    reasons
-  };
+  return { score, reasons };
 }
 
 function detectAbsorption(token, delta) {
@@ -296,10 +291,7 @@ function detectAbsorption(token, delta) {
     }
   }
 
-  return {
-    score,
-    reasons
-  };
+  return { score, reasons };
 }
 
 function detectFalseBounce(token, delta, accumulation, distribution) {
@@ -335,7 +327,7 @@ function buildExceptionalOverride(token, accumulation, distribution, absorption)
   let score = 0;
   const reasons = [];
 
-  if (token.liquidity < 12000) {
+  if (token.liquidity < 15000) {
     if (accumulation.score >= 45) {
       score += 22;
       reasons.push("Low-liquidity override: strong accumulation");
@@ -387,7 +379,11 @@ function buildStrategy(token, delta, accumulation, distribution, absorption, ove
     takeProfitPct = 5.2;
     stopLossPct = 2.6;
     reason = "EXCEPTIONAL_ACCUMULATION_OVERRIDE";
-  } else if (delta.volumeDeltaPct > 20 && delta.txnsDeltaPct > 15) {
+  } else if (
+    delta.volumeDeltaPct > 20 &&
+    delta.txnsDeltaPct > 15 &&
+    delta.buyPressureDelta > 0.08
+  ) {
     intendedHoldMs = 240000;
     takeProfitPct = 5.5;
     stopLossPct = 2.8;
@@ -442,21 +438,9 @@ export async function analyzeToken(token) {
   const accumulation = detectAccumulation(token, delta);
   const distribution = detectDistribution(token, delta);
   const absorption = detectAbsorption(token, delta);
-  const exceptionalOverride = buildExceptionalOverride(
-    token,
-    accumulation,
-    distribution,
-    absorption
-  );
+  const exceptionalOverride = buildExceptionalOverride(token, accumulation, distribution, absorption);
   const falseBounce = detectFalseBounce(token, delta, accumulation, distribution);
-  const strategy = buildStrategy(
-    token,
-    delta,
-    accumulation,
-    distribution,
-    absorption,
-    exceptionalOverride
-  );
+  const strategy = buildStrategy(token, delta, accumulation, distribution, absorption, exceptionalOverride);
 
   let score = 0;
   const reasons = [];
@@ -513,7 +497,7 @@ export async function analyzeToken(token) {
       reasons.push("Healthy price expansion");
     }
   } else {
-    score -= 12;
+    score -= 15;
     reasons.push("No historical delta yet");
   }
 
@@ -571,16 +555,19 @@ export async function getBestTrade({ excludeCas = [] } = {}) {
   });
 
   const tradable = analyzed.filter(item => {
-    if (item.score < 75) return false;
-    if (item.strategy.expectedEdgePct < 2.4) return false;
-    if (item.falseBounce.rejected) return false;
+    if (item.score < 85) return false;
     if (!item.delta.hasHistory) return false;
+    if (item.falseBounce.rejected) return false;
 
     const strictLowLiquidity = item.token.liquidity < 15000;
     if (strictLowLiquidity && !item.exceptionalOverride.active) return false;
 
-    if (item.delta.volumeDeltaPct < 5) return false;
-    if (item.delta.txnsDeltaPct < 4) return false;
+    if (item.delta.volumeDeltaPct <= 0) return false;
+    if (item.delta.txnsDeltaPct <= 0) return false;
+    if (item.delta.buyPressureDelta <= 0) return false;
+
+    if (item.strategy.reason === "BASE_SETUP") return false;
+    if (item.strategy.expectedEdgePct < 1.7 + SAFETY_MARGIN_PCT) return false;
     if (item.distribution.score > item.accumulation.score + 10) return false;
 
     return true;
