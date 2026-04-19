@@ -1,5 +1,7 @@
-let balance = 1; // 1 SOL старт
+let balance = 1; // 1 SOL
 let position = null;
+
+const MIN_RESERVE = 0.1; // SOL всегда оставляем
 
 export function getPortfolio() {
   return { balance, position };
@@ -8,7 +10,10 @@ export function getPortfolio() {
 export function enterTrade(token) {
   if (position) return null;
 
-  const amount = balance * 0.2;
+  const usable = balance - MIN_RESERVE;
+  if (usable <= 0) return null;
+
+  const amount = usable * 0.2;
 
   position = {
     token: token.name,
