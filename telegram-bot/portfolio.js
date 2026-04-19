@@ -5,7 +5,7 @@ const tradeHistory = [];
 const MIN_RESERVE_SOL = 0.1;
 const POSITION_SIZE_FRACTION = 0.2;
 
-// реалистичные торговые издержки для симуляции
+// Реалистичные торговые издержки для симуляции
 const ENTRY_FEE_PCT = 0.25;
 const EXIT_FEE_PCT = 0.25;
 const ENTRY_SLIPPAGE_PCT = 0.6;
@@ -24,6 +24,12 @@ function pctToFrac(pct) {
 function round(v, d = 8) {
   const p = 10 ** d;
   return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
+}
+
+export function resetPortfolio(startBalance = 1.0) {
+  balance = round(startBalance, 8);
+  position = null;
+  tradeHistory.length = 0;
 }
 
 export function getPortfolio() {
@@ -90,9 +96,7 @@ export function enterTrade({
 
   if (totalDebit > balance) return null;
 
-  const entryEffectivePrice =
-    token.price * (1 + pctToFrac(ENTRY_SLIPPAGE_PCT));
-
+  const entryEffectivePrice = token.price * (1 + pctToFrac(ENTRY_SLIPPAGE_PCT));
   const tokenAmount = amountSol / entryEffectivePrice;
 
   position = {
@@ -112,7 +116,8 @@ export function enterTrade({
     signalScore: safeNum(signalScore, 0),
     signalContext: signalContext || {},
     highWaterMarkPrice: round(token.price, 12),
-    lowWaterMarkPrice: round(token.price, 12)
+    lowWaterMarkPrice: round(token.price, 12),
+    lastMarketPrice: round(token.price, 12)
   };
 
   balance = round(balance - totalDebit, 8);
@@ -131,6 +136,7 @@ export function updatePositionMarket(currentPrice) {
 
   position.highWaterMarkPrice = Math.max(position.highWaterMarkPrice, px);
   position.lowWaterMarkPrice = Math.min(position.lowWaterMarkPrice, px);
+  position.lastMarketPrice = round(px, 12);
 
   return markToMarket(px);
 }
@@ -178,6 +184,7 @@ export function shouldExitPosition(currentPrice) {
 
   const ageMs = mtm.ageMs;
   const netPnlPct = mtm.netPnlPct;
+  const grossPnlPct = mtm.grossPnlPct;
 
   if (netPnlPct <= -Math.abs(position.stopLossPct)) {
     return { shouldExit: true, reason: "STOP_LOSS", mtm };
@@ -187,11 +194,15 @@ export function shouldExitPosition(currentPrice) {
     return { shouldExit: true, reason: "TAKE_PROFIT", mtm };
   }
 
-  // trailing protection after partial success
-  if (
-    position.highWaterMarkPrice > position.entryReferencePrice &&
-    netPnlPct > 1.0
-  ) {
+  if (ageMs >= 60000 && netPnlPct < -1.8 && grossPnlPct <= 0.2) {
+    return { shouldExit: true, reason: "EARLY_ABORT_WEAK", mtm };
+  }
+
+  if (ageMs >= 120000 && netPnlPct < -1.0 && grossPnlPct < 0.5) {
+    return { shouldExit: true, reason: "EARLY_ABORT_FLAT", mtm };
+  }
+
+  if (position.highWaterMarkPrice > position.entryReferencePrice && netPnlPct > 1.0) {
     const retreatFromHighPct =
       ((position.highWaterMarkPrice - currentPrice) / position.highWaterMarkPrice) * 100;
 
