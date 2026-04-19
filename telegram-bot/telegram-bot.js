@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
+import * as XLSX from "xlsx";
+
 import { getBestTrade, getLatestTokenPrice } from "./scan-engine.js";
 import {
   enterTrade,
@@ -34,6 +36,7 @@ const bot = new TelegramBot(TOKEN, { polling: false });
 let intervalId = null;
 let autoStopId = null;
 let activeChatId = null;
+let activeChatUserId = null;
 const recentlyTraded = new Map();
 
 let runState = {
@@ -55,6 +58,7 @@ const I18N = {
     scan: "🔎 Scan",
     exportCsv: "📈 Export CSV",
     exportJson: "📦 Export JSON",
+    exportXlsx: "📊 Export XLSX",
     language: "🌍 Language",
     started: "🚀 Starting 4h simulation from 1 SOL",
     stopped: "🛑 Bot stopped",
@@ -142,6 +146,7 @@ const I18N = {
     scan: "🔎 Скан",
     exportCsv: "📈 Экспорт CSV",
     exportJson: "📦 Экспорт JSON",
+    exportXlsx: "📊 Экспорт XLSX",
     language: "🌍 Язык",
     started: "🚀 Запускаю 4-часовую симуляцию с 1 SOL",
     stopped: "🛑 Бот остановлен",
@@ -229,6 +234,7 @@ const I18N = {
     scan: "🔎 Escanear",
     exportCsv: "📈 Exportar CSV",
     exportJson: "📦 Exportar JSON",
+    exportXlsx: "📊 Exportar XLSX",
     language: "🌍 Idioma",
     started: "🚀 Iniciando simulación de 4h con 1 SOL",
     stopped: "🛑 Bot detenido",
@@ -316,6 +322,7 @@ const I18N = {
     scan: "🔎 Scan",
     exportCsv: "📈 CSV exportieren",
     exportJson: "📦 JSON exportieren",
+    exportXlsx: "📊 XLSX exportieren",
     language: "🌍 Sprache",
     started: "🚀 Starte 4h-Simulation mit 1 SOL",
     stopped: "🛑 Bot gestoppt",
@@ -403,6 +410,7 @@ const I18N = {
     scan: "🔎 Scan",
     exportCsv: "📈 Export CSV",
     exportJson: "📦 Export JSON",
+    exportXlsx: "📊 Export XLSX",
     language: "🌍 Langue",
     started: "🚀 Lancement de la simulation 4h avec 1 SOL",
     stopped: "🛑 Bot arrêté",
@@ -490,6 +498,7 @@ const I18N = {
     scan: "🔎 Scan",
     exportCsv: "📈 Exportar CSV",
     exportJson: "📦 Exportar JSON",
+    exportXlsx: "📊 Exportar XLSX",
     language: "🌍 Idioma",
     started: "🚀 Iniciando simulação de 4h com 1 SOL",
     stopped: "🛑 Bot parado",
@@ -577,6 +586,7 @@ const I18N = {
     scan: "🔎 Tara",
     exportCsv: "📈 CSV Dışa Aktar",
     exportJson: "📦 JSON Dışa Aktar",
+    exportXlsx: "📊 XLSX Dışa Aktar",
     language: "🌍 Dil",
     started: "🚀 1 SOL ile 4 saatlik simülasyon başlatılıyor",
     stopped: "🛑 Bot durduruldu",
@@ -664,6 +674,7 @@ const I18N = {
     scan: "🔎 فحص",
     exportCsv: "📈 تصدير CSV",
     exportJson: "📦 تصدير JSON",
+    exportXlsx: "📊 تصدير XLSX",
     language: "🌍 اللغة",
     started: "🚀 بدء محاكاة 4 ساعات برصيد 1 SOL",
     stopped: "🛑 تم إيقاف البوت",
@@ -749,8 +760,8 @@ function getLang(userId) {
 }
 
 function setLang(userId, lang) {
-  const cur = userSettings.get(userId) || {};
-  userSettings.set(userId, { ...cur, lang });
+  const current = userSettings.get(userId) || {};
+  userSettings.set(userId, { ...current, lang });
 }
 
 function t(userId, key) {
@@ -797,6 +808,7 @@ function menu(userId) {
         { text: t(userId, "exportJson"), callback_data: "exportstats" }
       ],
       [
+        { text: t(userId, "exportXlsx"), callback_data: "exportxlsx" },
         { text: t(userId, "language"), callback_data: "langmenu" }
       ]
     ]
@@ -849,6 +861,14 @@ function buildRunStats() {
   };
 }
 
+function escapeCsv(value) {
+  const s = String(value ?? "");
+  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
 function statsToCsv(stats) {
   const header = [
     "runId",
@@ -895,12 +915,50 @@ function statsToCsv(stats) {
   return [header.join(","), ...rows.map(r => r.join(","))].join("\n");
 }
 
-function escapeCsv(value) {
-  const s = String(value ?? "");
-  if (s.includes(",") || s.includes('"') || s.includes("\n")) {
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-  return s;
+function statsToXlsxWorkbook(stats) {
+  const summaryRows = [
+    { metric: "runId", value: stats.runId || "" },
+    { metric: "startedAt", value: stats.startedAt || "" },
+    { metric: "stoppedAt", value: stats.stoppedAt || "" },
+    { metric: "balance", value: stats.balance ?? "" },
+    { metric: "totalTrades", value: stats.totalTrades ?? 0 },
+    { metric: "wins", value: stats.wins ?? 0 },
+    { metric: "losses", value: stats.losses ?? 0 },
+    { metric: "winRatePct", value: stats.winRatePct ?? 0 },
+    { metric: "avgNetPnlPct", value: stats.avgNetPnlPct ?? 0 }
+  ];
+
+  const tradeRows = (stats.tradeHistory || []).map(t => ({
+    runId: stats.runId || "",
+    openedAt: t.openedAt,
+    closedAt: t.closedAt,
+    token: t.token,
+    ca: t.ca,
+    entryReferencePrice: t.entryReferencePrice,
+    entryEffectivePrice: t.entryEffectivePrice,
+    exitReferencePrice: t.exitReferencePrice,
+    amountSol: t.amountSol,
+    entryCostsSol: t.entryCosts?.totalSol ?? "",
+    exitCostsSol: t.exitCosts?.totalSol ?? "",
+    grossValueSol: t.grossValueSol ?? "",
+    netValueSol: t.netValueSol ?? "",
+    netPnlPct: t.netPnlPct ?? "",
+    netPnlSol: t.netPnlSol ?? "",
+    reason: t.reason,
+    signalScore: t.signalScore,
+    expectedEdgePct: t.expectedEdgePct,
+    setup: t.signalContext?.setup || t.signalContext?.reason || "",
+    balanceAfter: t.balance
+  }));
+
+  const wb = XLSX.utils.book_new();
+  const summaryWs = XLSX.utils.json_to_sheet(summaryRows);
+  const tradesWs = XLSX.utils.json_to_sheet(tradeRows);
+
+  XLSX.utils.book_append_sheet(wb, summaryWs, "summary");
+  XLSX.utils.book_append_sheet(wb, tradesWs, "trades");
+
+  return wb;
 }
 
 async function exportJson(chatId) {
@@ -920,6 +978,25 @@ async function exportCsv(chatId) {
   await bot.sendDocument(chatId, filePath, {}, {
     filename: path.basename(filePath),
     contentType: "text/csv"
+  });
+}
+
+async function exportXlsx(chatId) {
+  const stats = buildRunStats();
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${stats.runId || Date.now()}.xlsx`);
+  const wb = statsToXlsxWorkbook(stats);
+  XLSX.writeFile(wb, filePath);
+  await bot.sendDocument(chatId, filePath, {}, {
+    filename: path.basename(filePath),
+    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+}
+
+async function send(chatId, text, opts = {}) {
+  return bot.sendMessage(chatId, text, {
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...opts
   });
 }
 
@@ -1125,9 +1202,10 @@ async function runCycle(chatId, userId) {
   }
 }
 
-function startAuto(chatId, hours = AUTO_HOURS_DEFAULT) {
+function startAuto(chatId, userId, hours = AUTO_HOURS_DEFAULT) {
   stopAutoInternal();
   activeChatId = chatId;
+  activeChatUserId = userId;
   recentlyTraded.clear();
   resetPortfolio(1.0);
 
@@ -1139,30 +1217,30 @@ function startAuto(chatId, hours = AUTO_HOURS_DEFAULT) {
   };
 
   intervalId = setInterval(() => {
-    runCycle(chatId, activeChatIdUserId ?? 0);
+    runCycle(chatId, userId);
   }, AUTO_INTERVAL_MS);
 
   autoStopId = setTimeout(async () => {
     stopAutoInternal();
     if (activeChatId) {
-      await send(activeChatId, t(activeChatIdUserId ?? 0, "autoStopped"));
+      await send(activeChatId, t(activeChatUserId || userId, "autoStopped"), {
+        reply_markup: menu(activeChatUserId || userId)
+      });
     }
   }, hours * 60 * 60 * 1000);
 }
-
-let activeChatIdUserId = null;
 
 async function handleMessage(msg) {
   const chatId = msg.chat.id;
   const userId = msg.from?.id || chatId;
   const text = String(msg.text || "").trim();
 
-  activeChatIdUserId = userId;
+  activeChatUserId = userId;
 
   if (text === "/start") {
     await send(
       chatId,
-      `${t(userId, "ready")} ${t(userId, "commands")}: /run4h /stop /status /scan /exportcsv /exportstats /language`,
+      `${t(userId, "ready")} ${t(userId, "commands")}: /run4h /stop /status /scan /exportcsv /exportstats /exportxlsx /language`,
       { reply_markup: menu(userId) }
     );
     return;
@@ -1170,7 +1248,7 @@ async function handleMessage(msg) {
 
   if (text === "/run4h") {
     await send(chatId, t(userId, "started"), { reply_markup: menu(userId) });
-    startAuto(chatId, 4);
+    startAuto(chatId, userId, 4);
     return;
   }
 
@@ -1195,7 +1273,8 @@ async function handleMessage(msg) {
 <b>${t(userId, "autoMode")}:</b> ${intervalId ? "ON" : "OFF"}
 <b>${t(userId, "tradesClosed")}:</b> ${pf.tradeHistory.length}
 <b>${t(userId, "cooldownList")}:</b> ${recentlyTraded.size}
-<b>${t(userId, "runId")}:</b> ${runState.runId || "-"}`,
+<b>${t(userId, "runId")}:</b> ${runState.runId || "-"}
+<b>${t(userId, "localeLabel")}:</b> ${getLang(userId).toUpperCase()}`,
       { reply_markup: menu(userId) }
     );
     return;
@@ -1216,6 +1295,11 @@ async function handleMessage(msg) {
     return;
   }
 
+  if (text === "/exportxlsx") {
+    await exportXlsx(chatId);
+    return;
+  }
+
   if (text === "/language") {
     await send(chatId, t(userId, "chooseLanguage"), {
       reply_markup: languageMenu()
@@ -1228,7 +1312,7 @@ async function handleCallback(query) {
   const userId = query.from?.id || chatId;
   const data = query.data;
 
-  activeChatIdUserId = userId;
+  activeChatUserId = userId;
 
   try {
     await bot.answerCallbackQuery(query.id);
@@ -1236,7 +1320,7 @@ async function handleCallback(query) {
 
   if (data === "run4h") {
     await send(chatId, t(userId, "started"), { reply_markup: menu(userId) });
-    startAuto(chatId, 4);
+    startAuto(chatId, userId, 4);
     return;
   }
 
@@ -1261,7 +1345,8 @@ async function handleCallback(query) {
 <b>${t(userId, "autoMode")}:</b> ${intervalId ? "ON" : "OFF"}
 <b>${t(userId, "tradesClosed")}:</b> ${pf.tradeHistory.length}
 <b>${t(userId, "cooldownList")}:</b> ${recentlyTraded.size}
-<b>${t(userId, "runId")}:</b> ${runState.runId || "-"}`,
+<b>${t(userId, "runId")}:</b> ${runState.runId || "-"}
+<b>${t(userId, "localeLabel")}:</b> ${getLang(userId).toUpperCase()}`,
       { reply_markup: menu(userId) }
     );
     return;
@@ -1279,6 +1364,11 @@ async function handleCallback(query) {
 
   if (data === "exportcsv") {
     await exportCsv(chatId);
+    return;
+  }
+
+  if (data === "exportxlsx") {
+    await exportXlsx(chatId);
     return;
   }
 
