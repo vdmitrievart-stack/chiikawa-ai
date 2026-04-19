@@ -1,8 +1,14 @@
 export function detectBots(token) {
-  const botActivity = Math.random() * 100;
+  let botScore = 0;
+
+  // много txns но мало volume → боты
+  if (token.txns > 500 && token.volume < 20000) botScore += 40;
+
+  // резкий всплеск
+  if (token.volume > 200000 && token.txns < 100) botScore += 30;
 
   return {
-    botActivity,
-    isBotted: botActivity > 70
+    botActivity: botScore,
+    isBotted: botScore > 50
   };
 }
