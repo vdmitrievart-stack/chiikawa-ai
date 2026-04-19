@@ -59,6 +59,38 @@ function putSnapshot(token) {
   });
 }
 
+function isStableLike(symbol) {
+  const s = String(symbol || "").toUpperCase();
+  return ["SOL", "USDC", "USDT", "PUMP", "JUP", "RAY", "BONK"].includes(s);
+}
+
+function computeDelta(token) {
+  const prev = getSnapshot(token.ca);
+
+  if (!prev) {
+    return {
+      hasHistory: false,
+      priceDeltaPct: 0,
+      volumeDeltaPct: 0,
+      txnsDeltaPct: 0,
+      liquidityDeltaPct: 0,
+      buyPressureDelta: 0
+    };
+  }
+
+  const prevBuyPressure = prev.sells > 0 ? prev.buys / prev.sells : prev.buys;
+  const currBuyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
+
+  return {
+    hasHistory: true,
+    priceDeltaPct: prev.price > 0 ? ((token.price - prev.price) / prev.price) * 100 : 0,
+    volumeDeltaPct: prev.volume > 0 ? ((token.volume - prev.volume) / prev.volume) * 100 : 0,
+    txnsDeltaPct: prev.txns > 0 ? ((token.txns - prev.txns) / prev.txns) * 100 : 0,
+    liquidityDeltaPct: prev.liquidity > 0 ? ((token.liquidity - prev.liquidity) / prev.liquidity) * 100 : 0,
+    buyPressureDelta: currBuyPressure - prevBuyPressure
+  };
+}
+
 export function detectRug(token) {
   let risk = 0;
   const reasons = [];
@@ -183,87 +215,94 @@ export function getSentiment(token) {
   };
 }
 
-function buildStrategy(token, delta) {
-  const volumeToLiquidity = token.liquidity > 0 ? token.volume / token.liquidity : 0;
-  const buyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
+function detectAccumulation(token, delta) {
+  let score = 0;
+  const reasons = [];
 
-  let expectedEdgePct = 0;
-  let intendedHoldMs = 180000;
-  let takeProfitPct = 4.5;
-  let stopLossPct = 2.4;
-  let reason = "BASE_SETUP";
-
-  if (volumeToLiquidity > 8) {
-    expectedEdgePct += 0.8;
-  }
-  if (volumeToLiquidity > 15) {
-    expectedEdgePct += 0.8;
-  }
-  if (buyPressure > 1.15) {
-    expectedEdgePct += 0.8;
-  }
-  if (buyPressure > 1.35) {
-    expectedEdgePct += 0.8;
-  }
-
-  if (delta.volumeDeltaPct > 12) {
-    expectedEdgePct += 1.0;
-  }
-  if (delta.txnsDeltaPct > 10) {
-    expectedEdgePct += 0.8;
-  }
-  if (delta.priceDeltaPct > 1.5 && delta.priceDeltaPct < 12) {
-    expectedEdgePct += 0.8;
-  }
-
-  if (delta.liquidityDeltaPct >= 0) {
-    expectedEdgePct += 0.4;
-  }
-
-  if (delta.volumeDeltaPct > 20 && delta.txnsDeltaPct > 15) {
-    takeProfitPct = 5.5;
-    stopLossPct = 2.8;
-    intendedHoldMs = 240000;
-    reason = "MOMENTUM_EXPANSION";
+  if (delta.hasHistory) {
+    if (delta.volumeDeltaPct > 10) {
+      score += 20;
+      reasons.push("Volume expanding");
+    }
+    if (delta.txnsDeltaPct > 8) {
+      score += 18;
+      reasons.push("Participation expanding");
+    }
+    if (delta.buyPressureDelta > 0.08) {
+      score += 18;
+      reasons.push("Buy pressure improving");
+    }
+    if (delta.liquidityDeltaPct >= 0) {
+      score += 12;
+      reasons.push("Liquidity holding or improving");
+    }
+    if (delta.priceDeltaPct > 0.8 && delta.priceDeltaPct < 10) {
+      score += 14;
+      reasons.push("Healthy price lift from base");
+    }
   }
 
   return {
-    expectedEdgePct: round(expectedEdgePct, 2),
-    intendedHoldMs,
-    takeProfitPct,
-    stopLossPct,
-    reason
+    score,
+    reasons
   };
 }
 
-function computeDelta(token) {
-  const prev = getSnapshot(token.ca);
+function detectDistribution(token, delta) {
+  let score = 0;
+  const reasons = [];
 
-  if (!prev) {
-    return {
-      hasHistory: false,
-      priceDeltaPct: 0,
-      volumeDeltaPct: 0,
-      txnsDeltaPct: 0,
-      liquidityDeltaPct: 0,
-      buyPressureDelta: 0
-    };
+  if (delta.hasHistory) {
+    if (delta.priceDeltaPct <= 0 && delta.volumeDeltaPct > 8) {
+      score += 20;
+      reasons.push("Heavy volume without price response");
+    }
+    if (delta.buyPressureDelta < -0.08) {
+      score += 18;
+      reasons.push("Buy pressure deteriorating");
+    }
+    if (delta.liquidityDeltaPct < -3) {
+      score += 18;
+      reasons.push("Liquidity deteriorating");
+    }
+    if (delta.priceDeltaPct > 0 && delta.txnsDeltaPct < 2) {
+      score += 12;
+      reasons.push("Weak bounce with poor participation");
+    }
   }
 
-  const prevBuyPressure = prev.sells > 0 ? prev.buys / prev.sells : prev.buys;
-  const currBuyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
-
   return {
-    hasHistory: true,
-    priceDeltaPct: prev.price > 0 ? ((token.price - prev.price) / prev.price) * 100 : 0,
-    volumeDeltaPct: prev.volume > 0 ? ((token.volume - prev.volume) / prev.volume) * 100 : 0,
-    txnsDeltaPct: prev.txns > 0 ? ((token.txns - prev.txns) / prev.txns) * 100 : 0,
-    liquidityDeltaPct: prev.liquidity > 0 ? ((token.liquidity - prev.liquidity) / prev.liquidity) * 100 : 0,
-    buyPressureDelta: currBuyPressure - prevBuyPressure
+    score,
+    reasons
   };
 }
 
-function detectFalseBounce(token, delta) {
+function detectAbsorption(token, delta) {
+  let score = 0;
+  const reasons = [];
+
+  if (delta.hasHistory) {
+    if (delta.volumeDeltaPct > 10 && delta.priceDeltaPct > -1.5) {
+      score += 18;
+      reasons.push("Selling appears absorbed");
+    }
+    if (delta.txnsDeltaPct > 6 && delta.buyPressureDelta >= 0) {
+      score += 16;
+      reasons.push("Flow strengthening without breakdown");
+    }
+    if (delta.liquidityDeltaPct >= -1) {
+      score += 10;
+      reasons.push("Liquidity not collapsing during activity");
+    }
+  }
+
+  return {
+    score,
+    reasons
+  };
+}
+
+function detectFalseBounce(token, delta, accumulation, distribution) {
   const reasons = [];
   let rejected = false;
 
@@ -282,23 +321,93 @@ function detectFalseBounce(token, delta) {
       rejected = true;
       reasons.push("Bounce while buy pressure weakens");
     }
+
+    if (distribution.score > accumulation.score + 8) {
+      rejected = true;
+      reasons.push("Distribution dominates accumulation");
+    }
   }
 
   return { rejected, reasons };
 }
 
-function isEligibleBaseToken(token) {
-  if (!token.ca || !token.name || token.price <= 0) return false;
+function buildExceptionalOverride(token, accumulation, distribution, absorption) {
+  let score = 0;
+  const reasons = [];
 
-  const upper = token.name.toUpperCase();
-  if (upper === "SOL" || upper === "USDC" || upper === "USDT" || upper === "PUMP") {
-    return false;
+  if (token.liquidity < 12000) {
+    if (accumulation.score >= 45) {
+      score += 22;
+      reasons.push("Low-liquidity override: strong accumulation");
+    }
+    if (absorption.score >= 28) {
+      score += 18;
+      reasons.push("Low-liquidity override: strong absorption");
+    }
+    if (distribution.score <= 10) {
+      score += 10;
+      reasons.push("Low-liquidity override: weak distribution");
+    }
   }
 
-  if (token.liquidity < 8000) return false;
+  return {
+    score,
+    reasons,
+    active: score >= 35
+  };
+}
+
+function buildStrategy(token, delta, accumulation, distribution, absorption, override) {
+  const volumeToLiquidity = token.liquidity > 0 ? token.volume / token.liquidity : 0;
+  const buyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
+
+  let expectedEdgePct = 0;
+  let intendedHoldMs = 180000;
+  let takeProfitPct = 4.5;
+  let stopLossPct = 2.4;
+  let reason = "BASE_SETUP";
+
+  if (volumeToLiquidity > 8) expectedEdgePct += 0.8;
+  if (volumeToLiquidity > 15) expectedEdgePct += 0.8;
+  if (buyPressure > 1.15) expectedEdgePct += 0.8;
+  if (buyPressure > 1.35) expectedEdgePct += 0.8;
+
+  if (delta.volumeDeltaPct > 12) expectedEdgePct += 1.0;
+  if (delta.txnsDeltaPct > 10) expectedEdgePct += 0.8;
+  if (delta.priceDeltaPct > 1.5 && delta.priceDeltaPct < 12) expectedEdgePct += 0.8;
+  if (delta.liquidityDeltaPct >= 0) expectedEdgePct += 0.4;
+
+  expectedEdgePct += accumulation.score / 60;
+  expectedEdgePct += absorption.score / 80;
+  expectedEdgePct -= distribution.score / 90;
+
+  if (override.active) {
+    expectedEdgePct += 0.8;
+    intendedHoldMs = 210000;
+    takeProfitPct = 5.2;
+    stopLossPct = 2.6;
+    reason = "EXCEPTIONAL_ACCUMULATION_OVERRIDE";
+  } else if (delta.volumeDeltaPct > 20 && delta.txnsDeltaPct > 15) {
+    intendedHoldMs = 240000;
+    takeProfitPct = 5.5;
+    stopLossPct = 2.8;
+    reason = "MOMENTUM_EXPANSION";
+  }
+
+  return {
+    expectedEdgePct: round(expectedEdgePct, 2),
+    intendedHoldMs,
+    takeProfitPct,
+    stopLossPct,
+    reason
+  };
+}
+
+function passesBaseSafety(token) {
+  if (!token.ca || !token.name || token.price <= 0) return false;
+  if (isStableLike(token.name)) return false;
   if (token.volume < 25000) return false;
   if (token.txns < 120) return false;
-
   return true;
 }
 
@@ -312,7 +421,7 @@ export async function scanMarket() {
 
     for (const pair of pairs) {
       const token = normalizePair(pair);
-      if (!isEligibleBaseToken(token)) continue;
+      if (!passesBaseSafety(token)) continue;
 
       const prev = dedup.get(token.ca);
       if (!prev || token.volume > prev.volume) {
@@ -330,8 +439,24 @@ export async function analyzeToken(token) {
   const wallet = analyzeWallets(token);
   const bots = detectBots(token);
   const sentiment = getSentiment(token);
-  const falseBounce = detectFalseBounce(token, delta);
-  const strategy = buildStrategy(token, delta);
+  const accumulation = detectAccumulation(token, delta);
+  const distribution = detectDistribution(token, delta);
+  const absorption = detectAbsorption(token, delta);
+  const exceptionalOverride = buildExceptionalOverride(
+    token,
+    accumulation,
+    distribution,
+    absorption
+  );
+  const falseBounce = detectFalseBounce(token, delta, accumulation, distribution);
+  const strategy = buildStrategy(
+    token,
+    delta,
+    accumulation,
+    distribution,
+    absorption,
+    exceptionalOverride
+  );
 
   let score = 0;
   const reasons = [];
@@ -392,6 +517,15 @@ export async function analyzeToken(token) {
     reasons.push("No historical delta yet");
   }
 
+  score += Math.round(accumulation.score / 4);
+  score += Math.round(absorption.score / 5);
+  score -= Math.round(distribution.score / 4);
+
+  if (exceptionalOverride.active) {
+    score += 15;
+    reasons.push(...exceptionalOverride.reasons);
+  }
+
   if (falseBounce.rejected) {
     score -= 30;
     reasons.push(...falseBounce.reasons);
@@ -404,6 +538,10 @@ export async function analyzeToken(token) {
     bots,
     sentiment,
     delta,
+    accumulation,
+    distribution,
+    absorption,
+    exceptionalOverride,
     falseBounce,
     strategy,
     score,
@@ -437,8 +575,14 @@ export async function getBestTrade({ excludeCas = [] } = {}) {
     if (item.strategy.expectedEdgePct < 2.4) return false;
     if (item.falseBounce.rejected) return false;
     if (!item.delta.hasHistory) return false;
+
+    const strictLowLiquidity = item.token.liquidity < 15000;
+    if (strictLowLiquidity && !item.exceptionalOverride.active) return false;
+
     if (item.delta.volumeDeltaPct < 5) return false;
     if (item.delta.txnsDeltaPct < 4) return false;
+    if (item.distribution.score > item.accumulation.score + 10) return false;
+
     return true;
   });
 
