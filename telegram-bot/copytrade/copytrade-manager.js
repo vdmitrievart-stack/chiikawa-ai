@@ -1,12 +1,14 @@
-import GMGNLeaderIntelService from "./gmgn-leader-intel-service.js";
+import GMGNLeaderIntelService from "../gmgn/gmgn-leader-intel-service.js";
 
 export default class CopytradeManager {
   constructor(options = {}) {
     this.logger = options.logger || console;
-    this.gmgnLeaderIntel = options.gmgnLeaderIntel || new GMGNLeaderIntelService({
-      client: options.gmgnClient,
-      logger: this.logger
-    });
+    this.gmgnLeaderIntel =
+      options.gmgnLeaderIntel ||
+      new GMGNLeaderIntelService({
+        client: options.gmgnClient,
+        logger: this.logger
+      });
     this.copytradingService = options.copytradingService || null;
     this.walletRegistry = options.walletRegistry || null;
     this.cooldowns = new Map();
