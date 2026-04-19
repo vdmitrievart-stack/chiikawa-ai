@@ -10,6 +10,13 @@ import {
   handleTradingCommand,
   simulateTradeFlow
 } from "./trading-admin.js";
+import {
+  scanTokenCandidate,
+  buildScanProposal,
+  dryRunEntryFromScan,
+  formatScanForTelegram,
+  buildCompactScanSummary
+} from "./scan-engine.js";
 
 const TOKEN =
   process.env.BOT_TOKEN ||
@@ -81,6 +88,8 @@ if (!TWITTER_BEARER_TOKEN) {
 const bot = new TelegramBot(TOKEN, { polling: false });
 const userSettings = new Map();
 const authorCache = new Map();
+const userFlows = new Map();
+const scanStore = new Map();
 
 const xState = {
   started: false,
@@ -121,7 +130,14 @@ const I18N = {
     langSet: "🌍 Language set",
     noOpenTrades: "No open trades",
     stumbled: "Chiikawa stumbled a little... 🥺",
-    entryStarted: "🚀 Test trade launched"
+    entryStarted: "🚀 Test trade launched",
+    enterCA: "🧪 Send CA for Level 6 scan",
+    awaitingCA: "⌛ Waiting for CA. Send contract address in next message.",
+    scanStarted: "🔎 Level 6 scan started",
+    scanReady: "✅ Scan ready",
+    noScan: "No scan found. Send a CA first.",
+    dryRunRejected: "⛔ Dry-run entry rejected",
+    dryRunAccepted: "✅ Dry-run entry accepted"
   },
   ru: {
     botAlive: "🚀 Бот жив",
@@ -148,7 +164,14 @@ const I18N = {
     langSet: "🌍 Язык установлен",
     noOpenTrades: "Открытых сделок нет",
     stumbled: "Chiikawa немного споткнулся... 🥺",
-    entryStarted: "🚀 Тестовая сделка запущена"
+    entryStarted: "🚀 Тестовая сделка запущена",
+    enterCA: "🧪 Отправь CA для скана Level 6",
+    awaitingCA: "⌛ Жду CA. Отправь контракт следующим сообщением.",
+    scanStarted: "🔎 Level 6 скан запущен",
+    scanReady: "✅ Скан готов",
+    noScan: "Нет данных скана. Сначала отправь CA.",
+    dryRunRejected: "⛔ Dry-run вход отклонён",
+    dryRunAccepted: "✅ Dry-run вход одобрен"
   }
 };
 
@@ -220,6 +243,18 @@ function setUserLang(userId, lang) {
 function t(userId, key) {
   const lang = getUserLang(userId);
   return (I18N[lang] && I18N[lang][key]) || I18N.ru[key] || key;
+}
+
+function setUserFlow(userId, flow) {
+  userFlows.set(userId, flow);
+}
+
+function clearUserFlow(userId) {
+  userFlows.delete(userId);
+}
+
+function getUserFlow(userId) {
+  return userFlows.get(userId) || null;
 }
 
 function pickNaturalGif() {
@@ -380,6 +415,10 @@ function buildMenuKeyboard() {
         { text: "🧠 Level 6", callback_data: "ui:l6" }
       ],
       [
+        { text: "🔎 Scan CA", callback_data: "scan:prompt" },
+        { text: "📄 Last Scan", callback_data: "scan:last" }
+      ],
+      [
         {
           text: runtime.enabled ? "⛔ Trading OFF" : "✅ Trading ON",
           callback_data: "cmd:toggle_trading"
@@ -406,6 +445,25 @@ function buildLanguageKeyboard() {
     inline_keyboard: [
       [{ text: "English", callback_data: "lang:en" }],
       [{ text: "Русский", callback_data: "lang:ru" }]
+    ]
+  };
+}
+
+function buildScanKeyboard(scanId) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "📄 Proposal", callback_data: `scan:proposal:${scanId}` },
+        { text: "🧠 Decision", callback_data: `scan:decision:${scanId}` }
+      ],
+      [
+        { text: "⚠️ Risks", callback_data: `scan:risks:${scanId}` },
+        { text: "📣 Social", callback_data: `scan:social:${scanId}` }
+      ],
+      [
+        { text: "🧪 Dry Run Entry", callback_data: `scan:dryrun:${scanId}` },
+        { text: "🔁 Refresh Scan", callback_data: `scan:refresh:${scanId}` }
+      ]
     ]
   };
 }
@@ -548,24 +606,20 @@ function isRaidOrShillPost(text) {
   const rejectPatterns = [
     /\braid\b/,
     /\bshill\b/,
-    /\bca\b/,
-    /\bcontract\b/,
-    /\b0x[a-f0-9]{6,}\b/i,
     /\bairdrop\b/,
     /\bwhitelist\b/,
     /\bgiveaway\b/,
-    /\bpromo\b/,
     /\bfollow and retweet\b/,
     /\bretweet to win\b/,
-    /\btag friends\b/,
     /\bjoin telegram\b/,
-    /\bcomment below\b/,
+    /\btag friends\b/,
     /\bdrop your wallet\b/,
-    /\bpartnership\b/,
     /\bbuy now\b/,
-    /\bcall\b/,
     /\bmoon now\b/,
-    /\bcto now\b/
+    /\bgem alert\b/,
+    /\bgem call\b/,
+    /\b100x\b/,
+    /\bcto\b/
   ];
 
   return rejectPatterns.some(re => re.test(value));
@@ -614,7 +668,9 @@ function calcTextTemplatePenalty(text) {
 
   let penalty = 0;
 
-  if (/(follow and retweet|tag friends|join telegram|giveaway|drop your wallet)/i.test(value)) {
+  if (
+    /(follow and retweet|tag friends|join telegram|giveaway|drop your wallet)/i.test(value)
+  ) {
     penalty += 50;
   }
 
@@ -659,8 +715,10 @@ function calcBurstPenalty(candidates, targetAuthorId) {
   const sameAuthorCount = sameMinute.filter(item => item.author_id === targetAuthorId).length;
 
   let penalty = 0;
+  if (sameMinute.length >= 8) penalty += 8;
+  if (sameMinute.length >= 15) penalty += 12;
+  if (sameMinute.length >= 25) penalty += 16;
   if (youngLowFollowerAuthors.length >= 8) penalty += 12;
-  if (youngLowFollowerAuthors.length >= 15) penalty += 18;
   if (sameAuthorCount >= 3) penalty += 12;
 
   return penalty;
@@ -880,7 +938,7 @@ async function collectCandidates() {
 
   return unique.map(tweet => ({
     ...tweet,
-    author: userMap.get(tweet.author_id) || null
+    author: userMap.get(tweet.author_id) || tweet.author || null
   }));
 }
 
@@ -1001,10 +1059,99 @@ async function ensureCommands() {
     { command: "status", description: "System status" },
     { command: "lang", description: "Choose language" },
     { command: "language", description: "Choose language" },
+    { command: "scan", description: "Scan CA" },
     { command: "test_trade", description: "Run test trade" },
     { command: "level6_status", description: "Level 6 summary" },
     { command: "level6_open_trades", description: "Open trades" }
   ]);
+}
+
+function shortScanId() {
+  return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function extractCAFromText(text) {
+  const value = String(text || "").trim();
+  const patterns = [
+    /\b[1-9A-HJ-NP-Za-km-z]{32,44}\b/g,
+    /\b0x[a-fA-F0-9]{40}\b/g
+  ];
+
+  for (const re of patterns) {
+    const found = value.match(re);
+    if (found && found[0]) return found[0];
+  }
+
+  return "";
+}
+
+async function runScanAndReply({ chatId, userId, replyTo, ca }) {
+  await sendText(chatId, `${t(userId, "scanStarted")}\n\nCA: <code>${ca}</code>`, {
+    reply_to_message_id: replyTo
+  });
+
+  const result = await scanTokenCandidate({ ca });
+  const scanId = shortScanId();
+
+  scanStore.set(scanId, {
+    id: scanId,
+    createdAt: Date.now(),
+    ownerUserId: userId,
+    ca,
+    result
+  });
+
+  await sendText(chatId, `${t(userId, "scanReady")}\n\n${buildCompactScanSummary(result)}`, {
+    reply_to_message_id: replyTo,
+    reply_markup: buildScanKeyboard(scanId)
+  });
+}
+
+function getScan(scanId) {
+  return scanStore.get(scanId) || null;
+}
+
+function buildRiskText(result = {}) {
+  const decision = result.decision || {};
+  const blocked = Array.isArray(decision.blockedReasons) ? decision.blockedReasons : [];
+  const cautions = Array.isArray(decision.reasons) ? decision.reasons : [];
+
+  const lines = [
+    `<b>Risk Review</b>`,
+    `Allowed: ${decision.allowed ? "YES" : "NO"}`,
+    `Score: ${safeNum(decision.score, 0)}`,
+    `Confidence: ${decision.confidence || "unknown"}`
+  ];
+
+  if (blocked.length) {
+    lines.push("");
+    lines.push("<b>Hard blockers:</b>");
+    blocked.forEach(item => lines.push(`• ${item}`));
+  }
+
+  if (cautions.length) {
+    lines.push("");
+    lines.push("<b>Cautions:</b>");
+    cautions.forEach(item => lines.push(`• ${item}`));
+  }
+
+  return lines.join("\n");
+}
+
+function buildSocialText(result = {}) {
+  const social = result?.candidate?.socialIntel || {};
+
+  return [
+    `<b>Social Intel</b>`,
+    `Unique Authors: ${safeNum(social.uniqueAuthors, 0)}`,
+    `Avg Likes: ${safeNum(social.avgLikes, 0)}`,
+    `Avg Replies: ${safeNum(social.avgReplies, 0)}`,
+    `Bot Pattern Score: ${safeNum(social.botPatternScore, 0)}`,
+    `Engagement Diversity: ${safeNum(social.engagementDiversity, 0)}`,
+    `Trusted Mentions: ${safeNum(social.trustedMentions, 0)}`,
+    `Suspicious Burst: ${social.suspiciousBurst ? "YES" : "NO"}`,
+    `Organic Score: ${safeNum(social.organicScore, 0)}`
+  ].join("\n");
 }
 
 async function handleTextCommand(msg) {
@@ -1013,7 +1160,30 @@ async function handleTextCommand(msg) {
   const userId = msg.from?.id || msg.chat.id;
   const replyTo = msg.message_id;
 
-  if (!text.startsWith("/")) return false;
+  const activeFlow = getUserFlow(userId);
+  if (activeFlow?.type === "await_scan_ca" && !text.startsWith("/")) {
+    clearUserFlow(userId);
+    const ca = extractCAFromText(text);
+
+    if (!ca) {
+      await sendText(chatId, "⚠️ CA not detected in message.", {
+        reply_to_message_id: replyTo
+      });
+      return true;
+    }
+
+    await runScanAndReply({ chatId, userId, replyTo, ca });
+    return true;
+  }
+
+  if (!text.startsWith("/")) {
+    const inlineCA = extractCAFromText(text);
+    if (inlineCA) {
+      await runScanAndReply({ chatId, userId, replyTo, ca: inlineCA });
+      return true;
+    }
+    return false;
+  }
 
   if (text === "/start") {
     await sendText(chatId, t(userId, "botAlive"), {
@@ -1040,6 +1210,27 @@ async function handleTextCommand(msg) {
       reply_to_message_id: replyTo,
       reply_markup: buildLanguageKeyboard()
     });
+    return true;
+  }
+
+  if (text === "/scan") {
+    setUserFlow(userId, { type: "await_scan_ca" });
+    await sendText(chatId, t(userId, "awaitingCA"), {
+      reply_to_message_id: replyTo
+    });
+    return true;
+  }
+
+  if (text.startsWith("/scan ")) {
+    const ca = extractCAFromText(text);
+    if (!ca) {
+      await sendText(chatId, "⚠️ CA not detected.", {
+        reply_to_message_id: replyTo
+      });
+      return true;
+    }
+
+    await runScanAndReply({ chatId, userId, replyTo, ca });
     return true;
   }
 
@@ -1079,6 +1270,89 @@ async function handleTextCommand(msg) {
   return false;
 }
 
+async function handleScanCallback(query, parts) {
+  const chatId = query?.message?.chat?.id;
+  const userId = query?.from?.id || 0;
+  const scanAction = parts[1];
+  const scanId = parts[2];
+
+  if (scanAction === "prompt") {
+    setUserFlow(userId, { type: "await_scan_ca" });
+    await sendText(chatId, t(userId, "awaitingCA"));
+    return;
+  }
+
+  if (scanAction === "last") {
+    const items = [...scanStore.values()]
+      .filter(item => item.ownerUserId === userId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+
+    if (!items.length) {
+      await sendText(chatId, t(userId, "noScan"));
+      return;
+    }
+
+    const last = items[0];
+    await sendText(chatId, buildCompactScanSummary(last.result), {
+      reply_markup: buildScanKeyboard(last.id)
+    });
+    return;
+  }
+
+  const stored = getScan(scanId);
+  if (!stored) {
+    await sendText(chatId, t(userId, "noScan"));
+    return;
+  }
+
+  if (scanAction === "proposal") {
+    const proposal = await buildScanProposal({ ca: stored.ca });
+    await sendText(chatId, proposal.text);
+    return;
+  }
+
+  if (scanAction === "decision") {
+    await sendText(chatId, stored.result.texts?.decision || "No decision text");
+    return;
+  }
+
+  if (scanAction === "risks") {
+    await sendText(chatId, buildRiskText(stored.result));
+    return;
+  }
+
+  if (scanAction === "social") {
+    await sendText(chatId, buildSocialText(stored.result));
+    return;
+  }
+
+  if (scanAction === "refresh") {
+    const refreshed = await scanTokenCandidate({ ca: stored.ca });
+    scanStore.set(scanId, {
+      ...stored,
+      createdAt: Date.now(),
+      result: refreshed
+    });
+
+    await sendText(chatId, `🔁 Scan refreshed\n\n${buildCompactScanSummary(refreshed)}`, {
+      reply_markup: buildScanKeyboard(scanId)
+    });
+    return;
+  }
+
+  if (scanAction === "dryrun") {
+    const dry = await dryRunEntryFromScan({ ca: stored.ca });
+
+    if (!dry.accepted) {
+      await sendText(chatId, `${t(userId, "dryRunRejected")}\n\n${dry.text}`);
+      return;
+    }
+
+    await sendText(chatId, `${t(userId, "dryRunAccepted")}\n\n${dry.text}`);
+    return;
+  }
+}
+
 async function handleCallbackQuery(query) {
   const data = query?.data || "";
   const userId = query?.from?.id || 0;
@@ -1090,6 +1364,13 @@ async function handleCallbackQuery(query) {
   await bot.answerCallbackQuery(query.id);
 
   if (!chatId) return;
+
+  const parts = data.split(":");
+
+  if (parts[0] === "scan") {
+    await handleScanCallback(query, parts);
+    return;
+  }
 
   if (data === "ui:status") {
     await sendText(chatId, buildStatusText(userId));
