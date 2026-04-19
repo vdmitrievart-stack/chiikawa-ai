@@ -4,23 +4,16 @@ import TelegramBot from "node-telegram-bot-api";
 import { getBestTrade } from "./scan-engine.js";
 import { enterTrade, exitTrade, getPortfolio } from "./portfolio.js";
 
-// ===== ENV =====
-
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
 
 const PATH = `/telegram/${process.env.WEBHOOK_SECRET}`;
 
-// ===== SEND =====
-
-function send(chatId, text) {
+async function send(chatId, text) {
   return bot.sendMessage(chatId, text);
 }
 
-// ===== MAIN =====
-
 async function runCycle(chatId) {
   const best = await getBestTrade();
-
   if (!best) return;
 
   const p = getPortfolio();
@@ -31,11 +24,10 @@ async function runCycle(chatId) {
 Token: ${best.token.name}
 Score: ${best.score}
 
-⚠️ Rug Risk: ${best.rug.risk}
-🧠 Smart Money: ${best.wallet.smartMoney.toFixed(1)}
-👥 Concentration: ${best.wallet.concentration.toFixed(1)}
-🤖 Bot Activity: ${best.bots.botActivity.toFixed(1)}
-🐦 Sentiment: ${best.sentiment.sentiment.toFixed(1)}
+⚠️ Rug: ${best.rug.risk}
+🧠 Smart: ${best.wallet.smartMoney}
+🤖 Bots: ${best.bots.botActivity}
+🐦 Sentiment: ${best.sentiment.sentiment}
 `);
 
   if (best.score < 60) {
@@ -53,32 +45,30 @@ Score: ${best.score}
   await send(chatId, `
 🚀 ENTRY
 
-Token: ${entry.token}
+${entry.token}
 Price: ${entry.entry}
 Balance: ${p.balance.toFixed(2)} SOL
 `);
 
-  // simulate exit
   setTimeout(() => {
-    const exit = exitTrade(best.token.price * (0.95 + Math.random() * 0.1));
+    const price =
+      best.token.price * (0.95 + Math.random() * 0.1);
+
+    const exit = exitTrade(price);
 
     send(chatId, `
 🏁 EXIT
 
-Token: ${exit.token}
+${exit.token}
 PnL: ${(exit.pnl * 100).toFixed(2)}%
 Balance: ${exit.balance.toFixed(2)} SOL
 `);
-  }, 20000);
+  }, 30000);
 }
-
-// ===== AUTO =====
 
 function start(chatId) {
   setInterval(() => runCycle(chatId), 60000);
 }
-
-// ===== SERVER =====
 
 const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === PATH) {
