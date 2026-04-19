@@ -7,12 +7,15 @@ import * as XLSX from "xlsx";
 
 import TradingKernel from "./core/trading-kernel.js";
 import { buildBalanceText } from "./core/reporting-engine.js";
+import { buildStrategyPlans } from "./strategy-engine.js";
+import { analyzeToken, scanMarket } from "./scan-engine.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "chiikawa_secret";
 const WEBHOOK_PATH = `/telegram/${WEBHOOK_SECRET}`;
 const AUTO_INTERVAL_MS = Number(process.env.AUTO_INTERVAL_MS || 60000);
+const DEX_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
 
 if (!TOKEN) {
   console.error("BOT_TOKEN missing");
@@ -25,21 +28,35 @@ const kernel = new TradingKernel({ logger: console });
 let loopId = null;
 let stopTimeoutId = null;
 const tempFiles = new Set();
+const chatState = new Map();
 
 function keyboard() {
   return {
     keyboard: [
       ["▶️ Run Multi", "🎯 Run Strategy"],
       ["💰 Balance", "📊 Status"],
+      ["🔎 Scan Market", "🧾 Scan CA"],
       ["🧮 Budget", "🌐 Language"],
       ["📋 Copytrade", "👛 Wallets"],
-      ["🔎 Scan", "🛑 Stop"],
-      ["☠️ Kill", "📈 Export CSV"],
-      ["📦 Export JSON", "📊 Export XLSX"]
+      ["🛑 Stop", "☠️ Kill"],
+      ["📈 Export CSV", "📦 Export JSON"],
+      ["📊 Export XLSX"]
     ],
     resize_keyboard: true,
     persistent: true
   };
+}
+
+function setChatMode(chatId, mode, payload = {}) {
+  chatState.set(chatId, { mode, ...payload, updatedAt: Date.now() });
+}
+
+function getChatMode(chatId) {
+  return chatState.get(chatId) || { mode: "idle" };
+}
+
+function clearChatMode(chatId) {
+  chatState.delete(chatId);
 }
 
 function normalizeAction(text) {
@@ -53,7 +70,8 @@ function normalizeAction(text) {
     [["/stop", "🛑 stop", "стоп"], "stop"],
     [["/kill", "☠️ kill"], "kill"],
     [["/status", "📊 status", "статус"], "status"],
-    [["/scan", "🔎 scan", "скан"], "scan"],
+    [["/scanmarket", "scan market", "🔎 scan market"], "scan_market"],
+    [["/scanca", "/ca", "scan ca", "🧾 scan ca"], "scan_ca"],
     [["/balance", "💰 balance"], "balance"],
     [["/budget", "🧮 budget"], "budget"],
     [["/language", "🌐 language"], "language"],
@@ -78,6 +96,29 @@ function normalizeAction(text) {
   return null;
 }
 
+function isLikelyCA(text) {
+  const value = String(text || "").trim();
+  return /^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(value);
+}
+
+function safeNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function round(v, d = 4) {
+  const p = 10 ** d;
+  return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
+}
+
+function escapeHtml(input) {
+  return String(input ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 async function sendMessage(chatId, text, extra = {}) {
   return bot.sendMessage(chatId, text, {
     parse_mode: "HTML",
@@ -91,6 +132,131 @@ function stopLoop() {
   if (stopTimeoutId) clearTimeout(stopTimeoutId);
   loopId = null;
   stopTimeoutId = null;
+}
+
+function buildAnalysisText(analyzed, plans) {
+  const t = analyzed.token || {};
+  const reasons = (analyzed.reasons || [])
+    .slice(0, 12)
+    .map((r) => `• ${escapeHtml(r)}`)
+    .join("\n");
+
+  const plansText = plans.length
+    ? plans
+        .map(
+          (p) =>
+            `• <b>${escapeHtml(p.strategyKey.toUpperCase())}</b> | edge ${round(
+              p.expectedEdgePct,
+              2
+            )}% | hold ${Math.round(p.plannedHoldMs / 60000)}m | SL ${p.stopLossPct}% | TP ${
+              p.takeProfitPct || "runner"
+            }`
+        )
+        .join("\n")
+    : "• none";
+
+  return `🔎 <b>ANALYSIS</b>
+
+<b>Token:</b> ${escapeHtml(t.name || "Unknown")}
+<b>CA:</b> <code>${escapeHtml(t.ca || "")}</code>
+<b>Score:</b> ${round(analyzed.score, 2)}
+
+<b>Price:</b> ${escapeHtml(t.price)}
+<b>Liquidity:</b> ${escapeHtml(t.liquidity)}
+<b>Volume 24h:</b> ${escapeHtml(t.volume)}
+<b>Txns 24h:</b> ${escapeHtml(t.txns)}
+<b>FDV:</b> ${escapeHtml(t.fdv)}
+
+⚠️ <b>Rug:</b> ${analyzed.rug?.risk ?? 0}
+🧠 <b>Smart Money:</b> ${analyzed.wallet?.smartMoney ?? 0}
+👥 <b>Concentration:</b> ${round(analyzed.wallet?.concentration ?? 0, 2)}
+🤖 <b>Bot Activity:</b> ${analyzed.bots?.botActivity ?? 0}
+🐦 <b>Sentiment:</b> ${analyzed.sentiment?.sentiment ?? 0}
+☠️ <b>Corpse Score:</b> ${analyzed.corpse?.score ?? 0}
+👨‍💻 <b>Dev Verdict:</b> ${escapeHtml(analyzed.developer?.verdict || "Unknown")}
+🧾 <b>Narrative:</b> ${escapeHtml(analyzed.narrative?.verdict || "Unknown")}
+🌐 <b>Socials:</b> ${escapeHtml((analyzed.socials?.notes || []).join(", ") || "none")}
+
+<b>Narrative summary:</b>
+${escapeHtml(analyzed.narrative?.summary || "none")}
+
+📈 <b>Delta</b>
+<b>Price Δ:</b> ${round(analyzed.delta?.priceDeltaPct ?? 0, 2)}%
+<b>Volume Δ:</b> ${round(analyzed.delta?.volumeDeltaPct ?? 0, 2)}%
+<b>Txns Δ:</b> ${round(analyzed.delta?.txnsDeltaPct ?? 0, 2)}%
+<b>Liquidity Δ:</b> ${round(analyzed.delta?.liquidityDeltaPct ?? 0, 2)}%
+<b>Buy Pressure Δ:</b> ${round(analyzed.delta?.buyPressureDelta ?? 0, 3)}
+
+🎯 <b>Available plans</b>
+${plansText}
+
+<b>Reasons:</b>
+${reasons || "• none"}`;
+}
+
+async function fetchTokenByCA(ca) {
+  const res = await fetch(`${DEX_TOKEN_API}/${encodeURIComponent(ca)}`);
+  if (!res.ok) {
+    throw new Error(`DexScreener HTTP ${res.status}`);
+  }
+
+  const json = await res.json();
+  const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
+  if (!pairs.length) return null;
+
+  const pair = pairs
+    .map((p) => ({
+      name: p?.baseToken?.symbol || p?.baseToken?.name || "UNKNOWN",
+      ca: p?.baseToken?.address || "",
+      pairAddress: p?.pairAddress || "",
+      chainId: p?.chainId || "",
+      dexId: p?.dexId || "",
+      price: safeNum(p?.priceUsd),
+      liquidity: safeNum(p?.liquidity?.usd),
+      volume: safeNum(p?.volume?.h24),
+      buys: safeNum(p?.txns?.h24?.buys),
+      sells: safeNum(p?.txns?.h24?.sells),
+      txns: safeNum(p?.txns?.h24?.buys) + safeNum(p?.txns?.h24?.sells),
+      fdv: safeNum(p?.fdv),
+      pairCreatedAt: safeNum(p?.pairCreatedAt),
+      url: p?.url || ""
+    }))
+    .sort((a, b) => b.volume - a.volume)[0];
+
+  return pair || null;
+}
+
+async function analyzeCA(chatId, ca) {
+  await sendMessage(chatId, `🧾 <b>Scanning CA</b>\n<code>${escapeHtml(ca)}</code>`);
+
+  const token = await fetchTokenByCA(ca);
+  if (!token) {
+    await sendMessage(chatId, "❌ Token not found by CA.", { reply_markup: keyboard() });
+    return;
+  }
+
+  const analyzed = await analyzeToken(token);
+  const plans = buildStrategyPlans(analyzed, {
+    enabledStrategies: kernel.getRuntime().activeConfig.strategyEnabled
+  });
+
+  await sendMessage(chatId, buildAnalysisText(analyzed, plans), {
+    reply_markup: keyboard()
+  });
+}
+
+async function runMarketScan(chatId) {
+  await sendMessage(chatId, "🔎 <b>Market scan started</b>", {
+    reply_markup: keyboard()
+  });
+
+  const market = await scanMarket();
+  if (!market.length) {
+    await sendMessage(chatId, "❌ No market candidates found.", { reply_markup: keyboard() });
+    return;
+  }
+
+  await flushCycle(chatId);
 }
 
 async function flushCycle(chatId) {
@@ -113,7 +279,9 @@ async function flushCycle(chatId) {
   if (rt.stopRequested && kernel.getPortfolio().positions.length === 0) {
     stopLoop();
     rt.mode = "stopped";
-    await sendMessage(chatId, "🛑 <b>STOP COMPLETE</b>\nNo open positions left.");
+    await sendMessage(chatId, "🛑 <b>ОСТАНОВКА ЗАВЕРШЕНА</b>\nБольше нет открытых позиций.", {
+      reply_markup: keyboard()
+    });
     await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
   }
 }
@@ -205,7 +373,6 @@ function statsToXlsxWorkbook() {
 
 async function scheduleTempCleanup(filePath) {
   tempFiles.add(filePath);
-
   setTimeout(async () => {
     try {
       await fs.unlink(filePath);
@@ -246,6 +413,7 @@ async function exportXlsx(chatId) {
 
 async function handleAction(chatId, userId, action) {
   if (action === "start") {
+    clearChatMode(chatId);
     await sendMessage(chatId, "🤖 <b>Bot ready</b>\n\nUse the menu below.", {
       reply_markup: keyboard()
     });
@@ -306,8 +474,17 @@ async function handleAction(chatId, userId, action) {
     return;
   }
 
-  if (action === "scan") {
-    await flushCycle(chatId);
+  if (action === "scan_market") {
+    clearChatMode(chatId);
+    await runMarketScan(chatId);
+    return;
+  }
+
+  if (action === "scan_ca") {
+    setChatMode(chatId, "awaiting_ca");
+    await sendMessage(chatId, "🧾 <b>Send CA</b>\n\nОтправь контракт токена следующим сообщением.", {
+      reply_markup: keyboard()
+    });
     return;
   }
 
@@ -326,14 +503,17 @@ async function handleAction(chatId, userId, action) {
   }
 
   if (action === "budget_equal") {
-    kernel.queueConfigPatch({
-      strategyBudget: {
-        scalp: 0.25,
-        reversal: 0.25,
-        runner: 0.25,
-        copytrade: 0.25
-      }
-    }, "budget_equal");
+    kernel.queueConfigPatch(
+      {
+        strategyBudget: {
+          scalp: 0.25,
+          reversal: 0.25,
+          runner: 0.25,
+          copytrade: 0.25
+        }
+      },
+      "budget_equal"
+    );
     await sendMessage(chatId, "🧮 Pending budget queued: 25 / 25 / 25 / 25", {
       reply_markup: keyboard()
     });
@@ -395,17 +575,31 @@ async function handleAction(chatId, userId, action) {
     return;
   }
 
-  await sendMessage(chatId, "Unknown command", { reply_markup: keyboard() });
+  await sendMessage(chatId, "Use the menu below.", { reply_markup: keyboard() });
 }
 
 async function processMessage(msg) {
   const chatId = msg.chat.id;
   const userId = msg.from?.id || chatId;
   const text = String(msg.text || "").trim();
+  const mode = getChatMode(chatId);
   const action = normalizeAction(text);
 
   if (action) {
     await handleAction(chatId, userId, action);
+    return;
+  }
+
+  if (mode.mode === "awaiting_ca") {
+    if (!isLikelyCA(text)) {
+      await sendMessage(chatId, "❌ Это не похоже на валидный CA. Отправь адрес токена целиком.", {
+        reply_markup: keyboard()
+      });
+      return;
+    }
+
+    clearChatMode(chatId);
+    await analyzeCA(chatId, text);
     return;
   }
 
@@ -418,16 +612,28 @@ async function processMessage(msg) {
       return;
     }
 
-    kernel.queueConfigPatch({
-      strategyBudget: {
-        scalp: Number(a) / 100,
-        reversal: Number(b) / 100,
-        runner: Number(c) / 100,
-        copytrade: Number(d) / 100
-      }
-    }, "manual_budget_update");
+    kernel.queueConfigPatch(
+      {
+        strategyBudget: {
+          scalp: Number(a) / 100,
+          reversal: Number(b) / 100,
+          runner: Number(c) / 100,
+          copytrade: Number(d) / 100
+        }
+      },
+      "manual_budget_update"
+    );
 
     await sendMessage(chatId, "🧮 Pending budget update queued.", { reply_markup: keyboard() });
+    return;
+  }
+
+  if (isLikelyCA(text)) {
+    await sendMessage(
+      chatId,
+      "Чтобы проанализировать контракт, сначала нажми <b>🧾 Scan CA</b>, а потом отправь адрес.",
+      { reply_markup: keyboard() }
+    );
     return;
   }
 
@@ -443,7 +649,9 @@ bot.on("message", (msg) => {
 const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === WEBHOOK_PATH) {
     let body = "";
-    req.on("data", (chunk) => (body += chunk));
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
     req.on("end", async () => {
       try {
         const update = JSON.parse(body);
