@@ -63,6 +63,13 @@ const X_WATCH_HEARTBEAT_TIMEOUT_MS = Number(
 const X_MAX_POSTS_PER_CYCLE = Number(process.env.X_MAX_POSTS_PER_CYCLE || 2);
 const MARKET_MODE = (process.env.MARKET_MODE || "neutral").toLowerCase();
 
+const X_CREDITS_PAUSE_MS = Number(
+  process.env.X_CREDITS_PAUSE_MS || 30 * 60 * 1000
+);
+const X_ERROR_PAUSE_MS = Number(
+  process.env.X_ERROR_PAUSE_MS || 5 * 60 * 1000
+);
+
 const STATE_FILE = path.resolve("/tmp/chiikawa_x_search_state.json");
 
 if (!TOKEN) {
@@ -80,11 +87,6 @@ if (!TELEGRAM_WEBHOOK_BASE_URL) {
   process.exit(1);
 }
 
-if (!TWITTER_BEARER_TOKEN) {
-  console.error("❌ TWITTER_BEARER_TOKEN missing");
-  process.exit(1);
-}
-
 const bot = new TelegramBot(TOKEN, { polling: false });
 const userSettings = new Map();
 const authorCache = new Map();
@@ -93,6 +95,7 @@ const scanStore = new Map();
 
 const xState = {
   started: false,
+  enabled: Boolean(TWITTER_BEARER_TOKEN),
   timer: null,
   guardTimer: null,
   firstSyncDone: false,
@@ -101,7 +104,12 @@ const xState = {
   lastPostAt: 0,
   gifCursor: 0,
   gifLastIndex: -1,
-  lastPublishedTexts: []
+  lastPublishedTexts: [],
+  creditPauseUntil: 0,
+  genericPauseUntil: 0,
+  lastCreditsAlertAt: 0,
+  lastStatusLogAt: 0,
+  lastErrorLogAt: 0
 };
 
 const I18N = {
@@ -320,6 +328,13 @@ async function sendTradePayload(chatId, payload, replyToMessageId = undefined) {
   }
 }
 
+function buildWatcherStatusText() {
+  if (!xState.enabled) return "DISABLED";
+  if (xState.creditPauseUntil > Date.now()) return "PAUSED_CREDITS";
+  if (xState.genericPauseUntil > Date.now()) return "PAUSED_ERROR";
+  return xState.started ? "ONLINE" : "OFFLINE";
+}
+
 function buildMainMenuText(userId) {
   const runtime = getTradingRuntime();
   const summary = getLevel6Summary();
@@ -347,7 +362,7 @@ function buildStatusText(userId) {
   return `${t(userId, "statusTitle")}
 
 <b>Bot:</b> ${t(userId, "online")}
-<b>${t(userId, "watcher")}:</b> ${xState.started ? t(userId, "online") : t(userId, "offline")}
+<b>${t(userId, "watcher")}:</b> ${buildWatcherStatusText()}
 <b>${t(userId, "heartbeat")}:</b> ${new Date(xState.lastHeartbeat).toLocaleString()}
 <b>${t(userId, "accounts")}:</b> ${X_SEARCH_QUERIES.join(" | ")}
 
@@ -504,6 +519,8 @@ async function loadXState() {
     xState.lastPostAt = safeNum(parsed.lastPostAt, 0);
     xState.gifCursor = safeNum(parsed.gifCursor, 0);
     xState.gifLastIndex = safeNum(parsed.gifLastIndex, -1);
+    xState.creditPauseUntil = safeNum(parsed.creditPauseUntil, 0);
+    xState.genericPauseUntil = safeNum(parsed.genericPauseUntil, 0);
     xState.seenIds = new Set(
       Array.isArray(parsed.seenIds) ? parsed.seenIds.slice(-X_MAX_STORED_IDS) : []
     );
@@ -524,6 +541,8 @@ async function saveXState() {
       lastPostAt: xState.lastPostAt,
       gifCursor: xState.gifCursor,
       gifLastIndex: xState.gifLastIndex,
+      creditPauseUntil: xState.creditPauseUntil,
+      genericPauseUntil: xState.genericPauseUntil,
       seenIds: Array.from(xState.seenIds).slice(-X_MAX_STORED_IDS),
       lastPublishedTexts: xState.lastPublishedTexts.slice(-25)
     };
@@ -532,6 +551,11 @@ async function saveXState() {
   } catch (error) {
     console.log(`saveXState error: ${error.message}`);
   }
+}
+
+function isCreditsDepletedError(error) {
+  const msg = String(error?.message || error || "");
+  return msg.includes("CreditsDepleted") || msg.includes("credits");
 }
 
 async function twitterGetJson(url) {
@@ -918,13 +942,9 @@ async function collectCandidates() {
   const all = [];
 
   for (const keyword of X_SEARCH_QUERIES) {
-    try {
-      const tweets = await searchTweets(keyword);
-      for (const tweet of tweets) {
-        all.push({ ...tweet, queryKeyword: keyword });
-      }
-    } catch (error) {
-      console.log(`[${nowIso()}] search error for "${keyword}": ${error.message}`);
+    const tweets = await searchTweets(keyword);
+    for (const tweet of tweets) {
+      all.push({ ...tweet, queryKeyword: keyword });
     }
   }
 
@@ -945,10 +965,90 @@ async function collectCandidates() {
   }));
 }
 
+async function notifyCreditsPauseOnce(error) {
+  const now = Date.now();
+  if (now - xState.lastCreditsAlertAt < 15 * 60 * 1000) return;
+
+  xState.lastCreditsAlertAt = now;
+
+  try {
+    await sendText(
+      CHAT_ID,
+      `⚠️ <b>X watcher paused</b>
+
+Twitter/X API credits are depleted.
+Watcher is paused for ${Math.round(X_CREDITS_PAUSE_MS / 60000)} minutes and the rest of the bot stays online.
+
+Error:
+<code>${stripHtml(error.message).slice(0, 800)}</code>`
+    );
+  } catch (notifyError) {
+    console.log(`notifyCreditsPauseOnce error: ${notifyError.message}`);
+  }
+}
+
 async function xWatcherLoop() {
   xState.lastHeartbeat = Date.now();
 
-  const candidates = await collectCandidates();
+  if (!xState.enabled) {
+    const now = Date.now();
+    if (now - xState.lastStatusLogAt > 10 * 60 * 1000) {
+      xState.lastStatusLogAt = now;
+      console.log(`[${nowIso()}] X watcher disabled: no TWITTER_BEARER_TOKEN`);
+    }
+    return;
+  }
+
+  const now = Date.now();
+
+  if (xState.creditPauseUntil > now) {
+    if (now - xState.lastStatusLogAt > 10 * 60 * 1000) {
+      xState.lastStatusLogAt = now;
+      console.log(
+        `[${nowIso()}] X watcher paused by credits until ${new Date(
+          xState.creditPauseUntil
+        ).toISOString()}`
+      );
+    }
+    return;
+  }
+
+  if (xState.genericPauseUntil > now) {
+    if (now - xState.lastStatusLogAt > 5 * 60 * 1000) {
+      xState.lastStatusLogAt = now;
+      console.log(
+        `[${nowIso()}] X watcher paused by recent error until ${new Date(
+          xState.genericPauseUntil
+        ).toISOString()}`
+      );
+    }
+    return;
+  }
+
+  let candidates;
+  try {
+    candidates = await collectCandidates();
+  } catch (error) {
+    if (isCreditsDepletedError(error)) {
+      xState.creditPauseUntil = Date.now() + X_CREDITS_PAUSE_MS;
+      await saveXState();
+      console.log(
+        `[${nowIso()}] X watcher credits depleted, paused until ${new Date(
+          xState.creditPauseUntil
+        ).toISOString()}`
+      );
+      await notifyCreditsPauseOnce(error);
+      return;
+    }
+
+    xState.genericPauseUntil = Date.now() + X_ERROR_PAUSE_MS;
+    if (Date.now() - xState.lastErrorLogAt > 60 * 1000) {
+      xState.lastErrorLogAt = Date.now();
+      console.log(`[${nowIso()}] xWatcherLoop collect error: ${error.message}`);
+    }
+    await saveXState();
+    return;
+  }
 
   if (!candidates.length) {
     console.log(`[${nowIso()}] no X candidates`);
@@ -987,23 +1087,16 @@ async function xWatcherLoop() {
     const followerCount = safeNum(author?.public_metrics?.followers_count, 0);
 
     if (followerCount < X_MIN_FOLLOWERS) {
-      console.log(
-        `[${nowIso()}] filtered ${author?.username || "unknown"} by followers: ${followerCount}`
-      );
       continue;
     }
 
     if (isTooSimilarToRecentPublications(tweet.text)) {
-      console.log(`[${nowIso()}] filtered similar to recent publication`);
       continue;
     }
 
     const scorePack = calcTweetScore(tweet, fresh);
 
     if (scorePack.score < X_POST_SCORE_MIN) {
-      console.log(
-        `[${nowIso()}] filtered low-score tweet ${tweet.id}: ${scorePack.score}`
-      );
       continue;
     }
 
@@ -1037,6 +1130,20 @@ function startXWatcher() {
     try {
       await xWatcherLoop();
     } catch (error) {
+      if (isCreditsDepletedError(error)) {
+        xState.creditPauseUntil = Date.now() + X_CREDITS_PAUSE_MS;
+        await saveXState();
+        console.log(
+          `[${nowIso()}] X watcher credits depleted, paused until ${new Date(
+            xState.creditPauseUntil
+          ).toISOString()}`
+        );
+        await notifyCreditsPauseOnce(error);
+        return;
+      }
+
+      xState.genericPauseUntil = Date.now() + X_ERROR_PAUSE_MS;
+      await saveXState();
       console.log(`[${nowIso()}] xWatcherLoop error: ${error.message}`);
     }
   };
@@ -1148,7 +1255,9 @@ function buildRiskText(result = {}) {
 }
 
 function buildSocialText(result = {}) {
-  const social = result?.candidate?.socialIntel || {};
+  if (result.texts?.social) return result.texts.social;
+
+  const social = result?.socialIntel || {};
 
   return [
     `<b>Social Intel</b>`,
@@ -1373,7 +1482,6 @@ async function handleScanCallback(query, parts) {
     }
 
     await sendText(chatId, `${t(userId, "dryRunAccepted")}\n\n${dry.text}`);
-    return;
   }
 }
 
@@ -1499,6 +1607,8 @@ function createServer() {
           ok: true,
           service: "telegram-bot",
           watcherStarted: xState.started,
+          watcherEnabled: xState.enabled,
+          watcherStatus: buildWatcherStatusText(),
           heartbeat: xState.lastHeartbeat,
           webhookPath: WEBHOOK_PATH
         })
@@ -1561,13 +1671,19 @@ async function bootstrap() {
   server.listen(PORT, async () => {
     console.log(`HTTP server listening on ${PORT}`);
     console.log(`Webhook path: ${WEBHOOK_PATH}`);
+    console.log(`X watcher enabled: ${xState.enabled}`);
 
     await ensureCommandsAndWebhook();
     startXWatcher();
   });
 
   setInterval(() => {
-    console.log("heartbeat alive", new Date().toISOString());
+    console.log(
+      "heartbeat alive",
+      new Date().toISOString(),
+      "watcher=",
+      buildWatcherStatusText()
+    );
   }, 15000);
 }
 
