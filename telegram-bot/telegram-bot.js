@@ -1,138 +1,180 @@
 import http from "node:http";
 import TelegramBot from "node-telegram-bot-api";
-
 import { getBestTrade } from "./scan-engine.js";
-import { enterTrade, exitTrade, getPortfolio } from "./portfolio.js";
-
-// ===== ENV =====
+import { enterTrade, exitTrade, getPortfolio, markToMarket } from "./portfolio.js";
 
 const TOKEN = process.env.BOT_TOKEN;
-const PORT = process.env.PORT || 3000;
-const PATH = `/telegram/${process.env.WEBHOOK_SECRET}`;
+const PORT = Number(process.env.PORT || 3000);
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "chiikawa_secret";
+const PATH = `/telegram/${WEBHOOK_SECRET}`;
+
+if (!TOKEN) {
+  console.error("BOT_TOKEN missing");
+  process.exit(1);
+}
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 
-// ===== STATE =====
-
 let intervalId = null;
-
-// ===== SEND =====
+let autoStopId = null;
+let activeChatId = null;
 
 async function send(chatId, text) {
   return bot.sendMessage(chatId, text, {
-    parse_mode: "HTML"
+    parse_mode: "HTML",
+    disable_web_page_preview: true
   });
 }
 
-// ===== CORE LOGIC =====
+function formatAnalysis(best) {
+  return `🔎 <b>ANALYSIS</b>
+
+<b>Token:</b> ${best.token.name}
+<b>CA:</b> <code>${best.token.ca}</code>
+<b>Score:</b> ${best.score}
+
+<b>Price:</b> ${best.token.price}
+<b>Liquidity:</b> ${best.token.liquidity}
+<b>Volume 24h:</b> ${best.token.volume}
+<b>Txns 24h:</b> ${best.token.txns}
+<b>FDV:</b> ${best.token.fdv}
+
+⚠️ <b>Rug:</b> ${best.rug.risk}
+🧠 <b>Smart Money:</b> ${best.wallet.smartMoney}
+👥 <b>Concentration:</b> ${best.wallet.concentration.toFixed(2)}
+🤖 <b>Bot Activity:</b> ${best.bots.botActivity}
+🐦 <b>Sentiment:</b> ${best.sentiment.sentiment}
+
+<b>Reasons:</b>
+${best.reasons.map(r => `• ${r}`).join("\n")}`;
+}
 
 async function runCycle(chatId) {
   try {
     const best = await getBestTrade();
-    if (!best) return;
+    if (!best) {
+      await send(chatId, "❌ No candidates found");
+      return;
+    }
 
-    const portfolio = getPortfolio();
+    await send(chatId, formatAnalysis(best));
 
-    await send(chatId, `
-🔎 ANALYSIS
-
-Token: ${best.token.name}
-Score: ${best.score}
-
-⚠️ Rug: ${best.rug.risk}
-🧠 Smart: ${best.wallet.smartMoney}
-🤖 Bots: ${best.bots.botActivity}
-🐦 Sentiment: ${best.sentiment.sentiment}
-`);
-
-    // пропускаем слабые
     if (best.score < 60) {
-      await send(chatId, "❌ Skip (low score)");
+      await send(chatId, "❌ Skip (score below threshold)");
       return;
     }
 
     const entry = enterTrade(best.token);
-
     if (!entry) {
-      await send(chatId, "⏳ Already in trade");
+      const pf = getPortfolio();
+      if (pf.position) {
+        const mtm = markToMarket(best.token.price);
+        await send(
+          chatId,
+          `⏳ Already in trade
+
+<b>Token:</b> ${pf.position.token}
+<b>Entry:</b> ${pf.position.entry}
+<b>Current:</b> ${best.token.price}
+<b>PnL:</b> ${mtm ? mtm.pnlPercent.toFixed(2) : "0.00"}%`
+        );
+      } else {
+        await send(chatId, "⏳ Cannot enter trade right now");
+      }
       return;
     }
 
-    await send(chatId, `
-🚀 ENTRY
+    const afterEntry = getPortfolio();
 
-${entry.token}
-Price: ${entry.entry}
-Balance: ${portfolio.balance.toFixed(3)} SOL
-`);
+    await send(
+      chatId,
+      `🚀 <b>ENTRY</b>
 
-    // ===== EXIT =====
+<b>Token:</b> ${entry.token}
+<b>CA:</b> <code>${entry.ca}</code>
+<b>Price:</b> ${entry.entry}
+<b>Size:</b> ${entry.amountSol.toFixed(4)} SOL
+<b>Balance after entry:</b> ${afterEntry.balance.toFixed(4)} SOL`
+    );
+
     setTimeout(async () => {
-      const price =
-        best.token.price * (0.95 + Math.random() * 0.1);
+      try {
+        const fresh = await getBestTrade();
+        const simulatedExitPrice =
+          fresh?.token?.ca === entry.ca
+            ? fresh.token.price
+            : entry.entry * (1 + Math.max(-0.06, Math.min(0.08, (best.score - 60) / 500)));
 
-      const exit = exitTrade(price);
+        const exit = exitTrade(simulatedExitPrice, "SIM_EXIT");
+        if (!exit) return;
 
-      if (!exit) return;
+        await send(
+          chatId,
+          `🏁 <b>EXIT</b>
 
-      await send(chatId, `
-🏁 EXIT
-
-${exit.token}
-PnL: ${(exit.pnl * 100).toFixed(2)}%
-Balance: ${exit.balance.toFixed(3)} SOL
-`);
+<b>Token:</b> ${exit.token}
+<b>Entry:</b> ${exit.entry}
+<b>Exit:</b> ${exit.exit}
+<b>PnL:</b> ${exit.pnlPercent.toFixed(2)}%
+<b>Balance:</b> ${exit.balance.toFixed(4)} SOL`
+        );
+      } catch (error) {
+        console.log("exit error:", error.message);
+      }
     }, 30000);
-
-  } catch (e) {
-    console.log("cycle error:", e.message);
+  } catch (error) {
+    console.log("cycle error:", error.message);
+    await send(chatId, `⚠️ Cycle error: ${error.message}`);
   }
 }
 
-// ===== AUTO START =====
-
-function startAuto(chatId) {
-  console.log("🤖 AUTO START");
-
+function stopAutoInternal() {
   if (intervalId) {
     clearInterval(intervalId);
+    intervalId = null;
   }
+  if (autoStopId) {
+    clearTimeout(autoStopId);
+    autoStopId = null;
+  }
+}
+
+function startAuto(chatId, hours = 4) {
+  stopAutoInternal();
+  activeChatId = chatId;
 
   intervalId = setInterval(() => {
     runCycle(chatId);
   }, 60000);
 
-  // ⏱ авто стоп через 4 часа
-  setTimeout(() => {
-    if (intervalId) {
-      clearInterval(intervalId);
-      intervalId = null;
+  autoStopId = setTimeout(async () => {
+    stopAutoInternal();
+    if (activeChatId) {
+      await send(activeChatId, `🛑 AUTO STOPPED (${hours}h finished)`);
     }
-
-    send(chatId, "🛑 AUTO STOPPED (4h finished)");
-    console.log("AUTO STOPPED");
-  }, 4 * 60 * 60 * 1000);
+  }, hours * 60 * 60 * 1000);
 }
-
-// ===== MESSAGE HANDLER =====
 
 async function handleMessage(msg) {
   const chatId = msg.chat.id;
-  const text = msg.text;
+  const text = String(msg.text || "").trim();
 
   console.log("MSG:", text);
 
   if (text === "/start") {
-    await send(chatId, "🚀 Bot started (1 SOL)");
-    startAuto(chatId);
+    await send(chatId, "🤖 Bot ready. Commands: /run4h /stop /status /scan");
     return;
   }
 
-  // 🔴 STOP КОМАНДА
+  if (text === "/run4h") {
+    await send(chatId, "🚀 Starting 4h simulation from 1 SOL");
+    startAuto(chatId, 4);
+    return;
+  }
+
   if (text === "/stop") {
     if (intervalId) {
-      clearInterval(intervalId);
-      intervalId = null;
+      stopAutoInternal();
       await send(chatId, "🛑 Bot stopped");
     } else {
       await send(chatId, "ℹ️ Bot already stopped");
@@ -141,14 +183,16 @@ async function handleMessage(msg) {
   }
 
   if (text === "/status") {
-    const p = getPortfolio();
+    const pf = getPortfolio();
+    await send(
+      chatId,
+      `📊 <b>STATUS</b>
 
-    await send(chatId, `
-📊 STATUS
-
-Balance: ${p.balance.toFixed(3)} SOL
-Position: ${p.position ? p.position.token : "none"}
-`);
+<b>Balance:</b> ${pf.balance.toFixed(4)} SOL
+<b>Position:</b> ${pf.position ? pf.position.token : "none"}
+<b>Auto mode:</b> ${intervalId ? "ON" : "OFF"}
+<b>Trades closed:</b> ${pf.tradeHistory.length}`
+    );
     return;
   }
 
@@ -158,25 +202,23 @@ Position: ${p.position ? p.position.token : "none"}
   }
 }
 
-// ===== UPDATE PROCESSOR =====
-
 async function processUpdate(update) {
   try {
     if (update?.message?.text) {
       await handleMessage(update.message);
     }
-  } catch (e) {
-    console.log("update error:", e.message);
+  } catch (error) {
+    console.log("update error:", error.message);
   }
 }
-
-// ===== SERVER =====
 
 const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === PATH) {
     let body = "";
 
-    req.on("data", chunk => (body += chunk));
+    req.on("data", chunk => {
+      body += chunk;
+    });
 
     req.on("end", async () => {
       res.writeHead(200);
@@ -185,8 +227,8 @@ const server = http.createServer((req, res) => {
       try {
         const update = JSON.parse(body);
         await processUpdate(update);
-      } catch (e) {
-        console.log("webhook error:", e.message);
+      } catch (error) {
+        console.log("webhook error:", error.message);
       }
     });
 
@@ -203,18 +245,12 @@ const server = http.createServer((req, res) => {
   res.end();
 });
 
-// ===== START =====
+server.listen(PORT, async () => {
+  console.log("🚀 Server started");
 
-async function start() {
-  server.listen(PORT, async () => {
-    console.log("🚀 Server started");
+  await bot.setWebHook(
+    `https://${process.env.RENDER_EXTERNAL_HOSTNAME}${PATH}`
+  );
 
-    await bot.setWebHook(
-      `https://${process.env.RENDER_EXTERNAL_HOSTNAME}${PATH}`
-    );
-
-    console.log("✅ Webhook set");
-  });
-}
-
-start();
+  console.log("✅ Webhook set");
+});
