@@ -28,7 +28,7 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
       executionMode: "dry_run",
       allowedStrategies: ["scalp", "reversal"],
       enabled: true,
-      minReserveSol: 0.10,
+      minReserveSol: 0.1,
       maxTradeUsd: 250,
       secretRef: ""
     },
@@ -82,6 +82,23 @@ export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
   }
 });
 
+export function normalizeConfig(input = {}) {
+  const merged = {
+    ...clone(DEFAULT_RUNTIME_CONFIG),
+    ...clone(input)
+  };
+
+  merged.strategyBudget = normalizeBudgetConfig(merged.strategyBudget);
+  merged.strategyEnabled = {
+    scalp: merged.strategyEnabled?.scalp !== false,
+    reversal: merged.strategyEnabled?.reversal !== false,
+    runner: merged.strategyEnabled?.runner !== false,
+    copytrade: merged.strategyEnabled?.copytrade !== false
+  };
+
+  return merged;
+}
+
 export function createRuntimeState() {
   return {
     mode: "stopped",
@@ -99,23 +116,6 @@ export function createRuntimeState() {
     activeChatId: null,
     activeUserId: null
   };
-}
-
-export function normalizeConfig(input = {}) {
-  const merged = {
-    ...clone(DEFAULT_RUNTIME_CONFIG),
-    ...clone(input)
-  };
-
-  merged.strategyBudget = normalizeBudgetConfig(merged.strategyBudget);
-  merged.strategyEnabled = {
-    scalp: merged.strategyEnabled?.scalp !== false,
-    reversal: merged.strategyEnabled?.reversal !== false,
-    runner: merged.strategyEnabled?.runner !== false,
-    copytrade: merged.strategyEnabled?.copytrade !== false
-  };
-
-  return merged;
 }
 
 export function setPendingConfig(runtime, patch = {}, reason = "manual_update") {
