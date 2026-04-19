@@ -1,7 +1,12 @@
 const SEARCH_API = "https://api.dexscreener.com/latest/dex/search";
 const TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
+const TOKEN_PROFILES_API = "https://api.dexscreener.com/token-profiles/latest/v1";
+const TOKEN_BOOSTS_API = "https://api.dexscreener.com/token-boosts/latest/v1";
 
 const tokenSnapshotStore = new Map();
+const mediaCache = new Map();
+let mediaCacheLoadedAt = 0;
+
 const SAFETY_MARGIN_PCT = 1.2;
 
 function safeNum(v, fallback = 0) {
@@ -399,6 +404,53 @@ function buildStrategy(token, delta, accumulation, distribution, absorption, ove
   };
 }
 
+async function refreshMediaCache() {
+  const now = Date.now();
+  if (now - mediaCacheLoadedAt < 10 * 60 * 1000 && mediaCache.size) return;
+
+  mediaCache.clear();
+
+  try {
+    const profiles = await fetchJson(TOKEN_PROFILES_API);
+    if (Array.isArray(profiles)) {
+      for (const item of profiles) {
+        if (!item?.tokenAddress) continue;
+        mediaCache.set(item.tokenAddress, {
+          icon: item.icon || null,
+          header: item.header || null
+        });
+      }
+    }
+  } catch {}
+
+  try {
+    const boosts = await fetchJson(TOKEN_BOOSTS_API);
+    if (Array.isArray(boosts)) {
+      for (const item of boosts) {
+        if (!item?.tokenAddress) continue;
+        const prev = mediaCache.get(item.tokenAddress) || {};
+        mediaCache.set(item.tokenAddress, {
+          icon: prev.icon || item.icon || null,
+          header: prev.header || item.header || null
+        });
+      }
+    }
+  } catch {}
+
+  mediaCacheLoadedAt = now;
+}
+
+async function enrichTokenMedia(token) {
+  await refreshMediaCache();
+  const media = mediaCache.get(token.ca) || {};
+  return {
+    ...token,
+    imageUrl: media.header || media.icon || null,
+    iconUrl: media.icon || null,
+    headerUrl: media.header || null
+  };
+}
+
 function passesBaseSafety(token) {
   if (!token.ca || !token.name || token.price <= 0) return false;
   if (isStableLike(token.name)) return false;
@@ -515,8 +567,10 @@ export async function analyzeToken(token) {
     reasons.push(...falseBounce.reasons);
   }
 
+  const enrichedToken = await enrichTokenMedia({ ...token, score });
+
   const analyzed = {
-    token: { ...token, score },
+    token: enrichedToken,
     rug,
     wallet,
     bots,
