@@ -14,7 +14,6 @@ import {
   scanTokenCandidate,
   buildScanProposal,
   dryRunEntryFromScan,
-  formatScanForTelegram,
   buildCompactScanSummary
 } from "./scan-engine.js";
 
@@ -36,6 +35,7 @@ const TELEGRAM_WEBHOOK_BASE_URL =
 
 const WEBHOOK_SECRET =
   process.env.WEBHOOK_SECRET ||
+  process.env.ADMIN_SECRET ||
   "chiikawa_webhook_secret_2026";
 
 const WEBHOOK_PATH = `/telegram/${WEBHOOK_SECRET}`;
@@ -129,9 +129,7 @@ const I18N = {
     chooseLang: "🌍 Choose language",
     langSet: "🌍 Language set",
     noOpenTrades: "No open trades",
-    stumbled: "Chiikawa stumbled a little... 🥺",
     entryStarted: "🚀 Test trade launched",
-    enterCA: "🧪 Send CA for Level 6 scan",
     awaitingCA: "⌛ Waiting for CA. Send contract address in next message.",
     scanStarted: "🔎 Level 6 scan started",
     scanReady: "✅ Scan ready",
@@ -163,9 +161,7 @@ const I18N = {
     chooseLang: "🌍 Выбери язык",
     langSet: "🌍 Язык установлен",
     noOpenTrades: "Открытых сделок нет",
-    stumbled: "Chiikawa немного споткнулся... 🥺",
     entryStarted: "🚀 Тестовая сделка запущена",
-    enterCA: "🧪 Отправь CA для скана Level 6",
     awaitingCA: "⌛ Жду CA. Отправь контракт следующим сообщением.",
     scanStarted: "🔎 Level 6 скан запущен",
     scanReady: "✅ Скан готов",
@@ -457,12 +453,19 @@ function buildScanKeyboard(scanId) {
         { text: "🧠 Decision", callback_data: `scan:decision:${scanId}` }
       ],
       [
-        { text: "⚠️ Risks", callback_data: `scan:risks:${scanId}` },
-        { text: "📣 Social", callback_data: `scan:social:${scanId}` }
+        { text: "👛 Wallet Intel", callback_data: `scan:wallet:${scanId}` },
+        { text: "🛡 Rug Risk", callback_data: `scan:rug:${scanId}` }
       ],
       [
-        { text: "🧪 Dry Run Entry", callback_data: `scan:dryrun:${scanId}` },
+        { text: "📣 Social", callback_data: `scan:social:${scanId}` },
+        { text: "⚠️ Risks", callback_data: `scan:risks:${scanId}` }
+      ],
+      [
+        { text: "🧾 Full Report", callback_data: `scan:full:${scanId}` },
         { text: "🔁 Refresh Scan", callback_data: `scan:refresh:${scanId}` }
+      ],
+      [
+        { text: "🧪 Dry Run Entry", callback_data: `scan:dryrun:${scanId}` }
       ]
     ]
   };
@@ -1115,6 +1118,7 @@ function buildRiskText(result = {}) {
   const decision = result.decision || {};
   const blocked = Array.isArray(decision.blockedReasons) ? decision.blockedReasons : [];
   const cautions = Array.isArray(decision.reasons) ? decision.reasons : [];
+  const rugText = result.texts?.rugRisk || "";
 
   const lines = [
     `<b>Risk Review</b>`,
@@ -1133,6 +1137,11 @@ function buildRiskText(result = {}) {
     lines.push("");
     lines.push("<b>Cautions:</b>");
     cautions.forEach(item => lines.push(`• ${item}`));
+  }
+
+  if (rugText) {
+    lines.push("");
+    lines.push(rugText);
   }
 
   return lines.join("\n");
@@ -1316,6 +1325,16 @@ async function handleScanCallback(query, parts) {
     return;
   }
 
+  if (scanAction === "wallet") {
+    await sendText(chatId, stored.result.texts?.walletIntel || "No wallet intel");
+    return;
+  }
+
+  if (scanAction === "rug") {
+    await sendText(chatId, stored.result.texts?.rugRisk || "No rug-risk report");
+    return;
+  }
+
   if (scanAction === "risks") {
     await sendText(chatId, buildRiskText(stored.result));
     return;
@@ -1323,6 +1342,11 @@ async function handleScanCallback(query, parts) {
 
   if (scanAction === "social") {
     await sendText(chatId, buildSocialText(stored.result));
+    return;
+  }
+
+  if (scanAction === "full") {
+    await sendText(chatId, stored.result.texts?.candidate || "No full report");
     return;
   }
 
