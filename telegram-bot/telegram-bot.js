@@ -1,4 +1,7 @@
 import http from "node:http";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
 import { getBestTrade, getLatestTokenPrice } from "./scan-engine.js";
 import {
@@ -8,7 +11,8 @@ import {
   markToMarket,
   shouldExitPosition,
   updatePositionMarket,
-  estimateRoundTripCostPct
+  estimateRoundTripCostPct,
+  resetPortfolio
 } from "./portfolio.js";
 
 const TOKEN = process.env.BOT_TOKEN;
@@ -31,12 +35,44 @@ let intervalId = null;
 let autoStopId = null;
 let activeChatId = null;
 const recentlyTraded = new Map();
+let runState = {
+  startedAt: null,
+  stoppedAt: null,
+  runId: null,
+  notes: []
+};
 
-async function send(chatId, text) {
+async function send(chatId, text, opts = {}) {
   return bot.sendMessage(chatId, text, {
     parse_mode: "HTML",
-    disable_web_page_preview: true
+    disable_web_page_preview: true,
+    ...opts
   });
+}
+
+async function sendFile(chatId, filePath, fileName) {
+  return bot.sendDocument(chatId, filePath, {}, {
+    filename: fileName,
+    contentType: "application/json"
+  });
+}
+
+function menu() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "▶️ Run 4h", callback_data: "run4h" },
+        { text: "🛑 Stop", callback_data: "stop" }
+      ],
+      [
+        { text: "📊 Status", callback_data: "status" },
+        { text: "🔎 Scan", callback_data: "scan" }
+      ],
+      [
+        { text: "📦 Export Stats", callback_data: "exportstats" }
+      ]
+    ]
+  };
 }
 
 function pruneRecentlyTraded() {
@@ -57,6 +93,7 @@ function stopAutoInternal() {
     clearTimeout(autoStopId);
     autoStopId = null;
   }
+  runState.stoppedAt = Date.now();
 }
 
 function formatAnalysis(best) {
@@ -100,6 +137,42 @@ function formatAnalysis(best) {
 
 <b>Reasons:</b>
 ${best.reasons.map(r => `• ${r}`).join("\n")}`;
+}
+
+function buildRunStats() {
+  const pf = getPortfolio();
+  const history = pf.tradeHistory || [];
+  const wins = history.filter(t => t.netPnlPct > 0);
+  const losses = history.filter(t => t.netPnlPct <= 0);
+  const avgPnl = history.length
+    ? history.reduce((a, t) => a + t.netPnlPct, 0) / history.length
+    : 0;
+
+  return {
+    runId: runState.runId,
+    startedAt: runState.startedAt,
+    stoppedAt: runState.stoppedAt,
+    balance: pf.balance,
+    openPosition: pf.position,
+    totalTrades: history.length,
+    wins: wins.length,
+    losses: losses.length,
+    winRatePct: history.length ? (wins.length / history.length) * 100 : 0,
+    avgNetPnlPct: avgPnl,
+    tradeHistory: history,
+    notes: runState.notes
+  };
+}
+
+async function exportStats(chatId) {
+  const stats = buildRunStats();
+  const filePath = path.join(
+    os.tmpdir(),
+    `chiikawa-stats-${stats.runId || Date.now()}.json`
+  );
+
+  await fs.writeFile(filePath, JSON.stringify(stats, null, 2), "utf8");
+  await sendFile(chatId, filePath, path.basename(filePath));
 }
 
 async function runCycle(chatId) {
@@ -173,7 +246,7 @@ async function runCycle(chatId) {
 
     await send(chatId, formatAnalysis(best));
 
-    if (best.score < 75) {
+    if (best.score < 85) {
       await send(chatId, "❌ Skip (score below threshold)");
       return;
     }
@@ -183,10 +256,11 @@ async function runCycle(chatId) {
       return;
     }
 
-    if (best.strategy.expectedEdgePct < estimateRoundTripCostPct()) {
+    const minRequiredEdge = estimateRoundTripCostPct() + 1.2;
+    if (best.strategy.expectedEdgePct < minRequiredEdge) {
       await send(
         chatId,
-        `❌ Skip (expected edge ${best.strategy.expectedEdgePct}% does not beat costs ${estimateRoundTripCostPct()}%)`
+        `❌ Skip (expected edge ${best.strategy.expectedEdgePct}% does not beat costs+margin ${minRequiredEdge}%)`
       );
       return;
     }
@@ -242,6 +316,15 @@ async function runCycle(chatId) {
 function startAuto(chatId, hours = AUTO_HOURS_DEFAULT) {
   stopAutoInternal();
   activeChatId = chatId;
+  recentlyTraded.clear();
+  resetPortfolio(1.0);
+
+  runState = {
+    startedAt: Date.now(),
+    stoppedAt: null,
+    runId: `run-${Date.now()}`,
+    notes: [`Started ${hours}h simulation with 1 SOL`]
+  };
 
   intervalId = setInterval(() => {
     runCycle(chatId);
@@ -260,7 +343,9 @@ async function handleMessage(msg) {
   const text = String(msg.text || "").trim();
 
   if (text === "/start") {
-    await send(chatId, "🤖 Bot ready. Commands: /run4h /stop /status /scan");
+    await send(chatId, "🤖 Bot ready. Commands: /run4h /stop /status /scan /exportstats", {
+      reply_markup: menu()
+    });
     return;
   }
 
@@ -297,11 +382,70 @@ async function handleMessage(msg) {
 
   if (text === "/scan") {
     await runCycle(chatId);
+    return;
+  }
+
+  if (text === "/exportstats") {
+    await exportStats(chatId);
+  }
+}
+
+async function handleCallback(query) {
+  const chatId = query.message.chat.id;
+  const data = query.data;
+
+  try {
+    await bot.answerCallbackQuery(query.id);
+  } catch {}
+
+  if (data === "run4h") {
+    await send(chatId, "🚀 Starting 4h simulation from 1 SOL");
+    startAuto(chatId, 4);
+    return;
+  }
+
+  if (data === "stop") {
+    if (intervalId) {
+      stopAutoInternal();
+      await send(chatId, "🛑 Bot stopped");
+    } else {
+      await send(chatId, "ℹ️ Bot already stopped");
+    }
+    return;
+  }
+
+  if (data === "status") {
+    const pf = getPortfolio();
+    await send(
+      chatId,
+      `📊 <b>STATUS</b>
+
+<b>Balance:</b> ${pf.balance.toFixed(4)} SOL
+<b>Position:</b> ${pf.position ? pf.position.token : "none"}
+<b>Auto mode:</b> ${intervalId ? "ON" : "OFF"}
+<b>Trades closed:</b> ${pf.tradeHistory.length}
+<b>Recently traded cooldown list:</b> ${recentlyTraded.size}`
+    );
+    return;
+  }
+
+  if (data === "scan") {
+    await runCycle(chatId);
+    return;
+  }
+
+  if (data === "exportstats") {
+    await exportStats(chatId);
   }
 }
 
 async function processUpdate(update) {
   try {
+    if (update?.callback_query) {
+      await handleCallback(update.callback_query);
+      return;
+    }
+
     if (update?.message?.text) {
       await handleMessage(update.message);
     }
