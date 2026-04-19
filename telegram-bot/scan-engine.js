@@ -1,4 +1,5 @@
-import { analyzeDeveloper, recordProjectRiskEvent } from "./dev-analyzer.js";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 const SEARCH_API = "https://api.dexscreener.com/latest/dex/search";
 const TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
@@ -11,12 +12,22 @@ let mediaCacheLoadedAt = 0;
 
 const corpseBlacklist = new Map();
 const CORPSE_BLACKLIST_MS = 6 * 60 * 60 * 1000;
+const RUNTIME_DIR = path.resolve("./runtime-data");
+const DEV_DB_FILE = path.join(RUNTIME_DIR, "dev-history.json");
 
-const SAFETY_MARGIN_PCT = 1.2;
+let devDbLoaded = false;
+let devDb = {
+  fingerprints: {}
+};
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function round(v, d = 4) {
+  const p = 10 ** d;
+  return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
 }
 
 async function fetchJson(url) {
@@ -25,6 +36,26 @@ async function fetchJson(url) {
     throw new Error(`HTTP ${res.status} for ${url}`);
   }
   return res.json();
+}
+
+async function ensureDevDb() {
+  if (devDbLoaded) return;
+
+  await fs.mkdir(RUNTIME_DIR, { recursive: true });
+
+  try {
+    const raw = await fs.readFile(DEV_DB_FILE, "utf8");
+    devDb = JSON.parse(raw);
+  } catch {
+    devDb = { fingerprints: {} };
+  }
+
+  devDbLoaded = true;
+}
+
+async function flushDevDb() {
+  await fs.mkdir(RUNTIME_DIR, { recursive: true });
+  await fs.writeFile(DEV_DB_FILE, JSON.stringify(devDb, null, 2), "utf8");
 }
 
 function normalizePair(p) {
@@ -68,15 +99,13 @@ function putSnapshot(token) {
 
 function isStableLike(symbol) {
   const s = String(symbol || "").toUpperCase();
-  return ["SOL", "USDC", "USDT", "PUMP", "JUP", "RAY"].includes(s);
+  return ["SOL", "USDC", "USDT", "JUP", "RAY"].includes(s);
 }
 
 function pruneCorpseBlacklist() {
   const now = Date.now();
   for (const [ca, row] of corpseBlacklist.entries()) {
-    if (!row?.until || row.until <= now) {
-      corpseBlacklist.delete(ca);
-    }
+    if (!row?.until || row.until <= now) corpseBlacklist.delete(ca);
   }
 }
 
@@ -86,7 +115,6 @@ function getCorpseBlacklistItem(ca) {
 }
 
 function addToCorpseBlacklist(ca, reason) {
-  if (!ca) return;
   corpseBlacklist.set(ca, {
     reason,
     until: Date.now() + CORPSE_BLACKLIST_MS
@@ -246,6 +274,248 @@ export function getSentiment(token) {
   };
 }
 
+function analyzeNarrative(token) {
+  const text = String(token.description || "").toLowerCase();
+  let score = 0;
+  const positives = [];
+  const flags = [];
+
+  if (!text) {
+    score -= 10;
+    flags.push("No description");
+    return {
+      score,
+      verdict: "No narrative",
+      positives,
+      flags,
+      summary: "No narrative available."
+    };
+  }
+
+  if (text.length > 120) {
+    score += 10;
+    positives.push("Detailed description");
+  } else if (text.length < 50) {
+    score -= 12;
+    flags.push("Too short");
+  }
+
+  if (text.includes("100x") || text.includes("next gem")) {
+    score -= 20;
+    flags.push("Hype wording");
+  }
+
+  if (text.includes("ai") || text.includes("bot") || text.includes("tool") || text.includes("game")) {
+    score += 8;
+    positives.push("Has concept");
+  }
+
+  const verdict = score >= 10 ? "Strong" : score > 0 ? "OK" : "Weak";
+
+  return {
+    score,
+    verdict,
+    positives,
+    flags,
+    summary: text.slice(0, 220)
+  };
+}
+
+function normalizeHandle(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/^x\.com\//, "")
+    .replace(/^twitter\.com\//, "")
+    .replace(/^t\.me\//, "")
+    .replace(/\/+$/, "")
+    .trim();
+}
+
+function extractLinksMap(linksInput = {}) {
+  const map = { twitter: "", telegram: "", website: "" };
+
+  if (Array.isArray(linksInput)) {
+    for (const item of linksInput) {
+      const label = String(item?.label || "").toLowerCase();
+      const type = String(item?.type || "").toLowerCase();
+      const url = item?.url || "";
+
+      if (type.includes("twitter") || label.includes("twitter") || label === "x") map.twitter = url;
+      else if (type.includes("telegram") || label.includes("telegram")) map.telegram = url;
+      else if (type.includes("website") || label.includes("website")) map.website = url;
+      else if (!map.website && url) map.website = url;
+    }
+  } else if (typeof linksInput === "object" && linksInput) {
+    map.twitter = linksInput.twitter || linksInput.x || "";
+    map.telegram = linksInput.telegram || "";
+    map.website = linksInput.website || "";
+  }
+
+  return map;
+}
+
+function analyzeSocials(token) {
+  const links = extractLinksMap(token.links || {});
+  let score = 0;
+  const notes = [];
+
+  if (links.twitter) {
+    score += 10;
+    notes.push("Twitter/X");
+  }
+  if (links.telegram) {
+    score += 10;
+    notes.push("Telegram");
+  }
+  if (links.website) {
+    score += 10;
+    notes.push("Website");
+  }
+  if (!links.twitter && !links.telegram) {
+    score -= 15;
+    notes.push("No socials");
+  }
+
+  return { score, notes, links };
+}
+
+function fingerprintProject(token) {
+  const links = extractLinksMap(token.links || {});
+  const tw = normalizeHandle(links.twitter);
+  const tg = normalizeHandle(links.telegram);
+  const web = normalizeHandle(links.website);
+  const name = String(token.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const caPrefix = String(token.ca || "").slice(0, 8).toLowerCase();
+
+  const parts = [];
+  if (tw) parts.push(`x:${tw}`);
+  if (tg) parts.push(`tg:${tg}`);
+  if (web) parts.push(`web:${web}`);
+  if (!parts.length) {
+    parts.push(`name:${name || "unknown"}`);
+    parts.push(`ca:${caPrefix}`);
+  }
+
+  return parts.join("|");
+}
+
+async function analyzeDeveloper(token) {
+  await ensureDevDb();
+  const fingerprint = fingerprintProject(token);
+  const row = devDb.fingerprints[fingerprint] || {
+    observations: 0,
+    corpseFlags: 0,
+    rugFlags: 0,
+    wins: 0,
+    losses: 0
+  };
+
+  let score = 0;
+  const notes = [];
+
+  const links = extractLinksMap(token.links || {});
+  if (links.twitter) {
+    score += 6;
+    notes.push("Twitter/X present");
+  } else {
+    score -= 8;
+    notes.push("No Twitter/X");
+  }
+
+  if (links.telegram) {
+    score += 4;
+    notes.push("Telegram present");
+  } else {
+    score -= 4;
+    notes.push("No Telegram");
+  }
+
+  if (links.website) {
+    score += 6;
+    notes.push("Website present");
+  } else {
+    score -= 4;
+    notes.push("No website");
+  }
+
+  if (row.observations >= 2) {
+    notes.push(`Seen before (${row.observations}x)`);
+  }
+
+  if (row.corpseFlags >= 1) {
+    score -= 15;
+    notes.push(`Corpse history: ${row.corpseFlags}`);
+  }
+
+  if (row.rugFlags >= 1) {
+    score -= 20;
+    notes.push(`Rug history: ${row.rugFlags}`);
+  }
+
+  if (row.losses > row.wins && row.losses >= 2) {
+    score -= 8;
+    notes.push("Past outcomes negative");
+  } else if (row.wins > row.losses && row.wins >= 2) {
+    score += 6;
+    notes.push("Past outcomes slightly positive");
+  }
+
+  const verdict =
+    score >= 15 ? "Clean"
+    : score >= 0 ? "Mixed"
+    : score >= -20 ? "Risky"
+    : "Bad";
+
+  return {
+    score,
+    verdict,
+    fingerprintKey: fingerprint,
+    notes
+  };
+}
+
+export async function recordProjectRiskEvent(token, flags = {}) {
+  await ensureDevDb();
+  const fp = fingerprintProject(token);
+  const row = devDb.fingerprints[fp] || {
+    observations: 0,
+    corpseFlags: 0,
+    rugFlags: 0,
+    wins: 0,
+    losses: 0
+  };
+
+  row.observations += 1;
+  if (flags.corpse) row.corpseFlags += 1;
+  if (flags.rug) row.rugFlags += 1;
+
+  devDb.fingerprints[fp] = row;
+  await flushDevDb();
+}
+
+export async function recordTradeOutcomeFromSignalContext(signalContext = {}, netPnlPct = 0) {
+  await ensureDevDb();
+
+  const fp = signalContext?.developer?.fingerprintKey;
+  if (!fp) return;
+
+  const row = devDb.fingerprints[fp] || {
+    observations: 0,
+    corpseFlags: 0,
+    rugFlags: 0,
+    wins: 0,
+    losses: 0
+  };
+
+  if (safeNum(netPnlPct) > 0) row.wins += 1;
+  else row.losses += 1;
+
+  devDb.fingerprints[fp] = row;
+  await flushDevDb();
+}
+
 function detectAccumulation(token, delta) {
   let score = 0;
   const reasons = [];
@@ -333,17 +603,14 @@ function detectFalseBounce(token, delta, accumulation, distribution) {
       rejected = true;
       reasons.push("Price bounce without participation");
     }
-
     if (delta.priceDeltaPct > 0 && delta.liquidityDeltaPct < -2) {
       rejected = true;
       reasons.push("Bounce while liquidity deteriorates");
     }
-
     if (delta.priceDeltaPct > 0 && delta.buyPressureDelta < 0) {
       rejected = true;
       reasons.push("Bounce while buy pressure weakens");
     }
-
     if (distribution.score > accumulation.score + 8) {
       rejected = true;
       reasons.push("Distribution dominates accumulation");
@@ -441,7 +708,7 @@ function buildExceptionalOverride(token, accumulation, distribution, absorption)
   };
 }
 
-function buildStrategy(token, delta, accumulation, distribution, absorption, override, corpse, developer) {
+function buildBaseStrategy(token, delta, accumulation, distribution, absorption, override, corpse, developer) {
   const volumeToLiquidity = token.liquidity > 0 ? token.volume / token.liquidity : 0;
   const buyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
 
@@ -486,7 +753,7 @@ function buildStrategy(token, delta, accumulation, distribution, absorption, ove
   }
 
   return {
-    expectedEdgePct: Math.round(expectedEdgePct * 100) / 100,
+    expectedEdgePct: round(expectedEdgePct, 2),
     intendedHoldMs,
     takeProfitPct,
     stopLossPct,
@@ -505,7 +772,6 @@ async function refreshMediaCache() {
     if (Array.isArray(profiles)) {
       for (const item of profiles) {
         if (!item?.tokenAddress) continue;
-
         mediaCache.set(item.tokenAddress, {
           icon: item.icon || null,
           header: item.header || null,
@@ -523,7 +789,6 @@ async function refreshMediaCache() {
         if (!item?.tokenAddress) continue;
 
         const prev = mediaCache.get(item.tokenAddress) || {};
-
         mediaCache.set(item.tokenAddress, {
           icon: prev.icon || item.icon || null,
           header: prev.header || item.header || null,
@@ -598,8 +863,10 @@ export async function analyzeToken(token) {
 
   const enrichedToken = await enrichTokenMedia(token);
   const developer = await analyzeDeveloper(enrichedToken);
+  const narrative = analyzeNarrative(enrichedToken);
+  const socials = analyzeSocials(enrichedToken);
 
-  const strategy = buildStrategy(
+  const strategy = buildBaseStrategy(
     token,
     delta,
     accumulation,
@@ -634,6 +901,15 @@ export async function analyzeToken(token) {
     score += 20;
     reasons.push(...sentiment.reasons);
   }
+
+  score += narrative.score;
+  score += socials.score;
+  score += developer.score;
+
+  if (narrative.positives.length) reasons.push(...narrative.positives.map(v => `Narrative: ${v}`));
+  if (narrative.flags.length) reasons.push(...narrative.flags.map(v => `Narrative: ${v}`));
+  if (socials.notes.length) reasons.push(...socials.notes.map(v => `Social: ${v}`));
+  if (developer.notes.length) reasons.push(...developer.notes.map(v => `Dev: ${v}`));
 
   const buySellImbalance = token.sells > 0 ? token.buys / token.sells : token.buys;
   if (buySellImbalance > 1.2) {
@@ -673,9 +949,6 @@ export async function analyzeToken(token) {
   score += Math.round(absorption.score / 5);
   score -= Math.round(distribution.score / 4);
   score -= Math.round(corpse.score / 3);
-  score += developer.score;
-
-  reasons.push(...developer.notes.map(n => `Dev: ${n}`));
 
   if (exceptionalOverride.active) {
     score += 15;
@@ -714,6 +987,8 @@ export async function analyzeToken(token) {
     absorption,
     corpse,
     developer,
+    narrative,
+    socials,
     exceptionalOverride,
     falseBounce,
     strategy,
@@ -742,29 +1017,7 @@ export async function getBestTrade({ excludeCas = [] } = {}) {
     return b.token.volume - a.token.volume;
   });
 
-  const tradable = analyzed.filter(item => {
-    if (item.score < 85) return false;
-    if (!item.delta.hasHistory) return false;
-    if (item.falseBounce.rejected) return false;
-    if (item.corpse.isCorpse) return false;
-    if (getCorpseBlacklistItem(item.token.ca)) return false;
-
-    const strictLowLiquidity = item.token.liquidity < 15000;
-    if (strictLowLiquidity && !item.exceptionalOverride.active) return false;
-
-    if (item.delta.volumeDeltaPct <= 0) return false;
-    if (item.delta.txnsDeltaPct <= 0) return false;
-    if (item.delta.buyPressureDelta <= 0) return false;
-
-    if (item.strategy.reason === "BASE_SETUP") return false;
-    if (item.strategy.expectedEdgePct < 1.7 + SAFETY_MARGIN_PCT) return false;
-    if (item.distribution.score > item.accumulation.score + 10) return false;
-    if (item.developer.verdict === "Bad") return false;
-
-    return true;
-  });
-
-  return tradable[0] || analyzed[0] || null;
+  return analyzed[0] || null;
 }
 
 export async function getLatestTokenPrice(ca) {
