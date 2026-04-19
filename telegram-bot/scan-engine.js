@@ -25,9 +25,8 @@ function safeNum(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-function round(v, d = 4) {
-  const p = 10 ** d;
-  return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
+function safeText(v) {
+  return String(v || "").trim();
 }
 
 async function fetchJson(url) {
@@ -58,26 +57,113 @@ async function flushDevDb() {
   await fs.writeFile(DEV_DB_FILE, JSON.stringify(devDb, null, 2), "utf8");
 }
 
-function normalizePair(p) {
-  const buys = safeNum(p?.txns?.h24?.buys);
-  const sells = safeNum(p?.txns?.h24?.sells);
+function normalizeHandle(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .replace(/^x\.com\//, "")
+    .replace(/^twitter\.com\//, "")
+    .replace(/^t\.me\//, "")
+    .replace(/\/+$/, "")
+    .trim();
+}
 
-  return {
-    name: p?.baseToken?.symbol || p?.baseToken?.name || "UNKNOWN",
-    ca: p?.baseToken?.address || "",
-    pairAddress: p?.pairAddress || "",
-    chainId: p?.chainId || "",
-    dexId: p?.dexId || "",
-    price: safeNum(p?.priceUsd),
-    liquidity: safeNum(p?.liquidity?.usd),
-    volume: safeNum(p?.volume?.h24),
-    buys,
-    sells,
-    txns: buys + sells,
-    fdv: safeNum(p?.fdv),
-    pairCreatedAt: safeNum(p?.pairCreatedAt),
-    url: p?.url || ""
+function detectLinkKey(label = "", type = "", url = "") {
+  const l = String(label || "").toLowerCase();
+  const t = String(type || "").toLowerCase();
+  const u = String(url || "").toLowerCase();
+
+  if (
+    t.includes("twitter") ||
+    l.includes("twitter") ||
+    l === "x" ||
+    u.includes("x.com/") ||
+    u.includes("twitter.com/")
+  ) return "twitter";
+
+  if (t.includes("telegram") || l.includes("telegram") || u.includes("t.me/")) {
+    return "telegram";
+  }
+
+  if (t.includes("instagram") || l.includes("instagram") || u.includes("instagram.com/")) {
+    return "instagram";
+  }
+
+  if (t.includes("facebook") || l.includes("facebook") || u.includes("facebook.com/")) {
+    return "facebook";
+  }
+
+  if (
+    t.includes("youtube") ||
+    l.includes("youtube") ||
+    u.includes("youtube.com/") ||
+    u.includes("youtu.be/")
+  ) {
+    return "youtube";
+  }
+
+  if (
+    t.includes("discord") ||
+    l.includes("discord") ||
+    u.includes("discord.gg/") ||
+    u.includes("discord.com/")
+  ) {
+    return "discord";
+  }
+
+  if (t.includes("tiktok") || l.includes("tiktok") || u.includes("tiktok.com/")) {
+    return "tiktok";
+  }
+
+  if (t.includes("website") || l.includes("website")) return "website";
+  return null;
+}
+
+function extractLinksMap(linksInput = {}) {
+  const map = {
+    twitter: "",
+    telegram: "",
+    website: "",
+    instagram: "",
+    facebook: "",
+    youtube: "",
+    discord: "",
+    tiktok: ""
   };
+
+  const setIfEmpty = (key, value) => {
+    const url = String(value || "").trim();
+    if (url && !map[key]) map[key] = url;
+  };
+
+  if (Array.isArray(linksInput)) {
+    for (const item of linksInput) {
+      const url = item?.url || "";
+      const key = detectLinkKey(item?.label, item?.type, url);
+      if (key) setIfEmpty(key, url);
+      else if (url && !map.website) setIfEmpty("website", url);
+    }
+  } else if (typeof linksInput === "object" && linksInput) {
+    setIfEmpty("twitter", linksInput.twitter || linksInput.x);
+    setIfEmpty("telegram", linksInput.telegram);
+    setIfEmpty("website", linksInput.website);
+    setIfEmpty("instagram", linksInput.instagram);
+    setIfEmpty("facebook", linksInput.facebook);
+    setIfEmpty("youtube", linksInput.youtube);
+    setIfEmpty("discord", linksInput.discord);
+    setIfEmpty("tiktok", linksInput.tiktok);
+
+    for (const [key, value] of Object.entries(linksInput)) {
+      const detected = detectLinkKey(key, key, value);
+      if (detected) setIfEmpty(detected, value);
+      else if (String(value || "").startsWith("http") && !map.website) {
+        setIfEmpty("website", value);
+      }
+    }
+  }
+
+  return map;
 }
 
 function getSnapshot(ca) {
@@ -147,6 +233,48 @@ function computeDelta(token) {
     liquidityDeltaPct: prev.liquidity > 0 ? ((token.liquidity - prev.liquidity) / prev.liquidity) * 100 : 0,
     fdvDeltaPct: prev.fdv > 0 ? ((token.fdv - prev.fdv) / prev.fdv) * 100 : 0,
     buyPressureDelta: currBuyPressure - prevBuyPressure
+  };
+}
+
+function normalizePair(p) {
+  const buys = safeNum(p?.txns?.h24?.buys);
+  const sells = safeNum(p?.txns?.h24?.sells);
+
+  const socials = Array.isArray(p?.info?.socials) ? p.info.socials : [];
+  const websites = Array.isArray(p?.info?.websites) ? p.info.websites : [];
+
+  const links = [
+    ...socials.map((x) => ({
+      type: x?.type || "",
+      label: x?.type || "",
+      url: x?.url || ""
+    })),
+    ...websites.map((x) => ({
+      type: "website",
+      label: "website",
+      url: x?.url || ""
+    }))
+  ];
+
+  return {
+    name: p?.baseToken?.name || p?.baseToken?.symbol || "UNKNOWN",
+    symbol: p?.baseToken?.symbol || "",
+    ca: p?.baseToken?.address || "",
+    pairAddress: p?.pairAddress || "",
+    chainId: p?.chainId || "",
+    dexId: p?.dexId || "",
+    price: safeNum(p?.priceUsd),
+    liquidity: safeNum(p?.liquidity?.usd),
+    volume: safeNum(p?.volume?.h24),
+    buys,
+    sells,
+    txns: buys + sells,
+    fdv: safeNum(p?.fdv),
+    pairCreatedAt: safeNum(p?.pairCreatedAt),
+    url: p?.url || "",
+    imageUrl: p?.info?.imageUrl || null,
+    description: p?.info?.description || p?.info?.header || "",
+    links
   };
 }
 
@@ -274,88 +402,6 @@ export function getSentiment(token) {
   };
 }
 
-function analyzeNarrative(token) {
-  const text = String(token.description || "").toLowerCase();
-  let score = 0;
-  const positives = [];
-  const flags = [];
-
-  if (!text) {
-    score -= 10;
-    flags.push("No description");
-    return {
-      score,
-      verdict: "No narrative",
-      positives,
-      flags,
-      summary: "No narrative available."
-    };
-  }
-
-  if (text.length > 120) {
-    score += 10;
-    positives.push("Detailed description");
-  } else if (text.length < 50) {
-    score -= 12;
-    flags.push("Too short");
-  }
-
-  if (text.includes("100x") || text.includes("next gem")) {
-    score -= 20;
-    flags.push("Hype wording");
-  }
-
-  if (text.includes("ai") || text.includes("bot") || text.includes("tool") || text.includes("game")) {
-    score += 8;
-    positives.push("Has concept");
-  }
-
-  const verdict = score >= 10 ? "Strong" : score > 0 ? "OK" : "Weak";
-
-  return {
-    score,
-    verdict,
-    positives,
-    flags,
-    summary: text.slice(0, 220)
-  };
-}
-
-function normalizeHandle(value) {
-  return String(value || "")
-    .toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/^www\./, "")
-    .replace(/^x\.com\//, "")
-    .replace(/^twitter\.com\//, "")
-    .replace(/^t\.me\//, "")
-    .replace(/\/+$/, "")
-    .trim();
-}
-
-function extractLinksMap(linksInput = {}) {
-  const map = { twitter: "", telegram: "", website: "" };
-
-  if (Array.isArray(linksInput)) {
-    for (const item of linksInput) {
-      const label = String(item?.label || "").toLowerCase();
-      const type = String(item?.type || "").toLowerCase();
-      const url = item?.url || "";
-
-      if (type.includes("twitter") || label.includes("twitter") || label === "x") map.twitter = url;
-      else if (type.includes("telegram") || label.includes("telegram")) map.telegram = url;
-      else if (type.includes("website") || label.includes("website")) map.website = url;
-      else if (!map.website && url) map.website = url;
-    }
-  } else if (typeof linksInput === "object" && linksInput) {
-    map.twitter = linksInput.twitter || linksInput.x || "";
-    map.telegram = linksInput.telegram || "";
-    map.website = linksInput.website || "";
-  }
-
-  return map;
-}
-
 function analyzeSocials(token) {
   const links = extractLinksMap(token.links || {});
   let score = 0;
@@ -373,12 +419,304 @@ function analyzeSocials(token) {
     score += 10;
     notes.push("Website");
   }
-  if (!links.twitter && !links.telegram) {
-    score -= 15;
-    notes.push("No socials");
+  if (links.instagram) {
+    score += 6;
+    notes.push("Instagram");
+  }
+  if (links.facebook) {
+    score += 4;
+    notes.push("Facebook");
+  }
+  if (links.youtube) {
+    score += 5;
+    notes.push("YouTube");
+  }
+  if (links.discord) {
+    score += 6;
+    notes.push("Discord");
+  }
+  if (links.tiktok) {
+    score += 5;
+    notes.push("TikTok");
   }
 
-  return { score, notes, links };
+  const socialCount = Object.values(links).filter(Boolean).length;
+
+  if (socialCount === 0) {
+    score -= 15;
+    notes.push("No socials");
+  } else if (!links.twitter && !links.telegram && socialCount >= 2) {
+    notes.push("Alt socials present");
+  }
+
+  return { score, notes, links, socialCount };
+}
+
+function analyzeNarrative(token) {
+  const links = extractLinksMap(token.links || {});
+  const rawDescription = String(token.description || "").trim();
+  const tokenName = String(token.name || "").trim();
+  const symbol = String(token.symbol || token.name || "").trim();
+
+  const combinedText = [
+    rawDescription,
+    tokenName,
+    symbol,
+    links.website ? "website present" : "",
+    links.twitter ? "twitter present" : "",
+    links.instagram ? "instagram present" : "",
+    links.facebook ? "facebook present" : ""
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  let score = 0;
+  const positives = [];
+  const flags = [];
+
+  if (!rawDescription) {
+    if (tokenName && Object.values(links).some(Boolean)) {
+      score += 2;
+      positives.push("Basic project identity present");
+      return {
+        score,
+        verdict: "Basic",
+        positives,
+        flags,
+        summary: `${tokenName}${links.website ? " | website" : ""}${links.twitter ? " | x" : ""}${links.instagram ? " | instagram" : ""}${links.facebook ? " | facebook" : ""}`
+      };
+    }
+
+    score -= 10;
+    flags.push("No description");
+    return {
+      score,
+      verdict: "No narrative",
+      positives,
+      flags,
+      summary: "No narrative available."
+    };
+  }
+
+  if (rawDescription.length > 120) {
+    score += 10;
+    positives.push("Detailed description");
+  } else if (rawDescription.length >= 40) {
+    score += 4;
+    positives.push("Usable description");
+  } else {
+    score -= 6;
+    flags.push("Too short");
+  }
+
+  if (combinedText.includes("100x") || combinedText.includes("next gem")) {
+    score -= 20;
+    flags.push("Hype wording");
+  }
+
+  if (
+    combinedText.includes("ai") ||
+    combinedText.includes("bot") ||
+    combinedText.includes("tool") ||
+    combinedText.includes("game") ||
+    combinedText.includes("meme") ||
+    combinedText.includes("community") ||
+    combinedText.includes("parrot") ||
+    combinedText.includes("pet")
+  ) {
+    score += 8;
+    positives.push("Has concept");
+  }
+
+  const verdict =
+    score >= 10 ? "Strong"
+    : score > 2 ? "OK"
+    : score >= 0 ? "Basic"
+    : "Weak";
+
+  return {
+    score,
+    verdict,
+    positives,
+    flags,
+    summary: rawDescription.slice(0, 220)
+  };
+}
+
+function classifyTokenMechanics(token) {
+  const text = [
+    safeText(token.name),
+    safeText(token.symbol),
+    safeText(token.description),
+    safeText(token.profileHeader),
+    safeText(token.profileDescription)
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  let tokenType = "Standard";
+  let rewardModel = "None";
+  let beneficiarySignal = "Unknown";
+  let claimSignal = "Unknown";
+  const notes = [];
+  let score = 0;
+
+  if (text.includes("meme")) {
+    tokenType = "Meme";
+    notes.push("Meme branding");
+  }
+
+  if (text.includes("game") || text.includes("play")) {
+    tokenType = tokenType === "Standard" ? "Game" : `${tokenType} / Game`;
+    notes.push("Game wording");
+  }
+
+  if (text.includes("ai") || text.includes("bot")) {
+    tokenType = tokenType === "Standard" ? "AI/Bot" : `${tokenType} / AI/Bot`;
+    notes.push("AI/Bot wording");
+  }
+
+  if (
+    text.includes("reward") ||
+    text.includes("redistribution") ||
+    text.includes("reflections") ||
+    text.includes("reflection")
+  ) {
+    rewardModel = "Reward / Redistribution";
+    notes.push("Reward-style mechanics mentioned");
+    score += 4;
+  }
+
+  if (text.includes("cashback") || text.includes("cash back")) {
+    rewardModel = rewardModel === "None" ? "Cashback" : `${rewardModel} + Cashback`;
+    notes.push("Cashback wording");
+    score += 4;
+  }
+
+  if (
+    text.includes("buyback") ||
+    text.includes("buy back") ||
+    text.includes("buy-back")
+  ) {
+    rewardModel = rewardModel === "None" ? "Buyback" : `${rewardModel} + Buyback`;
+    notes.push("Buyback wording");
+    score += 5;
+  }
+
+  if (text.includes("burn") || text.includes("burning")) {
+    rewardModel = rewardModel === "None" ? "Burn" : `${rewardModel} + Burn`;
+    notes.push("Burn wording");
+    score += 5;
+  }
+
+  if (text.includes("dev reward") || text.includes("reward to dev")) {
+    beneficiarySignal = "Dev-beneficiary";
+    notes.push("Dev reward mentioned");
+    score -= 4;
+  }
+
+  if (
+    text.includes("community wallet") ||
+    text.includes("marketing wallet") ||
+    text.includes("treasury") ||
+    text.includes("backer wallet") ||
+    text.includes("support wallet")
+  ) {
+    beneficiarySignal = "External aligned beneficiary";
+    notes.push("External beneficiary wording");
+    score += 5;
+  }
+
+  if (
+    text.includes("renounced in favor") ||
+    text.includes("renounced to") ||
+    text.includes("in favor of") ||
+    text.includes("transferred to community") ||
+    text.includes("sent to community wallet")
+  ) {
+    beneficiarySignal = "Renounced / redirected beneficiary";
+    notes.push("Renounced or redirected beneficiary wording");
+    score += 7;
+  }
+
+  if (
+    text.includes("claim rewards") ||
+    text.includes("claiming rewards") ||
+    text.includes("claimer") ||
+    text.includes("claim wallet")
+  ) {
+    claimSignal = "Claim activity mentioned";
+    notes.push("Claim behavior wording");
+    score += 3;
+  }
+
+  if (
+    text.includes("active claimer") ||
+    text.includes("supporter claiming") ||
+    text.includes("community claims") ||
+    text.includes("backer claims")
+  ) {
+    claimSignal = "Positive aligned claimer";
+    notes.push("Aligned external claimer wording");
+    score += 6;
+  }
+
+  if (
+    text.includes("dump rewards") ||
+    text.includes("farm rewards") ||
+    text.includes("extract rewards")
+  ) {
+    claimSignal = "Extraction risk";
+    notes.push("Potential extraction wording");
+    score -= 7;
+  }
+
+  return {
+    tokenType,
+    rewardModel,
+    beneficiarySignal,
+    claimSignal,
+    notes,
+    score
+  };
+}
+
+function analyzeDexPaid(token) {
+  const amount = safeNum(token.boostAmount);
+  const totalAmount = safeNum(token.boostTotalAmount);
+  const hasBoost = amount > 0 || totalAmount > 0;
+  const hasProfile =
+    Boolean(token.profileHeader) ||
+    Boolean(token.profileDescription) ||
+    Object.values(extractLinksMap(token.links || {})).some(Boolean);
+
+  let status = "Unknown";
+  let notes = [];
+  let score = 0;
+
+  if (hasBoost) {
+    status = "Yes / Boosted";
+    notes.push(`Boost amount: ${amount || totalAmount}`);
+    score += 6;
+  } else if (hasProfile) {
+    status = "Profile present / no active boost seen";
+    notes.push("Token profile exists");
+    score += 2;
+  } else {
+    status = "No boost/profile detected";
+    notes.push("No active paid boost found in profile cache");
+    score -= 2;
+  }
+
+  return {
+    status,
+    notes,
+    score,
+    hasBoost,
+    amount,
+    totalAmount
+  };
 }
 
 function fingerprintProject(token) {
@@ -386,6 +724,8 @@ function fingerprintProject(token) {
   const tw = normalizeHandle(links.twitter);
   const tg = normalizeHandle(links.telegram);
   const web = normalizeHandle(links.website);
+  const ig = normalizeHandle(links.instagram);
+  const fb = normalizeHandle(links.facebook);
   const name = String(token.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
   const caPrefix = String(token.ca || "").slice(0, 8).toLowerCase();
 
@@ -393,6 +733,9 @@ function fingerprintProject(token) {
   if (tw) parts.push(`x:${tw}`);
   if (tg) parts.push(`tg:${tg}`);
   if (web) parts.push(`web:${web}`);
+  if (ig) parts.push(`ig:${ig}`);
+  if (fb) parts.push(`fb:${fb}`);
+
   if (!parts.length) {
     parts.push(`name:${name || "unknown"}`);
     parts.push(`ca:${caPrefix}`);
@@ -416,6 +759,7 @@ async function analyzeDeveloper(token) {
   const notes = [];
 
   const links = extractLinksMap(token.links || {});
+
   if (links.twitter) {
     score += 6;
     notes.push("Twitter/X present");
@@ -438,6 +782,16 @@ async function analyzeDeveloper(token) {
   } else {
     score -= 4;
     notes.push("No website");
+  }
+
+  if (links.instagram) {
+    score += 3;
+    notes.push("Instagram present");
+  }
+
+  if (links.facebook) {
+    score += 2;
+    notes.push("Facebook present");
   }
 
   if (row.observations >= 2) {
@@ -643,36 +997,19 @@ function detectCorpse(token, delta) {
     reasons.push("Very low FDV with oversized churn");
   }
 
-  if (fdvToLiquidity < 3 && token.volume > 120000 && token.liquidity < 15000) {
-    score += 16;
-    reasons.push("Collapsed structure still farming flow");
+  if (delta.hasHistory && delta.volumeDeltaPct < -35 && delta.priceDeltaPct < -15) {
+    score += 22;
+    reasons.push("Strong decay after prior activity");
   }
 
-  if (delta.hasHistory) {
-    if (delta.priceDeltaPct < -12 && delta.liquidityDeltaPct < -6) {
-      score += 28;
-      reasons.push("Recent structural collapse detected");
-    }
-
-    if (delta.priceDeltaPct < -8 && delta.volumeDeltaPct >= 0 && delta.buyPressureDelta <= 0) {
-      score += 20;
-      reasons.push("Dead bounce / residual selling");
-    }
-
-    if (delta.priceDeltaPct <= 0 && delta.txnsDeltaPct > 5 && delta.liquidityDeltaPct < 0) {
-      score += 16;
-      reasons.push("Activity persists while structure keeps decaying");
-    }
-
-    if (delta.fdvDeltaPct < -15 && delta.volumeDeltaPct > -5) {
-      score += 18;
-      reasons.push("FDV collapse not matched by recovery quality");
-    }
+  if (fdvToLiquidity > 45) {
+    score += 14;
+    reasons.push("Extreme FDV/liquidity mismatch");
   }
 
-  if (isPumpAddress && token.liquidity < 12000 && token.volume > 150000) {
-    score += 12;
-    reasons.push("Pump tail-risk on low liquidity after churn");
+  if (isPumpAddress && token.liquidity < 10000 && token.volume > 120000) {
+    score += 14;
+    reasons.push("Pump-style contract with weak surviving structure");
   }
 
   return {
@@ -683,87 +1020,82 @@ function detectCorpse(token, delta) {
 }
 
 function buildExceptionalOverride(token, accumulation, distribution, absorption) {
-  let score = 0;
   const reasons = [];
+  let active = false;
 
-  if (token.liquidity < 15000) {
-    if (accumulation.score >= 45) {
-      score += 22;
-      reasons.push("Low-liquidity override: strong accumulation");
-    }
-    if (absorption.score >= 28) {
-      score += 18;
-      reasons.push("Low-liquidity override: strong absorption");
-    }
-    if (distribution.score <= 10) {
-      score += 10;
-      reasons.push("Low-liquidity override: weak distribution");
-    }
+  if (
+    token.liquidity >= 20000 &&
+    token.volume >= 120000 &&
+    accumulation.score >= 25 &&
+    absorption.score >= 20 &&
+    distribution.score <= 10
+  ) {
+    active = true;
+    reasons.push("Exceptional flow override");
   }
 
-  return {
-    score,
-    reasons,
-    active: score >= 35
-  };
+  return { active, reasons };
 }
 
-function buildBaseStrategy(token, delta, accumulation, distribution, absorption, override, corpse, developer) {
-  const volumeToLiquidity = token.liquidity > 0 ? token.volume / token.liquidity : 0;
-  const buyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
-
+function buildBaseStrategy(
+  token,
+  delta,
+  accumulation,
+  distribution,
+  absorption,
+  exceptionalOverride,
+  corpse,
+  developer,
+  mechanics,
+  dexPaid
+) {
   let expectedEdgePct = 0;
-  let intendedHoldMs = 180000;
-  let takeProfitPct = 4.5;
-  let stopLossPct = 2.4;
-  let reason = "BASE_SETUP";
+  const reasons = [];
 
-  if (volumeToLiquidity > 8) expectedEdgePct += 0.8;
-  if (volumeToLiquidity > 15) expectedEdgePct += 0.8;
-  if (buyPressure > 1.15) expectedEdgePct += 0.8;
-  if (buyPressure > 1.35) expectedEdgePct += 0.8;
-
-  if (delta.volumeDeltaPct > 12) expectedEdgePct += 1.0;
-  if (delta.txnsDeltaPct > 10) expectedEdgePct += 0.8;
-  if (delta.priceDeltaPct > 1.5 && delta.priceDeltaPct < 12) expectedEdgePct += 0.8;
-  if (delta.liquidityDeltaPct >= 0) expectedEdgePct += 0.4;
-
-  expectedEdgePct += accumulation.score / 60;
-  expectedEdgePct += absorption.score / 80;
-  expectedEdgePct -= distribution.score / 90;
-  expectedEdgePct -= corpse.score / 50;
-  expectedEdgePct += developer.score / 20;
-
-  if (override.active && !corpse.isCorpse) {
-    expectedEdgePct += 0.8;
-    intendedHoldMs = 210000;
-    takeProfitPct = 5.2;
-    stopLossPct = 2.6;
-    reason = "EXCEPTIONAL_ACCUMULATION_OVERRIDE";
-  } else if (
-    delta.volumeDeltaPct > 20 &&
-    delta.txnsDeltaPct > 15 &&
-    delta.buyPressureDelta > 0.08 &&
-    !corpse.isCorpse
-  ) {
-    intendedHoldMs = 240000;
-    takeProfitPct = 5.5;
-    stopLossPct = 2.8;
-    reason = "MOMENTUM_EXPANSION";
+  if (delta.hasHistory) {
+    if (delta.volumeDeltaPct > 12) {
+      expectedEdgePct += 4;
+      reasons.push("Volume is accelerating");
+    }
+    if (delta.txnsDeltaPct > 10) {
+      expectedEdgePct += 3;
+      reasons.push("Transaction activity is accelerating");
+    }
+    if (delta.buyPressureDelta > 0.08) {
+      expectedEdgePct += 3;
+      reasons.push("Buy pressure improving");
+    }
+    if (delta.priceDeltaPct > 1 && delta.priceDeltaPct < 12) {
+      expectedEdgePct += 2;
+      reasons.push("Healthy price expansion");
+    }
+  } else {
+    expectedEdgePct -= 2;
+    reasons.push("No historical delta yet");
   }
 
+  expectedEdgePct += Math.round(accumulation.score / 6);
+  expectedEdgePct += Math.round(absorption.score / 7);
+  expectedEdgePct -= Math.round(distribution.score / 7);
+  expectedEdgePct -= Math.round(corpse.score / 10);
+
+  if (developer.verdict === "Clean") expectedEdgePct += 2;
+  if (developer.verdict === "Bad") expectedEdgePct -= 6;
+
+  expectedEdgePct += Math.round(mechanics.score / 3);
+  expectedEdgePct += Math.round(dexPaid.score / 4);
+
+  if (exceptionalOverride.active) expectedEdgePct += 4;
+
   return {
-    expectedEdgePct: round(expectedEdgePct, 2),
-    intendedHoldMs,
-    takeProfitPct,
-    stopLossPct,
-    reason
+    expectedEdgePct: Math.max(0, expectedEdgePct),
+    reasons
   };
 }
 
 async function refreshMediaCache() {
   const now = Date.now();
-  if (now - mediaCacheLoadedAt < 10 * 60 * 1000 && mediaCache.size) return;
+  if (now - mediaCacheLoadedAt < 60 * 1000 && mediaCache.size > 0) return;
 
   mediaCache.clear();
 
@@ -775,8 +1107,13 @@ async function refreshMediaCache() {
         mediaCache.set(item.tokenAddress, {
           icon: item.icon || null,
           header: item.header || null,
-          description: item.description || "",
-          links: item.links || {}
+          description: item.description || item.header || "",
+          profileHeader: item.header || "",
+          profileDescription: item.description || "",
+          links: item.links || {},
+          profileSource: "profile",
+          boostAmount: 0,
+          boostTotalAmount: 0
         });
       }
     }
@@ -792,8 +1129,13 @@ async function refreshMediaCache() {
         mediaCache.set(item.tokenAddress, {
           icon: prev.icon || item.icon || null,
           header: prev.header || item.header || null,
-          description: prev.description || "",
-          links: prev.links || {}
+          description: prev.description || item.description || "",
+          profileHeader: prev.profileHeader || item.header || "",
+          profileDescription: prev.profileDescription || item.description || "",
+          links: { ...(prev.links || {}), ...(item.links || {}) },
+          profileSource: prev.profileSource || "boost",
+          boostAmount: safeNum(item.amount),
+          boostTotalAmount: safeNum(item.totalAmount)
         });
       }
     }
@@ -808,17 +1150,23 @@ async function enrichTokenMedia(token) {
 
   return {
     ...token,
-    imageUrl: media.header || media.icon || null,
-    iconUrl: media.icon || null,
-    headerUrl: media.header || null,
-    description: media.description || "",
-    links: media.links || {}
+    imageUrl: token.imageUrl || media.header || media.icon || null,
+    iconUrl: token.iconUrl || media.icon || null,
+    headerUrl: token.headerUrl || media.header || null,
+    description: token.description || media.description || "",
+    profileHeader: media.profileHeader || "",
+    profileDescription: media.profileDescription || "",
+    boostAmount: safeNum(media.boostAmount),
+    boostTotalAmount: safeNum(media.boostTotalAmount),
+    links: Array.isArray(token.links)
+      ? [...token.links, ...(Array.isArray(media.links) ? media.links : [])]
+      : { ...(token.links || {}), ...(media.links || {}) }
   };
 }
 
 function passesBaseSafety(token) {
   if (!token.ca || !token.name || token.price <= 0) return false;
-  if (isStableLike(token.name)) return false;
+  if (isStableLike(token.symbol || token.name)) return false;
   if (token.volume < 25000) return false;
   if (token.txns < 120) return false;
   return true;
@@ -865,16 +1213,20 @@ export async function analyzeToken(token) {
   const developer = await analyzeDeveloper(enrichedToken);
   const narrative = analyzeNarrative(enrichedToken);
   const socials = analyzeSocials(enrichedToken);
+  const mechanics = classifyTokenMechanics(enrichedToken);
+  const dexPaid = analyzeDexPaid(enrichedToken);
 
   const strategy = buildBaseStrategy(
-    token,
+    enrichedToken,
     delta,
     accumulation,
     distribution,
     absorption,
     exceptionalOverride,
     corpse,
-    developer
+    developer,
+    mechanics,
+    dexPaid
   );
 
   let score = 0;
@@ -905,11 +1257,15 @@ export async function analyzeToken(token) {
   score += narrative.score;
   score += socials.score;
   score += developer.score;
+  score += mechanics.score;
+  score += dexPaid.score;
 
-  if (narrative.positives.length) reasons.push(...narrative.positives.map(v => `Narrative: ${v}`));
-  if (narrative.flags.length) reasons.push(...narrative.flags.map(v => `Narrative: ${v}`));
-  if (socials.notes.length) reasons.push(...socials.notes.map(v => `Social: ${v}`));
-  if (developer.notes.length) reasons.push(...developer.notes.map(v => `Dev: ${v}`));
+  if (narrative.positives.length) reasons.push(...narrative.positives.map((v) => `Narrative: ${v}`));
+  if (narrative.flags.length) reasons.push(...narrative.flags.map((v) => `Narrative: ${v}`));
+  if (socials.notes.length) reasons.push(...socials.notes.map((v) => `Social: ${v}`));
+  if (developer.notes.length) reasons.push(...developer.notes.map((v) => `Dev: ${v}`));
+  if (mechanics.notes.length) reasons.push(...mechanics.notes.map((v) => `Mechanics: ${v}`));
+  if (dexPaid.notes.length) reasons.push(...dexPaid.notes.map((v) => `Dex: ${v}`));
 
   const buySellImbalance = token.sells > 0 ? token.buys / token.sells : token.buys;
   if (buySellImbalance > 1.2) {
@@ -989,6 +1345,8 @@ export async function analyzeToken(token) {
     developer,
     narrative,
     socials,
+    mechanics,
+    dexPaid,
     exceptionalOverride,
     falseBounce,
     strategy,
