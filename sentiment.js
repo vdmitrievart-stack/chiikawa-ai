@@ -1,8 +1,12 @@
 export function getSentiment(token) {
-  const sentiment = Math.random() * 100;
+  let score = 0;
+
+  if (token.volume > 100000) score += 40;
+  if (token.txns > 300) score += 30;
+  if (token.liquidity > 20000) score += 20;
 
   return {
-    sentiment,
-    bullish: sentiment > 60
+    sentiment: score,
+    bullish: score > 60
   };
 }
