@@ -4,21 +4,36 @@ import TelegramBot from "node-telegram-bot-api";
 import { getBestTrade } from "./scan-engine.js";
 import { enterTrade, exitTrade, getPortfolio } from "./portfolio.js";
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
+// ===== ENV =====
 
+const TOKEN = process.env.BOT_TOKEN;
+const PORT = process.env.PORT || 3000;
 const PATH = `/telegram/${process.env.WEBHOOK_SECRET}`;
 
+const bot = new TelegramBot(TOKEN, { polling: false });
+
+// ===== STATE =====
+
+let intervalId = null;
+
+// ===== SEND =====
+
 async function send(chatId, text) {
-  return bot.sendMessage(chatId, text);
+  return bot.sendMessage(chatId, text, {
+    parse_mode: "HTML"
+  });
 }
 
+// ===== CORE LOGIC =====
+
 async function runCycle(chatId) {
-  const best = await getBestTrade();
-  if (!best) return;
+  try {
+    const best = await getBestTrade();
+    if (!best) return;
 
-  const p = getPortfolio();
+    const portfolio = getPortfolio();
 
-  await send(chatId, `
+    await send(chatId, `
 🔎 ANALYSIS
 
 Token: ${best.token.name}
@@ -30,72 +45,176 @@ Score: ${best.score}
 🐦 Sentiment: ${best.sentiment.sentiment}
 `);
 
-  if (best.score < 60) {
-    await send(chatId, "❌ Skip");
-    return;
-  }
+    // пропускаем слабые
+    if (best.score < 60) {
+      await send(chatId, "❌ Skip (low score)");
+      return;
+    }
 
-  const entry = enterTrade(best.token);
+    const entry = enterTrade(best.token);
 
-  if (!entry) {
-    await send(chatId, "⏳ Already in trade");
-    return;
-  }
+    if (!entry) {
+      await send(chatId, "⏳ Already in trade");
+      return;
+    }
 
-  await send(chatId, `
+    await send(chatId, `
 🚀 ENTRY
 
 ${entry.token}
 Price: ${entry.entry}
-Balance: ${p.balance.toFixed(2)} SOL
+Balance: ${portfolio.balance.toFixed(3)} SOL
 `);
 
-  setTimeout(() => {
-    const price =
-      best.token.price * (0.95 + Math.random() * 0.1);
+    // ===== EXIT =====
+    setTimeout(async () => {
+      const price =
+        best.token.price * (0.95 + Math.random() * 0.1);
 
-    const exit = exitTrade(price);
+      const exit = exitTrade(price);
 
-    send(chatId, `
+      if (!exit) return;
+
+      await send(chatId, `
 🏁 EXIT
 
 ${exit.token}
 PnL: ${(exit.pnl * 100).toFixed(2)}%
-Balance: ${exit.balance.toFixed(2)} SOL
+Balance: ${exit.balance.toFixed(3)} SOL
 `);
-  }, 30000);
+    }, 30000);
+
+  } catch (e) {
+    console.log("cycle error:", e.message);
+  }
 }
 
-function start(chatId) {
-  setInterval(() => runCycle(chatId), 60000);
+// ===== AUTO START =====
+
+function startAuto(chatId) {
+  console.log("🤖 AUTO START");
+
+  if (intervalId) {
+    clearInterval(intervalId);
+  }
+
+  intervalId = setInterval(() => {
+    runCycle(chatId);
+  }, 60000);
+
+  // ⏱ авто стоп через 4 часа
+  setTimeout(() => {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+    }
+
+    send(chatId, "🛑 AUTO STOPPED (4h finished)");
+    console.log("AUTO STOPPED");
+  }, 4 * 60 * 60 * 1000);
 }
+
+// ===== MESSAGE HANDLER =====
+
+async function handleMessage(msg) {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+
+  console.log("MSG:", text);
+
+  if (text === "/start") {
+    await send(chatId, "🚀 Bot started (1 SOL)");
+    startAuto(chatId);
+    return;
+  }
+
+  // 🔴 STOP КОМАНДА
+  if (text === "/stop") {
+    if (intervalId) {
+      clearInterval(intervalId);
+      intervalId = null;
+      await send(chatId, "🛑 Bot stopped");
+    } else {
+      await send(chatId, "ℹ️ Bot already stopped");
+    }
+    return;
+  }
+
+  if (text === "/status") {
+    const p = getPortfolio();
+
+    await send(chatId, `
+📊 STATUS
+
+Balance: ${p.balance.toFixed(3)} SOL
+Position: ${p.position ? p.position.token : "none"}
+`);
+    return;
+  }
+
+  if (text === "/scan") {
+    await runCycle(chatId);
+    return;
+  }
+}
+
+// ===== UPDATE PROCESSOR =====
+
+async function processUpdate(update) {
+  try {
+    if (update?.message?.text) {
+      await handleMessage(update.message);
+    }
+  } catch (e) {
+    console.log("update error:", e.message);
+  }
+}
+
+// ===== SERVER =====
 
 const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === PATH) {
     let body = "";
 
-    req.on("data", c => (body += c));
+    req.on("data", chunk => (body += chunk));
 
     req.on("end", async () => {
       res.writeHead(200);
-      res.end();
+      res.end("OK");
 
-      const update = JSON.parse(body);
-
-      if (update.message?.text === "/start") {
-        await send(update.message.chat.id, "🤖 STARTED (1 SOL)");
-        start(update.message.chat.id);
+      try {
+        const update = JSON.parse(body);
+        await processUpdate(update);
+      } catch (e) {
+        console.log("webhook error:", e.message);
       }
     });
 
     return;
   }
 
-  res.end("OK");
+  if (req.url === "/health") {
+    res.writeHead(200);
+    res.end("OK");
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
 });
 
-server.listen(process.env.PORT, async () => {
-  await bot.setWebHook(
-    `https://${process.env.RENDER_EXTERNAL_HOSTNAME}${PATH}`
-  );
-});
+// ===== START =====
+
+async function start() {
+  server.listen(PORT, async () => {
+    console.log("🚀 Server started");
+
+    await bot.setWebHook(
+      `https://${process.env.RENDER_EXTERNAL_HOSTNAME}${PATH}`
+    );
+
+    console.log("✅ Webhook set");
+  });
+}
+
+start();
