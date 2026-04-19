@@ -1,14 +1,21 @@
 {
-  "name": "telegram-bot",
-  "version": "1.0.0",
+  "name": "chiikawa-bot-upgrade-phase2",
+  "version": "2.1.0",
   "private": true,
   "type": "module",
   "main": "telegram-bot.js",
   "scripts": {
-    "start": "node telegram-bot.js"
+    "start": "node telegram-bot.js",
+    "start:bot": "node telegram-bot.js",
+    "start:ai": "node server.js"
   },
   "dependencies": {
+    "@solana/web3.js": "^1.98.0",
+    "bs58": "^6.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
     "node-telegram-bot-api": "^0.66.0",
+    "openai": "^4.104.0",
     "xlsx": "^0.18.5"
   }
 }
