@@ -6,6 +6,11 @@ function safeNum(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function round(v, d = 4) {
+  const p = 10 ** d;
+  return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
+}
+
 async function fetchJson(url) {
   const res = await fetch(url);
   if (!res.ok) {
@@ -15,6 +20,9 @@ async function fetchJson(url) {
 }
 
 function normalizePair(p) {
+  const buys = safeNum(p?.txns?.h24?.buys);
+  const sells = safeNum(p?.txns?.h24?.sells);
+
   return {
     name: p?.baseToken?.symbol || p?.baseToken?.name || "UNKNOWN",
     ca: p?.baseToken?.address || "",
@@ -24,9 +32,9 @@ function normalizePair(p) {
     price: safeNum(p?.priceUsd),
     liquidity: safeNum(p?.liquidity?.usd),
     volume: safeNum(p?.volume?.h24),
-    buys: safeNum(p?.txns?.h24?.buys),
-    sells: safeNum(p?.txns?.h24?.sells),
-    txns: safeNum(p?.txns?.h24?.buys) + safeNum(p?.txns?.h24?.sells),
+    buys,
+    sells,
+    txns: buys + sells,
     fdv: safeNum(p?.fdv),
     pairCreatedAt: safeNum(p?.pairCreatedAt),
     url: p?.url || ""
@@ -152,11 +160,49 @@ export function getSentiment(token) {
   };
 }
 
+function buildStrategy(token) {
+  const volumeToLiquidity = token.liquidity > 0 ? token.volume / token.liquidity : 0;
+  const buyPressure = token.sells > 0 ? token.buys / token.sells : token.buys;
+
+  let expectedEdgePct = 0;
+  let intendedHoldMs = 120000;
+  let takeProfitPct = 3.2;
+  let stopLossPct = 2.2;
+  let reason = "BASE_SETUP";
+
+  if (volumeToLiquidity > 25 && buyPressure > 1.2) {
+    expectedEdgePct += 2.2;
+    takeProfitPct = 4.2;
+    stopLossPct = 2.4;
+    intendedHoldMs = 180000;
+    reason = "MOMENTUM_BREAKOUT";
+  }
+
+  if (token.txns > 1200) {
+    expectedEdgePct += 1.0;
+  }
+
+  if (token.liquidity > 25000) {
+    expectedEdgePct += 0.8;
+  }
+
+  if (token.fdv > 0 && token.liquidity > 0 && token.fdv / token.liquidity < 20) {
+    expectedEdgePct += 0.7;
+  }
+
+  return {
+    expectedEdgePct: round(expectedEdgePct, 2),
+    intendedHoldMs,
+    takeProfitPct,
+    stopLossPct,
+    reason
+  };
+}
+
 function isEligibleBaseToken(token) {
   if (!token.ca || !token.name || token.price <= 0) return false;
 
   const upper = token.name.toUpperCase();
-
   if (upper === "SOL" || upper === "USDC" || upper === "USDT" || upper === "PUMP") {
     return false;
   }
@@ -169,7 +215,7 @@ function isEligibleBaseToken(token) {
 }
 
 export async function scanMarket() {
-  const queries = ["solana meme", "solana pump", "solana new", "solana trending"];
+  const queries = ["solana meme", "solana trending", "solana new", "solana pump"];
   const dedup = new Map();
 
   for (const query of queries) {
@@ -187,7 +233,7 @@ export async function scanMarket() {
     }
   }
 
-  return [...dedup.values()].slice(0, 60);
+  return [...dedup.values()].slice(0, 80);
 }
 
 export async function analyzeToken(token) {
@@ -195,6 +241,7 @@ export async function analyzeToken(token) {
   const wallet = analyzeWallets(token);
   const bots = detectBots(token);
   const sentiment = getSentiment(token);
+  const strategy = buildStrategy(token);
 
   let score = 0;
   const reasons = [];
@@ -239,6 +286,7 @@ export async function analyzeToken(token) {
     wallet,
     bots,
     sentiment,
+    strategy,
     score,
     reasons
   };
@@ -254,20 +302,18 @@ export async function getBestTrade({ excludeCas = [] } = {}) {
     analyzed.push(await analyzeToken(token));
   }
 
-  analyzed.sort((a, b) => b.score - a.score);
+  analyzed.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return b.token.volume - a.token.volume;
+  });
 
-  const shortlisted = analyzed
-    .filter(item => item.score >= 60)
-    .sort((a, b) => {
-      const volA = a.token.volume / Math.max(a.token.liquidity, 1);
-      const volB = b.token.volume / Math.max(b.token.liquidity, 1);
+  const tradable = analyzed.filter(item => {
+    if (item.score < 60) return false;
+    if (item.strategy.expectedEdgePct < 2.0) return false;
+    return true;
+  });
 
-      if (b.score !== a.score) return b.score - a.score;
-      if (volB !== volA) return volB - volA;
-      return b.token.txns - a.token.txns;
-    });
-
-  return shortlisted[0] || analyzed[0] || null;
+  return tradable[0] || analyzed[0] || null;
 }
 
 export async function getLatestTokenPrice(ca) {
