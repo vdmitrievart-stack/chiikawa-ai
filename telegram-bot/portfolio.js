@@ -5,7 +5,7 @@ const tradeHistory = [];
 const MIN_RESERVE_SOL = 0.1;
 const POSITION_SIZE_FRACTION = 0.2;
 
-// Реалистичные торговые издержки для симуляции
+// реалистичные торговые издержки для симуляции
 const ENTRY_FEE_PCT = 0.25;
 const EXIT_FEE_PCT = 0.25;
 const ENTRY_SLIPPAGE_PCT = 0.6;
@@ -21,7 +21,7 @@ function pctToFrac(pct) {
   return safeNum(pct, 0) / 100;
 }
 
-function round(v, d = 6) {
+function round(v, d = 8) {
   const p = 10 ** d;
   return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
 }
@@ -32,10 +32,6 @@ export function getPortfolio() {
     position: position ? { ...position } : null,
     tradeHistory: [...tradeHistory]
   };
-}
-
-export function canEnterTrade() {
-  return !position && balance > MIN_RESERVE_SOL;
 }
 
 export function estimateRoundTripCostPct() {
@@ -68,6 +64,10 @@ export function estimateExitCostSol(grossValueSol) {
   };
 }
 
+export function canEnterTrade() {
+  return !position && balance > MIN_RESERVE_SOL;
+}
+
 export function enterTrade({
   token,
   intendedHoldMs,
@@ -75,7 +75,8 @@ export function enterTrade({
   stopLossPct,
   takeProfitPct,
   reason,
-  signalScore
+  signalScore,
+  signalContext
 }) {
   if (!token?.name || !token?.ca || !safeNum(token.price)) return null;
   if (position) return null;
@@ -85,20 +86,20 @@ export function enterTrade({
 
   const amountSol = usable * POSITION_SIZE_FRACTION;
   const entryCosts = estimateEntryCostSol(amountSol);
-
   const totalDebit = amountSol + entryCosts.totalSol;
+
   if (totalDebit > balance) return null;
 
-  const effectiveEntryPrice =
+  const entryEffectivePrice =
     token.price * (1 + pctToFrac(ENTRY_SLIPPAGE_PCT));
 
-  const tokenAmount = amountSol / effectiveEntryPrice;
+  const tokenAmount = amountSol / entryEffectivePrice;
 
   position = {
     token: token.name,
     ca: token.ca,
     entryReferencePrice: round(token.price, 12),
-    entryEffectivePrice: round(effectiveEntryPrice, 12),
+    entryEffectivePrice: round(entryEffectivePrice, 12),
     tokenAmount: round(tokenAmount, 8),
     amountSol: round(amountSol, 8),
     entryCosts,
@@ -109,6 +110,7 @@ export function enterTrade({
     takeProfitPct: safeNum(takeProfitPct, 0),
     reason: reason || "",
     signalScore: safeNum(signalScore, 0),
+    signalContext: signalContext || {},
     highWaterMarkPrice: round(token.price, 12),
     lowWaterMarkPrice: round(token.price, 12)
   };
@@ -185,7 +187,20 @@ export function shouldExitPosition(currentPrice) {
     return { shouldExit: true, reason: "TAKE_PROFIT", mtm };
   }
 
-  if (ageMs >= position.intendedHoldMs && netPnlPct > 0) {
+  // trailing protection after partial success
+  if (
+    position.highWaterMarkPrice > position.entryReferencePrice &&
+    netPnlPct > 1.0
+  ) {
+    const retreatFromHighPct =
+      ((position.highWaterMarkPrice - currentPrice) / position.highWaterMarkPrice) * 100;
+
+    if (retreatFromHighPct >= 2.2) {
+      return { shouldExit: true, reason: "TRAILING_EXIT", mtm };
+    }
+  }
+
+  if (ageMs >= position.intendedHoldMs && netPnlPct > 0.5) {
     return { shouldExit: true, reason: "TIME_TAKE", mtm };
   }
 
@@ -229,6 +244,7 @@ export function exitTrade(exitReferencePrice, reason = "EXIT") {
     reason,
     signalScore: position.signalScore,
     expectedEdgePct: position.expectedEdgePct,
+    signalContext: position.signalContext,
     openedAt: position.enteredAt,
     closedAt: Date.now(),
     durationMs: Date.now() - position.enteredAt,
