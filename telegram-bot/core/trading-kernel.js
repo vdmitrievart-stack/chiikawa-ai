@@ -1,8 +1,11 @@
-import { getBestTrade, getLatestTokenPrice, recordTradeOutcomeFromSignalContext } from "./scan-engine.js";
+import {
+  getBestTrade,
+  getLatestTokenPrice,
+  recordTradeOutcomeFromSignalContext
+} from "../scan-engine.js";
 import {
   getPortfolio,
   getPositions,
-  getClosedTrades,
   getStrategyConfig,
   resetPortfolio,
   openPosition,
@@ -11,23 +14,38 @@ import {
   maybeTakeRunnerPartial,
   setStrategyConfig,
   hasOpenPositions
-} from "./portfolio.js";
-import { buildStrategyPlans } from "./strategy-engine.js";
-import { createRuntimeState, setPendingConfig, applyPendingConfig } from "./trading-runtime.js";
-import { buildDashboard, buildEntryText, buildExitText, buildPositionUpdateText, buildPeriodicReport } from "./reporting-engine.js";
-import WalletExecutionRouter from "./wallet-execution-router.js";
-import CopytradeManager from "./copytrade-manager.js";
-import GMGNClient from "./gmgn-client.js";
-import GMGNLeaderIntelService from "./gmgn-leader-intel-service.js";
+} from "../portfolio.js";
+import { buildStrategyPlans } from "../strategy-engine.js";
+import {
+  createRuntimeState,
+  setPendingConfig,
+  applyPendingConfig
+} from "./trading-runtime.js";
+import {
+  buildDashboard,
+  buildEntryText,
+  buildExitText,
+  buildPositionUpdateText,
+  buildPeriodicReport
+} from "./reporting-engine.js";
+import WalletExecutionRouter from "../wallets/wallet-execution-router.js";
+import CopytradeManager from "../copytrade/copytrade-manager.js";
+import GMGNClient from "../gmgn/gmgn-client.js";
+import GMGNLeaderIntelService from "../gmgn/gmgn-leader-intel-service.js";
 
 export default class TradingKernel {
   constructor(options = {}) {
     this.logger = options.logger || console;
     this.runtime = createRuntimeState();
-    this.executionRouter = options.executionRouter || new WalletExecutionRouter({ logger: this.logger });
+    this.executionRouter =
+      options.executionRouter || new WalletExecutionRouter({ logger: this.logger });
     this.gmgnClient = options.gmgnClient || new GMGNClient({ logger: this.logger });
-    this.gmgnLeaderIntel = options.gmgnLeaderIntel || new GMGNLeaderIntelService({ client: this.gmgnClient, logger: this.logger });
-    this.copytradeManager = options.copytradeManager || new CopytradeManager({ logger: this.logger, gmgnLeaderIntel: this.gmgnLeaderIntel });
+    this.gmgnLeaderIntel =
+      options.gmgnLeaderIntel ||
+      new GMGNLeaderIntelService({ client: this.gmgnClient, logger: this.logger });
+    this.copytradeManager =
+      options.copytradeManager ||
+      new CopytradeManager({ logger: this.logger, gmgnLeaderIntel: this.gmgnLeaderIntel });
     this.recentlyTraded = new Map();
     this.previousReportEquity = null;
   }
@@ -69,6 +87,7 @@ export default class TradingKernel {
 
   async killAllPositions(reason = "KILL") {
     const closed = [];
+
     for (const p of [...getPositions()]) {
       const price = p.lastPrice || p.entryReferencePrice;
       const row = closePosition(p.id, price, reason);
@@ -77,10 +96,12 @@ export default class TradingKernel {
         closed.push(row);
       }
     }
+
     applyPendingConfig(this.runtime);
     if (this.runtime.activeConfig?.strategyBudget) {
       setStrategyConfig(this.runtime.activeConfig.strategyBudget);
     }
+
     this.runtime.killRequested = true;
     this.runtime.mode = "stopped";
     return closed;
@@ -93,6 +114,7 @@ export default class TradingKernel {
   maybeApplyPendingConfig() {
     if (!this.runtime.pendingConfig) return null;
     if (hasOpenPositions()) return null;
+
     const applied = applyPendingConfig(this.runtime);
     if (applied?.strategyBudget) setStrategyConfig(applied.strategyBudget);
     return applied;
@@ -104,51 +126,135 @@ export default class TradingKernel {
 
   buildPeriodicReport() {
     const portfolio = getPortfolio();
-    const text = buildPeriodicReport(this.runtime, portfolio, this.previousReportEquity);
+    const text = buildPeriodicReport(
+      this.runtime,
+      portfolio,
+      this.previousReportEquity
+    );
     this.previousReportEquity = portfolio.equity;
     return text;
   }
 
-  enrichCandidateWithGMGN(candidate) {
+  renderEventText(event) {
+    if (!event) return "";
+
+    if (event.type === "analysis") {
+      const plans = (event.plans || [])
+        .map(
+          (p) =>
+            `• <b>${p.strategyKey.toUpperCase()}</b> | TP ${p.takeProfitPct || "runner"} | SL ${p.stopLossPct}%`
+        )
+        .join("\n");
+
+      return `🔎 <b>ANALYSIS</b>\n\n<b>Token:</b> ${event.candidate?.token?.name || "Unknown"}\n<b>Score:</b> ${event.candidate?.score || 0}\n\n<b>Plans:</b>\n${plans || "• none"}`;
+    }
+
+    if (event.type === "entry") return buildEntryText(event.position);
+    if (event.type === "update") {
+      return buildPositionUpdateText(event.position, event.mark, event.verdict?.reason || "HOLD");
+    }
+    if (event.type === "exit") return buildExitText(event.trade);
+
+    if (event.type === "partial") {
+      return `🎯 <b>RUNNER PARTIAL</b>\n\n<b>Token:</b> ${event.position?.token}\n<b>Target:</b> ${event.partial?.targetPct}%\n<b>Sold:</b> ${Math.round(
+        (event.partial?.soldFraction || 0) * 100
+      )}%`;
+    }
+
+    if (event.type === "config_applied") {
+      return "⚙️ <b>PENDING CONFIG APPLIED</b>";
+    }
+
+    if (event.type === "empty") {
+      return "❌ No candidates found";
+    }
+
+    return "";
+  }
+
+  async enrichCandidateWithGMGN(candidate) {
     if (!this.runtime.activeConfig.copytrade.enabled) return candidate;
+
     const preferredLeader = process.env.DEFAULT_COPYTRADE_LEADER || "";
     if (!preferredLeader) return candidate;
-    return this.gmgnLeaderIntel.getLeaderIntel(preferredLeader).then((intel) => ({
-      ...candidate,
-      gmgnLeaderIntel: intel
-    })).catch(() => candidate);
+
+    return this.gmgnLeaderIntel
+      .getLeaderIntel(preferredLeader)
+      .then((intel) => ({
+        ...candidate,
+        gmgnLeaderIntel: intel
+      }))
+      .catch(() => candidate);
   }
 
   shouldClosePosition(position, analyzedNow = null) {
     const mark = position.lastMark;
     if (!mark) return { close: false, reason: "NO_MARK" };
+
     const ageMs = mark.ageMs;
+
     if (position.strategy === "scalp") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "SCALP_STOP" };
-      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "SCALP_TP" };
-      if (ageMs >= position.plannedHoldMs) return { close: true, reason: "SCALP_TIME_EXIT" };
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
+        return { close: true, reason: "SCALP_STOP" };
+      }
+      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) {
+        return { close: true, reason: "SCALP_TP" };
+      }
+      if (ageMs >= position.plannedHoldMs) {
+        return { close: true, reason: "SCALP_TIME_EXIT" };
+      }
       return { close: false, reason: "SCALP_HOLD" };
     }
+
     if (position.strategy === "reversal") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "REVERSAL_STOP" };
-      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "REVERSAL_TP" };
-      if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 8) return { close: true, reason: "REVERSAL_TIME_EXIT" };
-      if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "REVERSAL_CORPSE_EXIT" };
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
+        return { close: true, reason: "REVERSAL_STOP" };
+      }
+      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) {
+        return { close: true, reason: "REVERSAL_TP" };
+      }
+      if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 8) {
+        return { close: true, reason: "REVERSAL_TIME_EXIT" };
+      }
+      if (analyzedNow?.corpse?.isCorpse) {
+        return { close: true, reason: "REVERSAL_CORPSE_EXIT" };
+      }
       return { close: false, reason: "REVERSAL_HOLD" };
     }
+
     if (position.strategy === "runner") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "RUNNER_STOP" };
-      const pullbackFromHighPct = position.highestPrice > 0 ? ((position.highestPrice - mark.currentPrice) / position.highestPrice) * 100 : 0;
-      if (mark.grossPnlPct > 25 && pullbackFromHighPct > 12) return { close: true, reason: "RUNNER_TRAIL_EXIT" };
-      if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "RUNNER_CORPSE_EXIT" };
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
+        return { close: true, reason: "RUNNER_STOP" };
+      }
+
+      const pullbackFromHighPct =
+        position.highestPrice > 0
+          ? ((position.highestPrice - mark.currentPrice) / position.highestPrice) * 100
+          : 0;
+
+      if (mark.grossPnlPct > 25 && pullbackFromHighPct > 12) {
+        return { close: true, reason: "RUNNER_TRAIL_EXIT" };
+      }
+
+      if (analyzedNow?.corpse?.isCorpse) {
+        return { close: true, reason: "RUNNER_CORPSE_EXIT" };
+      }
       return { close: false, reason: "RUNNER_HOLD" };
     }
+
     if (position.strategy === "copytrade") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "COPY_STOP" };
-      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "COPY_TP" };
-      if (ageMs >= position.plannedHoldMs) return { close: true, reason: "COPY_TIME_EXIT" };
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
+        return { close: true, reason: "COPY_STOP" };
+      }
+      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) {
+        return { close: true, reason: "COPY_TP" };
+      }
+      if (ageMs >= position.plannedHoldMs) {
+        return { close: true, reason: "COPY_TIME_EXIT" };
+      }
       return { close: false, reason: "COPY_HOLD" };
     }
+
     return { close: false, reason: "HOLD" };
   }
 
@@ -159,11 +265,12 @@ export default class TradingKernel {
     }
   }
 
-  async cycle(handlers = {}) {
+  async cycle() {
     this.runtime.lastCycleAt = Date.now();
     this.pruneRecentlyTraded();
 
     const events = [];
+
     for (const p of [...getPositions()]) {
       const latest = await getLatestTokenPrice(p.ca).catch(() => null);
       if (!latest?.price) continue;
@@ -177,7 +284,11 @@ export default class TradingKernel {
       }
 
       const analyzedNow = await getBestTrade({ excludeCas: [] }).catch(() => null);
-      const verdict = this.shouldClosePosition(p, analyzedNow?.token?.ca === p.ca ? analyzedNow : null);
+      const verdict = this.shouldClosePosition(
+        p,
+        analyzedNow?.token?.ca === p.ca ? analyzedNow : null
+      );
+
       events.push({ type: "update", position: p, mark, verdict });
 
       if (verdict.close) {
@@ -191,14 +302,22 @@ export default class TradingKernel {
     }
 
     if (!this.runtime.stopRequested) {
-      const candidate = await getBestTrade({ excludeCas: [...this.recentlyTraded.keys(), ...getPositions().map(p => p.ca)] });
+      const candidate = await getBestTrade({
+        excludeCas: [...this.recentlyTraded.keys(), ...getPositions().map((p) => p.ca)]
+      });
+
       if (candidate) {
         const enriched = await this.enrichCandidateWithGMGN(candidate);
-        const plans = buildStrategyPlans(enriched, { enabledStrategies: this.runtime.activeConfig.strategyEnabled });
+        const plans = buildStrategyPlans(enriched, {
+          enabledStrategies: this.runtime.activeConfig.strategyEnabled
+        });
+
         events.push({ type: "analysis", candidate: enriched, plans });
 
         for (const plan of plans) {
-          const alreadyOpenSameStrategy = getPositions().some(p => p.strategy === plan.strategyKey);
+          const alreadyOpenSameStrategy = getPositions().some(
+            (p) => p.strategy === plan.strategyKey
+          );
           if (alreadyOpenSameStrategy) continue;
           if (candidate.corpse?.isCorpse) continue;
           if (candidate.falseBounce?.rejected) continue;
@@ -208,13 +327,26 @@ export default class TradingKernel {
           if (plan.strategyKey === "copytrade" && this.runtime.activeConfig.copytrade.enabled) {
             const leaderAddress = process.env.DEFAULT_COPYTRADE_LEADER || "";
             if (leaderAddress) {
-              const leaderEval = await this.copytradeManager.evaluateLeader(leaderAddress, this.runtime.activeConfig);
+              const leaderEval = await this.copytradeManager.evaluateLeader(
+                leaderAddress,
+                this.runtime.activeConfig
+              );
               if (!leaderEval.allowed) continue;
             }
           }
 
-          const walletId = this.executionRouter.getPrimaryWalletId(this.runtime.activeConfig, plan.strategyKey);
-          const walletCheck = walletId ? this.executionRouter.validateWalletForStrategy(this.runtime.activeConfig, walletId, plan.strategyKey) : { ok: true };
+          const walletId = this.executionRouter.getPrimaryWalletId(
+            this.runtime.activeConfig,
+            plan.strategyKey
+          );
+          const walletCheck = walletId
+            ? this.executionRouter.validateWalletForStrategy(
+                this.runtime.activeConfig,
+                walletId,
+                plan.strategyKey
+              )
+            : { ok: true };
+
           if (!walletCheck.ok) continue;
 
           const position = openPosition({
@@ -258,14 +390,5 @@ export default class TradingKernel {
     }
 
     return events;
-  }
-
-  renderEventText(event) {
-    if (event.type === "entry") return buildEntryText(event.position);
-    if (event.type === "update") return buildPositionUpdateText(event.position, event.mark, event.verdict.reason);
-    if (event.type === "exit") return buildExitText(event.trade);
-    if (event.type === "config_applied") return `✅ <b>PENDING CONFIG APPLIED</b>`;
-    if (event.type === "empty") return `❌ No candidates found`;
-    return null;
   }
 }
