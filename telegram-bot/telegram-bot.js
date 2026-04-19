@@ -379,4 +379,504 @@ function shouldClosePosition(position, analyzedNow) {
   }
 
   if (position.strategy === "runner") {
-    if (mark.netPnlPct <= -Math
+    if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "RUNNER_STOP" };
+
+    const pullbackFromHighPct =
+      position.highestPrice > 0
+        ? ((position.highestPrice - mark.currentPrice) / position.highestPrice) * 100
+        : 0;
+
+    if (mark.grossPnlPct > 25 && pullbackFromHighPct > 12) {
+      return { close: true, reason: "RUNNER_TRAIL_EXIT" };
+    }
+
+    if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "RUNNER_CORPSE_EXIT" };
+    return { close: false, reason: "RUNNER_HOLD" };
+  }
+
+  return { close: false, reason: "HOLD" };
+}
+
+async function scheduleTempCleanup(filePath) {
+  tempFiles.add(filePath);
+
+  setTimeout(async () => {
+    try {
+      await fs.unlink(filePath);
+    } catch {}
+    tempFiles.delete(filePath);
+  }, 5 * 60 * 1000);
+}
+
+function statsToCsv() {
+  const closed = getClosedTrades();
+  const header = [
+    "id",
+    "strategy",
+    "token",
+    "ca",
+    "entryRef",
+    "entryEffective",
+    "exitRef",
+    "amountSol",
+    "netPnlPct",
+    "netPnlSol",
+    "reason",
+    "openedAt",
+    "closedAt",
+    "durationMs",
+    "balanceAfter"
+  ];
+
+  const rows = closed.map((t) => [
+    t.id,
+    t.strategy,
+    t.token,
+    t.ca,
+    t.entryReferencePrice,
+    t.entryEffectivePrice,
+    t.exitReferencePrice,
+    t.amountSol,
+    t.netPnlPct,
+    t.netPnlSol,
+    t.reason,
+    t.openedAt,
+    t.closedAt,
+    t.durationMs,
+    t.balanceAfter
+  ]);
+
+  return [header.join(","), ...rows.map((r) => r.join(","))].join("\n");
+}
+
+function statsToXlsxWorkbook() {
+  const pf = getPortfolio();
+
+  const summaryRows = [
+    { metric: "runId", value: runState.runId || "" },
+    { metric: "mode", value: currentMode },
+    { metric: "startBalance", value: pf.startBalance },
+    { metric: "cash", value: pf.cash },
+    { metric: "equity", value: pf.equity },
+    { metric: "realizedPnlSol", value: pf.realizedPnlSol },
+    { metric: "unrealizedPnlSol", value: pf.unrealizedPnlSol },
+    { metric: "closedTrades", value: pf.closedTrades.length }
+  ];
+
+  const tradesRows = pf.closedTrades.map((t) => ({
+    id: t.id,
+    strategy: t.strategy,
+    token: t.token,
+    ca: t.ca,
+    entryReferencePrice: t.entryReferencePrice,
+    entryEffectivePrice: t.entryEffectivePrice,
+    exitReferencePrice: t.exitReferencePrice,
+    amountSol: t.amountSol,
+    netPnlPct: t.netPnlPct,
+    netPnlSol: t.netPnlSol,
+    reason: t.reason,
+    openedAt: t.openedAt,
+    closedAt: t.closedAt,
+    durationMs: t.durationMs,
+    balanceAfter: t.balanceAfter
+  }));
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "summary");
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(tradesRows), "trades");
+  return wb;
+}
+
+async function exportJson(chatId) {
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.json`);
+  await fs.writeFile(filePath, JSON.stringify(getPortfolio(), null, 2), "utf8");
+  await bot.sendDocument(chatId, filePath, {}, {
+    filename: path.basename(filePath),
+    contentType: "application/json"
+  });
+  await scheduleTempCleanup(filePath);
+}
+
+async function exportCsv(chatId) {
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.csv`);
+  await fs.writeFile(filePath, statsToCsv(), "utf8");
+  await bot.sendDocument(chatId, filePath, {}, {
+    filename: path.basename(filePath),
+    contentType: "text/csv"
+  });
+  await scheduleTempCleanup(filePath);
+}
+
+async function exportXlsx(chatId) {
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.xlsx`);
+  XLSX.writeFile(statsToXlsxWorkbook(), filePath);
+  await bot.sendDocument(chatId, filePath, {}, {
+    filename: path.basename(filePath),
+    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+  await scheduleTempCleanup(filePath);
+}
+
+function pruneRecentlyTraded() {
+  const now = Date.now();
+  for (const [ca, ts] of recentlyTraded.entries()) {
+    if (now - ts > 2 * 60 * 60 * 1000) {
+      recentlyTraded.delete(ca);
+    }
+  }
+}
+
+function stopLoop() {
+  if (loopId) clearInterval(loopId);
+  if (stopTimeoutId) clearTimeout(stopTimeoutId);
+  loopId = null;
+  stopTimeoutId = null;
+  currentMode = "stopped";
+  runState.mode = "stopped";
+}
+
+async function cycle(chatId, userId) {
+  pruneRecentlyTraded();
+
+  const positions = getPositions();
+
+  for (const p of positions) {
+    const latest = await getLatestTokenPrice(p.ca);
+    if (!latest?.price) continue;
+
+    const mark = markPosition(p, latest.price);
+    if (!mark) continue;
+
+    const partial = maybeTakeRunnerPartial(p, latest.price);
+    if (partial) {
+      await sendMessage(
+        chatId,
+        `🎯 <b>RUNNER PARTIAL</b>
+
+<b>Token:</b> ${escapeHtml(p.token)}
+<b>Target:</b> ${partial.targetPct}%
+<b>Sold fraction:</b> ${round(partial.soldFraction * 100, 0)}%
+<b>Cash added:</b> ${round(partial.netValueSol, 4)} SOL`
+      );
+    }
+
+    const analyzedNow = await getBestTrade({ excludeCas: [] }).catch(() => null);
+    const verdict = shouldClosePosition(p, analyzedNow?.token?.ca === p.ca ? analyzedNow : null);
+
+    await sendMessage(chatId, buildPositionUpdateText(p, mark, verdict.reason));
+
+    if (verdict.close) {
+      const closed = closePosition(p.id, latest.price, verdict.reason);
+      if (closed) {
+        recentlyTraded.set(closed.ca, Date.now());
+        await recordTradeOutcomeFromSignalContext(closed.signalContext, closed.netPnlPct);
+        await sendPhotoOrText(chatId, closed.signalContext?.imageUrl || null, buildExitText(closed));
+      }
+    }
+  }
+
+  const candidate = await getBestTrade({
+    excludeCas: [...recentlyTraded.keys(), ...getPositions().map((p) => p.ca)]
+  });
+
+  if (!candidate) {
+    await sendMessage(chatId, "❌ No candidates found");
+    return;
+  }
+
+  const plans = buildStrategyPlans(candidate);
+  const heroImage =
+    candidate.token.headerUrl ||
+    candidate.token.imageUrl ||
+    candidate.token.iconUrl ||
+    null;
+
+  await sendPhotoOrText(chatId, heroImage, buildHeroCaption(candidate));
+  await sendMessage(chatId, buildAnalysisText(candidate, plans));
+
+  for (const plan of plans) {
+    const alreadyOpenSameStrategy = getPositions().some((p) => p.strategy === plan.strategyKey);
+    if (alreadyOpenSameStrategy) continue;
+    if (candidate.corpse.isCorpse) continue;
+    if (candidate.falseBounce.rejected) continue;
+    if (candidate.developer.verdict === "Bad") continue;
+    if (candidate.score < 85) continue;
+
+    const position = openPosition({
+      strategy: plan.strategyKey,
+      token: candidate.token,
+      thesis: plan.thesis,
+      plannedHoldMs: plan.plannedHoldMs,
+      stopLossPct: plan.stopLossPct,
+      takeProfitPct: plan.takeProfitPct,
+      runnerTargetsPct: plan.runnerTargetsPct,
+      signalScore: candidate.score,
+      expectedEdgePct: plan.expectedEdgePct,
+      signalContext: {
+        imageUrl: heroImage,
+        narrative: candidate.narrative,
+        socials: candidate.socials,
+        developer: candidate.developer,
+        mechanics: candidate.mechanics,
+        dexPaid: candidate.dexPaid,
+        reasons: candidate.reasons,
+        baseStrategy: candidate.strategy,
+        chosenPlan: plan
+      }
+    });
+
+    if (position) {
+      await sendPhotoOrText(chatId, heroImage, buildEntryText(position));
+    }
+  }
+}
+
+function startRun(chatId, userId, mode) {
+  stopLoop();
+
+  activeChatId = chatId;
+  activeUserId = userId;
+  currentMode = mode;
+  runState = {
+    runId: `run-${Date.now()}`,
+    startedAt: Date.now(),
+    mode
+  };
+
+  if (mode === "4h") {
+    resetPortfolio(1);
+  }
+
+  loopId = setInterval(() => {
+    cycle(chatId, userId).catch((err) => {
+      console.log("cycle error:", err.message);
+    });
+  }, AUTO_INTERVAL_MS);
+
+  if (mode === "4h") {
+    stopTimeoutId = setTimeout(async () => {
+      stopLoop();
+      await sendMessage(chatId, "🛑 <b>AUTO STOPPED</b> (4h finished)");
+      await sendMessage(chatId, buildDashboard(), { reply_markup: keyboard() });
+    }, 4 * 60 * 60 * 1000);
+  }
+}
+
+async function fetchTokenByCA(ca) {
+  const res = await fetch(`${DEX_TOKEN_API}/${encodeURIComponent(ca)}`);
+  if (!res.ok) {
+    throw new Error(`DexScreener HTTP ${res.status}`);
+  }
+
+  const json = await res.json();
+  const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
+  if (!pairs.length) return null;
+
+  const bestRaw = pairs.sort(
+    (a, b) =>
+      safeNum(b?.liquidity?.usd) - safeNum(a?.liquidity?.usd) ||
+      safeNum(b?.volume?.h24) - safeNum(a?.volume?.h24)
+  )[0];
+
+  const socials = Array.isArray(bestRaw?.info?.socials) ? bestRaw.info.socials : [];
+  const websites = Array.isArray(bestRaw?.info?.websites) ? bestRaw.info.websites : [];
+
+  const links = [
+    ...socials.map((x) => ({
+      type: x?.type || "",
+      label: x?.type || "",
+      url: x?.url || ""
+    })),
+    ...websites.map((x) => ({
+      type: "website",
+      label: "website",
+      url: x?.url || ""
+    }))
+  ];
+
+  return {
+    name: bestRaw?.baseToken?.name || bestRaw?.baseToken?.symbol || "UNKNOWN",
+    symbol: bestRaw?.baseToken?.symbol || "",
+    ca: bestRaw?.baseToken?.address || "",
+    pairAddress: bestRaw?.pairAddress || "",
+    chainId: bestRaw?.chainId || "",
+    dexId: bestRaw?.dexId || "",
+    price: safeNum(bestRaw?.priceUsd),
+    liquidity: safeNum(bestRaw?.liquidity?.usd),
+    volume: safeNum(bestRaw?.volume?.h24),
+    buys: safeNum(bestRaw?.txns?.h24?.buys),
+    sells: safeNum(bestRaw?.txns?.h24?.sells),
+    txns: safeNum(bestRaw?.txns?.h24?.buys) + safeNum(bestRaw?.txns?.h24?.sells),
+    fdv: safeNum(bestRaw?.fdv),
+    pairCreatedAt: safeNum(bestRaw?.pairCreatedAt),
+    url: bestRaw?.url || "",
+    imageUrl: bestRaw?.info?.imageUrl || null,
+    description: bestRaw?.info?.description || bestRaw?.info?.header || "",
+    links
+  };
+}
+
+async function analyzeCA(chatId, ca) {
+  await sendMessage(chatId, `🧾 <b>Scanning CA</b>\n<code>${escapeHtml(ca)}</code>`);
+
+  const token = await fetchTokenByCA(ca);
+  if (!token) {
+    await sendMessage(chatId, "❌ Token not found by CA.", { reply_markup: keyboard() });
+    return;
+  }
+
+  const analyzed = await analyzeToken(token);
+  const plans = buildStrategyPlans(analyzed);
+  const heroImage =
+    analyzed.token.headerUrl ||
+    analyzed.token.imageUrl ||
+    analyzed.token.iconUrl ||
+    null;
+
+  await sendPhotoOrText(chatId, heroImage, buildHeroCaption(analyzed));
+  await sendMessage(chatId, buildAnalysisText(analyzed, plans), {
+    reply_markup: keyboard()
+  });
+}
+
+async function handleAction(chatId, userId, action) {
+  if (action === "start") {
+    clearChatMode(chatId);
+    await sendMessage(chatId, "🤖 <b>Bot ready</b>", { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "run4h") {
+    await sendMessage(chatId, "🚀 Starting 4h multi-strategy simulation from 1 SOL", {
+      reply_markup: keyboard()
+    });
+    startRun(chatId, userId, "4h");
+    return;
+  }
+
+  if (action === "runinfinite") {
+    if (!getPortfolio().startBalance) resetPortfolio(1);
+    await sendMessage(chatId, "♾️ Starting infinite multi-strategy run", {
+      reply_markup: keyboard()
+    });
+    startRun(chatId, userId, "infinite");
+    return;
+  }
+
+  if (action === "stop") {
+    stopLoop();
+    await sendMessage(chatId, "🛑 Bot stopped", { reply_markup: keyboard() });
+    await sendMessage(chatId, buildDashboard(), { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "status") {
+    await sendMessage(chatId, buildDashboard(), { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "scan_market") {
+    clearChatMode(chatId);
+    await sendMessage(chatId, "🔎 <b>Market scan started</b>", { reply_markup: keyboard() });
+    await cycle(chatId, userId);
+    return;
+  }
+
+  if (action === "scan_ca") {
+    setChatMode(chatId, "awaiting_ca");
+    await sendMessage(chatId, "🧾 <b>Send CA</b>\n\nОтправь контракт следующим сообщением.", {
+      reply_markup: keyboard()
+    });
+    return;
+  }
+
+  if (action === "exportcsv") {
+    await exportCsv(chatId);
+    return;
+  }
+
+  if (action === "exportjson") {
+    await exportJson(chatId);
+    return;
+  }
+
+  if (action === "exportxlsx") {
+    await exportXlsx(chatId);
+    return;
+  }
+
+  await sendMessage(chatId, "Используйте меню ниже.", { reply_markup: keyboard() });
+}
+
+async function processMessage(msg) {
+  const chatId = msg.chat.id;
+  const userId = msg.from?.id || chatId;
+  const text = String(msg.text || "").trim();
+  const mode = getChatMode(chatId);
+  const action = normalizeAction(text);
+
+  if (action) {
+    await handleAction(chatId, userId, action);
+    return;
+  }
+
+  if (mode.mode === "awaiting_ca") {
+    if (!isLikelyCA(text)) {
+      await sendMessage(chatId, "❌ Это не похоже на валидный CA. Отправь адрес токена целиком.", {
+        reply_markup: keyboard()
+      });
+      return;
+    }
+
+    clearChatMode(chatId);
+    await analyzeCA(chatId, text);
+    return;
+  }
+
+  if (isLikelyCA(text)) {
+    await sendMessage(chatId, "Сначала нажми <b>🧾 Scan CA</b>, потом отправь адрес.", {
+      reply_markup: keyboard()
+    });
+    return;
+  }
+
+  await sendMessage(chatId, "Используйте меню ниже.", { reply_markup: keyboard() });
+}
+
+bot.on("message", (msg) => {
+  processMessage(msg).catch((err) => {
+    console.log("message error:", err.message);
+  });
+});
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST" && req.url === WEBHOOK_PATH) {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        const update = JSON.parse(body);
+        bot.processUpdate(update);
+        res.writeHead(200);
+        res.end("ok");
+      } catch (error) {
+        res.writeHead(500);
+        res.end(error.message);
+      }
+    });
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/healthz") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end("not found");
+});
+
+server.listen(PORT, async () => {
+  console.log(`Telegram bot server listening on port ${PORT}`);
+});
