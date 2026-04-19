@@ -1,12 +1,17 @@
 export function analyzeWallets(token) {
-  // mock smart money logic (позже подключим GMGN API)
+  // proxy логика вместо GMGN
 
-  const concentration = Math.random() * 100;
-  const smartMoney = Math.random() * 100;
+  const concentration =
+    token.liquidity > 0
+      ? (token.fdv / token.liquidity) * 10
+      : 100;
+
+  const smartMoney =
+    token.txns > 300 && token.volume > 100000 ? 70 : 40;
 
   let score = 0;
 
-  if (smartMoney > 60) score += 20;
+  if (smartMoney > 60) score += 25;
   if (concentration < 40) score += 20;
 
   return {
