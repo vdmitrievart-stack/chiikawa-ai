@@ -5,10 +5,27 @@ import path from "node:path";
 import TelegramBot from "node-telegram-bot-api";
 import * as XLSX from "xlsx";
 
-import TradingKernel from "./core/trading-kernel.js";
-import { buildBalanceText } from "./core/reporting-engine.js";
+import {
+  getBestTrade,
+  getLatestTokenPrice,
+  recordTradeOutcomeFromSignalContext,
+  analyzeToken,
+  scanMarket
+} from "./scan-engine.js";
+
+import {
+  getPortfolio,
+  getPositions,
+  getClosedTrades,
+  getStrategyConfig,
+  resetPortfolio,
+  openPosition,
+  closePosition,
+  markPosition,
+  maybeTakeRunnerPartial
+} from "./portfolio.js";
+
 import { buildStrategyPlans } from "./strategy-engine.js";
-import { analyzeToken, scanMarket } from "./scan-engine.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
@@ -23,83 +40,22 @@ if (!TOKEN) {
 }
 
 const bot = new TelegramBot(TOKEN, { polling: false });
-const kernel = new TradingKernel({ logger: console });
 
 let loopId = null;
 let stopTimeoutId = null;
+let currentMode = "stopped";
+let activeChatId = null;
+let activeUserId = null;
+
+let runState = {
+  runId: null,
+  startedAt: null,
+  mode: "stopped"
+};
+
+const recentlyTraded = new Map();
 const tempFiles = new Set();
 const chatState = new Map();
-
-function keyboard() {
-  return {
-    keyboard: [
-      ["▶️ Run Multi", "🎯 Run Strategy"],
-      ["💰 Balance", "📊 Status"],
-      ["🔎 Scan Market", "🧾 Scan CA"],
-      ["🧮 Budget", "🌐 Language"],
-      ["📋 Copytrade", "👛 Wallets"],
-      ["🛑 Stop", "☠️ Kill"],
-      ["📈 Export CSV", "📦 Export JSON"],
-      ["📊 Export XLSX"]
-    ],
-    resize_keyboard: true,
-    persistent: true
-  };
-}
-
-function setChatMode(chatId, mode, payload = {}) {
-  chatState.set(chatId, { mode, ...payload, updatedAt: Date.now() });
-}
-
-function getChatMode(chatId) {
-  return chatState.get(chatId) || { mode: "idle" };
-}
-
-function clearChatMode(chatId) {
-  chatState.delete(chatId);
-}
-
-function normalizeAction(text) {
-  const raw = String(text || "").toLowerCase().trim();
-  if (!raw) return null;
-
-  const pairs = [
-    [["/start", "/menu"], "start"],
-    [["/runmulti", "run multi", "▶️ run multi"], "runmulti"],
-    [["/runstrategy", "🎯 run strategy"], "runstrategy"],
-    [["/stop", "🛑 stop", "стоп"], "stop"],
-    [["/kill", "☠️ kill"], "kill"],
-    [["/status", "📊 status", "статус"], "status"],
-    [["/scanmarket", "scan market", "🔎 scan market"], "scan_market"],
-    [["/scanca", "/ca", "scan ca", "🧾 scan ca"], "scan_ca"],
-    [["/balance", "💰 balance"], "balance"],
-    [["/budget", "🧮 budget"], "budget"],
-    [["/language", "🌐 language"], "language"],
-    [["/copytrade", "📋 copytrade"], "copytrade"],
-    [["/wallets", "👛 wallets"], "wallets"],
-    [["/exportcsv"], "exportcsv"],
-    [["/exportjson"], "exportjson"],
-    [["/exportxlsx"], "exportxlsx"],
-    [["scalp", "run scalp"], "run_scalp"],
-    [["reversal", "run reversal"], "run_reversal"],
-    [["runner", "run runner"], "run_runner"],
-    [["copytrade only", "run copytrade"], "run_copytrade"],
-    [["budget 25 25 25 25"], "budget_equal"],
-    [["lang ru"], "lang_ru"],
-    [["lang en"], "lang_en"]
-  ];
-
-  for (const [aliases, action] of pairs) {
-    if (aliases.some((x) => raw === x || raw.includes(x))) return action;
-  }
-
-  return null;
-}
-
-function isLikelyCA(text) {
-  const value = String(text || "").trim();
-  return /^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(value);
-}
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -119,25 +75,132 @@ function escapeHtml(input) {
     .replace(/"/g, "&quot;");
 }
 
+function keyboard() {
+  return {
+    keyboard: [
+      ["▶️ Run 4h", "♾️ Run Infinite"],
+      ["🛑 Stop", "📊 Status"],
+      ["🔎 Scan Market", "🧾 Scan CA"],
+      ["📈 Export CSV", "📦 Export JSON"],
+      ["📊 Export XLSX"]
+    ],
+    resize_keyboard: true,
+    persistent: true
+  };
+}
+
+function normalizeAction(text) {
+  const raw = String(text || "").toLowerCase().trim();
+  if (!raw) return null;
+
+  if (raw === "/start" || raw === "/menu") return "start";
+  if (raw === "/run4h") return "run4h";
+  if (raw === "/runinfinite") return "runinfinite";
+  if (raw === "/stop") return "stop";
+  if (raw === "/status") return "status";
+  if (raw === "/scanmarket" || raw === "/scan_market") return "scan_market";
+  if (raw === "/scanca" || raw === "/scan_ca" || raw === "/ca") return "scan_ca";
+  if (raw === "/exportcsv") return "exportcsv";
+  if (raw === "/exportjson" || raw === "/exportstats") return "exportjson";
+  if (raw === "/exportxlsx") return "exportxlsx";
+
+  if (raw.includes("run 4h") || raw.includes("4ч") || raw.includes("run4h")) return "run4h";
+  if (raw.includes("infinite") || raw.includes("бескон")) return "runinfinite";
+  if (raw.includes("stop") || raw.includes("стоп")) return "stop";
+  if (raw.includes("status") || raw.includes("статус")) return "status";
+  if (raw.includes("scan market") || raw.includes("скан рынок")) return "scan_market";
+  if (raw.includes("scan ca") || raw.includes("скан ca")) return "scan_ca";
+  if (raw.includes("csv")) return "exportcsv";
+  if (raw.includes("json")) return "exportjson";
+  if (raw.includes("xlsx")) return "exportxlsx";
+
+  return null;
+}
+
+function setChatMode(chatId, mode, payload = {}) {
+  chatState.set(chatId, { mode, ...payload, updatedAt: Date.now() });
+}
+
+function getChatMode(chatId) {
+  return chatState.get(chatId) || { mode: "idle" };
+}
+
+function clearChatMode(chatId) {
+  chatState.delete(chatId);
+}
+
+function isLikelyCA(text) {
+  const value = String(text || "").trim();
+  return /^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(value);
+}
+
 async function sendMessage(chatId, text, extra = {}) {
   return bot.sendMessage(chatId, text, {
     parse_mode: "HTML",
-    disable_web_page_preview: true,
+    disable_web_page_preview: false,
     ...extra
   });
 }
 
-function stopLoop() {
-  if (loopId) clearInterval(loopId);
-  if (stopTimeoutId) clearTimeout(stopTimeoutId);
-  loopId = null;
-  stopTimeoutId = null;
+async function sendPhotoOrText(chatId, imageUrl, caption, extra = {}) {
+  const safeCaption = String(caption || "").slice(0, 1024);
+
+  if (imageUrl) {
+    try {
+      await bot.sendPhoto(chatId, imageUrl, {
+        caption: safeCaption,
+        parse_mode: "HTML",
+        ...extra
+      });
+      return;
+    } catch (error) {
+      console.log("sendPhoto fallback:", error.message);
+    }
+  }
+
+  await sendMessage(chatId, caption, extra);
+}
+
+function buildLinksText(links = {}) {
+  const rows = [];
+
+  if (links.website) rows.push(`🌐 <a href="${escapeHtml(links.website)}">Website</a>`);
+  if (links.twitter) rows.push(`🐦 <a href="${escapeHtml(links.twitter)}">Twitter/X</a>`);
+  if (links.telegram) rows.push(`✈️ <a href="${escapeHtml(links.telegram)}">Telegram</a>`);
+  if (links.instagram) rows.push(`📸 <a href="${escapeHtml(links.instagram)}">Instagram</a>`);
+  if (links.facebook) rows.push(`📘 <a href="${escapeHtml(links.facebook)}">Facebook</a>`);
+  if (links.youtube) rows.push(`▶️ <a href="${escapeHtml(links.youtube)}">YouTube</a>`);
+  if (links.discord) rows.push(`💬 <a href="${escapeHtml(links.discord)}">Discord</a>`);
+  if (links.tiktok) rows.push(`🎵 <a href="${escapeHtml(links.tiktok)}">TikTok</a>`);
+
+  return rows.length ? rows.join(" | ") : "none";
+}
+
+function buildDexText(token) {
+  const rows = [];
+  if (token?.url) rows.push(`📊 <a href="${escapeHtml(token.url)}">DexScreener</a>`);
+  if (token?.chainId) rows.push(`Chain: ${escapeHtml(token.chainId)}`);
+  if (token?.dexId) rows.push(`DEX: ${escapeHtml(token.dexId)}`);
+  return rows.join(" | ") || "n/a";
+}
+
+function buildHeroCaption(analyzed) {
+  const t = analyzed.token || {};
+  const links = analyzed.socials?.links || {};
+
+  return `🧾 <b>Scanning CA</b>
+
+<b>${escapeHtml(t.name || "Unknown")}</b>
+<code>${escapeHtml(t.ca || "")}</code>
+
+<b>Links:</b> ${buildLinksText(links)}
+<b>Dex:</b> ${buildDexText(t)}`.slice(0, 1024);
 }
 
 function buildAnalysisText(analyzed, plans) {
   const t = analyzed.token || {};
   const reasons = (analyzed.reasons || [])
-    .slice(0, 12)
+    .slice(0, 14)
     .map((r) => `• ${escapeHtml(r)}`)
     .join("\n");
 
@@ -155,11 +218,18 @@ function buildAnalysisText(analyzed, plans) {
         .join("\n")
     : "• none";
 
+  const linksText = buildLinksText(analyzed.socials?.links || {});
+  const dexText = buildDexText(t);
+
   return `🔎 <b>ANALYSIS</b>
 
 <b>Token:</b> ${escapeHtml(t.name || "Unknown")}
+<b>Symbol:</b> ${escapeHtml(t.symbol || "")}
 <b>CA:</b> <code>${escapeHtml(t.ca || "")}</code>
-<b>Score:</b> ${round(analyzed.score, 2)}
+
+<b>Dex:</b> ${dexText}
+<b>Pair:</b> <code>${escapeHtml(t.pairAddress || "n/a")}</code>
+<b>DEX Paid:</b> ${escapeHtml(analyzed.dexPaid?.status || "Unknown")}
 
 <b>Price:</b> ${escapeHtml(t.price)}
 <b>Liquidity:</b> ${escapeHtml(t.liquidity)}
@@ -174,8 +244,14 @@ function buildAnalysisText(analyzed, plans) {
 🐦 <b>Sentiment:</b> ${analyzed.sentiment?.sentiment ?? 0}
 ☠️ <b>Corpse Score:</b> ${analyzed.corpse?.score ?? 0}
 👨‍💻 <b>Dev Verdict:</b> ${escapeHtml(analyzed.developer?.verdict || "Unknown")}
+
+🏷️ <b>Token Type:</b> ${escapeHtml(analyzed.mechanics?.tokenType || "Unknown")}
+🎁 <b>Reward Model:</b> ${escapeHtml(analyzed.mechanics?.rewardModel || "Unknown")}
+👤 <b>Beneficiary Signal:</b> ${escapeHtml(analyzed.mechanics?.beneficiarySignal || "Unknown")}
+💸 <b>Claim Signal:</b> ${escapeHtml(analyzed.mechanics?.claimSignal || "Unknown")}
+
 🧾 <b>Narrative:</b> ${escapeHtml(analyzed.narrative?.verdict || "Unknown")}
-🌐 <b>Socials:</b> ${escapeHtml((analyzed.socials?.notes || []).join(", ") || "none")}
+🌐 <b>Links:</b> ${linksText}
 
 <b>Narrative summary:</b>
 ${escapeHtml(analyzed.narrative?.summary || "none")}
@@ -194,488 +270,113 @@ ${plansText}
 ${reasons || "• none"}`;
 }
 
-async function fetchTokenByCA(ca) {
-  const res = await fetch(`${DEX_TOKEN_API}/${encodeURIComponent(ca)}`);
-  if (!res.ok) {
-    throw new Error(`DexScreener HTTP ${res.status}`);
-  }
+function buildDashboard() {
+  const pf = getPortfolio();
+  const cfg = getStrategyConfig();
 
-  const json = await res.json();
-  const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
-  if (!pairs.length) return null;
+  const totalClosed = pf.closedTrades.length;
+  const wins = pf.closedTrades.filter((t) => t.netPnlPct > 0).length;
+  const winrate = totalClosed ? (wins / totalClosed) * 100 : 0;
 
-  const pair = pairs
-    .map((p) => ({
-      name: p?.baseToken?.symbol || p?.baseToken?.name || "UNKNOWN",
-      ca: p?.baseToken?.address || "",
-      pairAddress: p?.pairAddress || "",
-      chainId: p?.chainId || "",
-      dexId: p?.dexId || "",
-      price: safeNum(p?.priceUsd),
-      liquidity: safeNum(p?.liquidity?.usd),
-      volume: safeNum(p?.volume?.h24),
-      buys: safeNum(p?.txns?.h24?.buys),
-      sells: safeNum(p?.txns?.h24?.sells),
-      txns: safeNum(p?.txns?.h24?.buys) + safeNum(p?.txns?.h24?.sells),
-      fdv: safeNum(p?.fdv),
-      pairCreatedAt: safeNum(p?.pairCreatedAt),
-      url: p?.url || ""
-    }))
-    .sort((a, b) => b.volume - a.volume)[0];
-
-  return pair || null;
-}
-
-async function analyzeCA(chatId, ca) {
-  await sendMessage(chatId, `🧾 <b>Scanning CA</b>\n<code>${escapeHtml(ca)}</code>`);
-
-  const token = await fetchTokenByCA(ca);
-  if (!token) {
-    await sendMessage(chatId, "❌ Token not found by CA.", { reply_markup: keyboard() });
-    return;
-  }
-
-  const analyzed = await analyzeToken(token);
-  const plans = buildStrategyPlans(analyzed, {
-    enabledStrategies: kernel.getRuntime().activeConfig.strategyEnabled
-  });
-
-  await sendMessage(chatId, buildAnalysisText(analyzed, plans), {
-    reply_markup: keyboard()
-  });
-}
-
-async function runMarketScan(chatId) {
-  await sendMessage(chatId, "🔎 <b>Market scan started</b>", {
-    reply_markup: keyboard()
-  });
-
-  const market = await scanMarket();
-  if (!market.length) {
-    await sendMessage(chatId, "❌ No market candidates found.", { reply_markup: keyboard() });
-    return;
-  }
-
-  await flushCycle(chatId);
-}
-
-async function flushCycle(chatId) {
-  const events = await kernel.cycle();
-  for (const event of events) {
-    const text = kernel.renderEventText(event);
-    if (text) await sendMessage(chatId, text);
-  }
-
-  const rt = kernel.getRuntime();
-  const shouldReport =
-    !rt.lastReportAt ||
-    Date.now() - rt.lastReportAt >= rt.activeConfig.reportIntervalMin * 60 * 1000;
-
-  if (shouldReport) {
-    rt.lastReportAt = Date.now();
-    await sendMessage(chatId, kernel.buildPeriodicReport());
-  }
-
-  if (rt.stopRequested && kernel.getPortfolio().positions.length === 0) {
-    stopLoop();
-    rt.mode = "stopped";
-    await sendMessage(chatId, "🛑 <b>ОСТАНОВКА ЗАВЕРШЕНА</b>\nБольше нет открытых позиций.", {
-      reply_markup: keyboard()
-    });
-    await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
-  }
-}
-
-function startRun(chatId, userId, mode, strategyOnly = null) {
-  stopLoop();
-
-  const rt = kernel.start({ mode, chatId, userId, startBalance: 1 });
-  if (strategyOnly) {
-    rt.activeConfig.strategyEnabled = {
-      scalp: strategyOnly === "scalp",
-      reversal: strategyOnly === "reversal",
-      runner: strategyOnly === "runner",
-      copytrade: strategyOnly === "copytrade"
-    };
-  }
-
-  loopId = setInterval(() => {
-    flushCycle(chatId).catch((err) => console.log("cycle error:", err.message));
-  }, AUTO_INTERVAL_MS);
-
-  if (mode === "4h") {
-    stopTimeoutId = setTimeout(async () => {
-      kernel.requestStop();
-      await sendMessage(chatId, "🛑 <b>AUTO STOP REQUESTED</b>\nWaiting natural exits.");
-    }, 4 * 60 * 60 * 1000);
-  }
-}
-
-function statsToCsv() {
-  const closed = kernel.getPortfolio().closedTrades;
-  const header = [
-    "id",
-    "strategy",
-    "walletId",
-    "token",
-    "ca",
-    "entryRef",
-    "exitRef",
-    "amountSol",
-    "netPnlPct",
-    "netPnlSol",
-    "reason",
-    "openedAt",
-    "closedAt",
-    "durationMs",
-    "balanceAfter"
+  const lines = [
+    `📊 <b>ПАНЕЛЬ УПРАВЛЕНИЯ БОТОМ</b>`,
+    ``,
+    `<b>Идентификатор запуска:</b> ${escapeHtml(runState.runId || "-")}`,
+    `<b>Режим:</b> ${escapeHtml(currentMode.toUpperCase())}`,
+    `<b>Денежные средства:</b> ${round(pf.cash, 4)} SOL`,
+    `<b>Собственный капитал:</b> ${round(pf.equity, 4)} SOL`,
+    `<b>Реализованная прибыль:</b> ${round(pf.realizedPnlSol, 4)} SOL`,
+    `<b>Нереализованная прибыль:</b> ${round(pf.unrealizedPnlSol, 4)} SOL`,
+    `<b>Открытые позиции:</b> ${pf.positions.length}`,
+    `<b>Закрытые сделки:</b> ${totalClosed}`,
+    `<b>Процент прибыльных сделок:</b> ${round(winrate, 2)}%`,
+    ``,
+    `<b>Стратегии</b>`
   ];
 
-  const rows = closed.map((t) => [
-    t.id,
-    t.strategy,
-    t.walletId,
-    t.token,
-    t.ca,
-    t.entryReferencePrice,
-    t.exitReferencePrice,
-    t.amountSol,
-    t.netPnlPct,
-    t.netPnlSol,
-    t.reason,
-    t.openedAt,
-    t.closedAt,
-    t.durationMs,
-    t.balanceAfter
-  ]);
-
-  return [header.join(","), ...rows.map((r) => r.join(","))].join("\n");
-}
-
-function statsToXlsxWorkbook() {
-  const pf = kernel.getPortfolio();
-  const wb = XLSX.utils.book_new();
-
-  XLSX.utils.book_append_sheet(
-    wb,
-    XLSX.utils.json_to_sheet([
-      { metric: "equity", value: pf.equity },
-      { metric: "cash", value: pf.cash },
-      { metric: "realized", value: pf.realizedPnlSol },
-      { metric: "unrealized", value: pf.unrealizedPnlSol }
-    ]),
-    "summary"
-  );
-
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pf.closedTrades), "trades");
-  return wb;
-}
-
-async function scheduleTempCleanup(filePath) {
-  tempFiles.add(filePath);
-  setTimeout(async () => {
-    try {
-      await fs.unlink(filePath);
-    } catch {}
-    tempFiles.delete(filePath);
-  }, 5 * 60 * 1000);
-}
-
-async function exportJson(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.json`);
-  await fs.writeFile(filePath, JSON.stringify(kernel.getPortfolio(), null, 2), "utf8");
-  await bot.sendDocument(chatId, filePath, {}, {
-    filename: path.basename(filePath),
-    contentType: "application/json"
-  });
-  await scheduleTempCleanup(filePath);
-}
-
-async function exportCsv(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.csv`);
-  await fs.writeFile(filePath, statsToCsv(), "utf8");
-  await bot.sendDocument(chatId, filePath, {}, {
-    filename: path.basename(filePath),
-    contentType: "text/csv"
-  });
-  await scheduleTempCleanup(filePath);
-}
-
-async function exportXlsx(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${Date.now()}.xlsx`);
-  XLSX.writeFile(statsToXlsxWorkbook(), filePath);
-  await bot.sendDocument(chatId, filePath, {}, {
-    filename: path.basename(filePath),
-    contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  });
-  await scheduleTempCleanup(filePath);
-}
-
-async function handleAction(chatId, userId, action) {
-  if (action === "start") {
-    clearChatMode(chatId);
-    await sendMessage(chatId, "🤖 <b>Bot ready</b>\n\nUse the menu below.", {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action === "runmulti") {
-    await sendMessage(chatId, "🚀 Starting multi-strategy engine from 1 SOL", {
-      reply_markup: keyboard()
-    });
-    startRun(chatId, userId, "infinite");
-    return;
-  }
-
-  if (action === "runstrategy") {
-    await sendMessage(chatId, "🎯 Send one of: scalp / reversal / runner / copytrade only", {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action.startsWith("run_")) {
-    const strategy = action.replace("run_", "");
-    await sendMessage(chatId, `🚀 Starting ${strategy} only mode`, {
-      reply_markup: keyboard()
-    });
-    startRun(chatId, userId, "infinite", strategy);
-    return;
-  }
-
-  if (action === "stop") {
-    kernel.requestStop();
-    await sendMessage(chatId, "🛑 Stop requested. Bot will stop after natural exits.", {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action === "kill") {
-    stopLoop();
-    const closed = await kernel.killAllPositions("KILL_SWITCH");
-    await sendMessage(chatId, `☠️ <b>KILL EXECUTED</b>\nClosed positions: ${closed.length}`, {
-      reply_markup: keyboard()
-    });
-    await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
-    return;
-  }
-
-  if (action === "status") {
-    await sendMessage(chatId, kernel.buildDashboardText(), { reply_markup: keyboard() });
-    return;
-  }
-
-  if (action === "balance") {
-    await sendMessage(chatId, buildBalanceText(kernel.getPortfolio()), {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action === "scan_market") {
-    clearChatMode(chatId);
-    await runMarketScan(chatId);
-    return;
-  }
-
-  if (action === "scan_ca") {
-    setChatMode(chatId, "awaiting_ca");
-    await sendMessage(chatId, "🧾 <b>Send CA</b>\n\nОтправь контракт токена следующим сообщением.", {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action === "budget") {
-    const cfg = kernel.getRuntime().activeConfig.strategyBudget;
-    await sendMessage(
-      chatId,
-      `<b>Current budget</b>\nscalp: ${Math.round(cfg.scalp * 100)}%\nreversal: ${Math.round(
-        cfg.reversal * 100
-      )}%\nrunner: ${Math.round(cfg.runner * 100)}%\ncopytrade: ${Math.round(
-        cfg.copytrade * 100
-      )}%\n\nSend: <code>budget 25 25 25 25</code>`,
-      { reply_markup: keyboard() }
+  for (const key of Object.keys(cfg)) {
+    const row = pf.byStrategy[key];
+    lines.push(
+      `• <b>${escapeHtml(cfg[key].label)}</b> — выделено ${round(
+        cfg[key].allocationPct * 100,
+        0
+      )}% | доступно ${round(row.availableSol, 4)} SOL | открыто ${row.openPositions} | прибыль/убыток ${round(row.realizedPnlSol, 4)} SOL`
     );
-    return;
   }
 
-  if (action === "budget_equal") {
-    kernel.queueConfigPatch(
-      {
-        strategyBudget: {
-          scalp: 0.25,
-          reversal: 0.25,
-          runner: 0.25,
-          copytrade: 0.25
-        }
-      },
-      "budget_equal"
-    );
-    await sendMessage(chatId, "🧮 Pending budget queued: 25 / 25 / 25 / 25", {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action === "language") {
-    await sendMessage(chatId, "🌐 Send: <code>lang ru</code> or <code>lang en</code>", {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action === "lang_ru" || action === "lang_en") {
-    const lang = action === "lang_ru" ? "ru" : "en";
-    kernel.queueConfigPatch({ language: lang }, `lang_${lang}`);
-    kernel.getRuntime().activeConfig.language = lang;
-    await sendMessage(chatId, `🌐 Language set: ${lang.toUpperCase()}`, {
-      reply_markup: keyboard()
-    });
-    return;
-  }
-
-  if (action === "copytrade") {
-    const copyCfg = kernel.getRuntime().activeConfig.copytrade;
-    await sendMessage(
-      chatId,
-      `<b>Copytrade</b>\nEnabled: ${copyCfg.enabled}\nRescoring: ${copyCfg.rescoringEnabled}\nMin leader score: ${copyCfg.minLeaderScore}\nCooldown min: ${copyCfg.cooldownMinutes}`,
-      { reply_markup: keyboard() }
-    );
-    return;
-  }
-
-  if (action === "wallets") {
-    const wallets = kernel.getRuntime().activeConfig.wallets;
-    const text = Object.entries(wallets)
-      .map(
-        ([id, w]) =>
-          `• <b>${id}</b>\nlabel: ${w.label}\nrole: ${w.role}\nenabled: ${w.enabled}\nmode: ${w.executionMode}\nstrategies: ${(w.allowedStrategies || []).join(", ")}`
-      )
-      .join("\n\n");
-
-    await sendMessage(chatId, `<b>Wallets</b>\n${text}`, { reply_markup: keyboard() });
-    return;
-  }
-
-  if (action === "exportcsv") {
-    await exportCsv(chatId);
-    return;
-  }
-
-  if (action === "exportjson") {
-    await exportJson(chatId);
-    return;
-  }
-
-  if (action === "exportxlsx") {
-    await exportXlsx(chatId);
-    return;
-  }
-
-  await sendMessage(chatId, "Use the menu below.", { reply_markup: keyboard() });
+  return lines.join("\n");
 }
 
-async function processMessage(msg) {
-  const chatId = msg.chat.id;
-  const userId = msg.from?.id || chatId;
-  const text = String(msg.text || "").trim();
-  const mode = getChatMode(chatId);
-  const action = normalizeAction(text);
+function buildEntryText(position) {
+  return `🚀 <b>ENTRY</b>
 
-  if (action) {
-    await handleAction(chatId, userId, action);
-    return;
-  }
+<b>Strategy:</b> ${escapeHtml(position.strategy.toUpperCase())}
+<b>Token:</b> ${escapeHtml(position.token)}
+<b>CA:</b> <code>${escapeHtml(position.ca)}</code>
 
-  if (mode.mode === "awaiting_ca") {
-    if (!isLikelyCA(text)) {
-      await sendMessage(chatId, "❌ Это не похоже на валидный CA. Отправь адрес токена целиком.", {
-        reply_markup: keyboard()
-      });
-      return;
-    }
+<b>Entry ref:</b> ${position.entryReferencePrice}
+<b>Entry effective:</b> ${position.entryEffectivePrice}
+<b>Size:</b> ${round(position.amountSol, 4)} SOL
+<b>Expected edge:</b> ${round(position.expectedEdgePct, 2)}%
 
-    clearChatMode(chatId);
-    await analyzeCA(chatId, text);
-    return;
-  }
+<b>Thesis:</b>
+${escapeHtml(position.thesis)}
 
-  const budgetMatch = text.match(/^budget\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/i);
-  if (budgetMatch) {
-    const [_, a, b, c, d] = budgetMatch;
-    const total = Number(a) + Number(b) + Number(c) + Number(d);
-    if (total !== 100) {
-      await sendMessage(chatId, "Budget must sum to 100.");
-      return;
-    }
-
-    kernel.queueConfigPatch(
-      {
-        strategyBudget: {
-          scalp: Number(a) / 100,
-          reversal: Number(b) / 100,
-          runner: Number(c) / 100,
-          copytrade: Number(d) / 100
-        }
-      },
-      "manual_budget_update"
-    );
-
-    await sendMessage(chatId, "🧮 Pending budget update queued.", { reply_markup: keyboard() });
-    return;
-  }
-
-  if (isLikelyCA(text)) {
-    await sendMessage(
-      chatId,
-      "Чтобы проанализировать контракт, сначала нажми <b>🧾 Scan CA</b>, а потом отправь адрес.",
-      { reply_markup: keyboard() }
-    );
-    return;
-  }
-
-  await sendMessage(chatId, "Use the menu below.", { reply_markup: keyboard() });
+<b>Entry costs:</b> ${round(position.entryCosts.totalSol, 6)} SOL`;
 }
 
-bot.on("message", (msg) => {
-  processMessage(msg).catch((err) => {
-    console.log("message error:", err.message);
-  });
-});
+function buildPositionUpdateText(position, mark, status) {
+  return `📈 <b>UPDATE</b>
 
-const server = http.createServer(async (req, res) => {
-  if (req.method === "POST" && req.url === WEBHOOK_PATH) {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk;
-    });
-    req.on("end", async () => {
-      try {
-        const update = JSON.parse(body);
-        bot.processUpdate(update);
-        res.writeHead(200);
-        res.end("ok");
-      } catch (error) {
-        res.writeHead(500);
-        res.end(error.message);
-      }
-    });
-    return;
+<b>Strategy:</b> ${escapeHtml(position.strategy.toUpperCase())}
+<b>Token:</b> ${escapeHtml(position.token)}
+<b>CA:</b> <code>${escapeHtml(position.ca)}</code>
+
+<b>Entry ref:</b> ${position.entryReferencePrice}
+<b>Current:</b> ${mark.currentPrice}
+<b>Gross PnL:</b> ${round(mark.grossPnlPct, 2)}%
+<b>Net PnL:</b> ${round(mark.netPnlPct, 2)}%
+<b>Age:</b> ${Math.round(mark.ageMs / 1000)}s
+<b>Status:</b> ${escapeHtml(status)}`;
+}
+
+function buildExitText(trade) {
+  return `🏁 <b>EXIT</b>
+
+<b>Strategy:</b> ${escapeHtml(trade.strategy.toUpperCase())}
+<b>Token:</b> ${escapeHtml(trade.token)}
+<b>CA:</b> <code>${escapeHtml(trade.ca)}</code>
+
+<b>Entry ref:</b> ${trade.entryReferencePrice}
+<b>Entry effective:</b> ${trade.entryEffectivePrice}
+<b>Exit ref:</b> ${trade.exitReferencePrice}
+
+<b>Net PnL:</b> ${round(trade.netPnlPct, 2)}%
+<b>Net PnL SOL:</b> ${round(trade.netPnlSol, 6)}
+<b>Reason:</b> ${escapeHtml(trade.reason)}
+<b>Balance after:</b> ${round(trade.balanceAfter, 4)} SOL`;
+}
+
+function shouldClosePosition(position, analyzedNow) {
+  const mark = position.lastMark;
+  if (!mark) return { close: false, reason: "NO_MARK" };
+
+  const ageMs = mark.ageMs;
+
+  if (position.strategy === "scalp") {
+    if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "SCALP_STOP" };
+    if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "SCALP_TP" };
+    if (ageMs >= position.plannedHoldMs) return { close: true, reason: "SCALP_TIME_EXIT" };
+    return { close: false, reason: "SCALP_HOLD" };
   }
 
-  if (req.method === "GET" && req.url === "/healthz") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
-    return;
+  if (position.strategy === "reversal") {
+    if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "REVERSAL_STOP" };
+    if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "REVERSAL_TP" };
+    if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 8) return { close: true, reason: "REVERSAL_TIME_EXIT" };
+    if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "REVERSAL_CORPSE_EXIT" };
+    return { close: false, reason: "REVERSAL_HOLD" };
   }
 
-  res.writeHead(404);
-  res.end("not found");
-});
-
-server.listen(PORT, async () => {
-  console.log(`Telegram bot server listening on port ${PORT}`);
-});
+  if (position.strategy === "runner") {
+    if (mark.netPnlPct <= -Math
