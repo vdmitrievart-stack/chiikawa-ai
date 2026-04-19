@@ -85,6 +85,11 @@ function formatAnalysis(best) {
 <b>Liquidity Δ:</b> ${best.delta.liquidityDeltaPct.toFixed(2)}%
 <b>Buy Pressure Δ:</b> ${best.delta.buyPressureDelta.toFixed(3)}
 
+🧲 <b>Accumulation:</b> ${best.accumulation.score}
+📤 <b>Distribution:</b> ${best.distribution.score}
+🧱 <b>Absorption:</b> ${best.absorption.score}
+🚨 <b>Exceptional Override:</b> ${best.exceptionalOverride.active ? "ON" : "OFF"}
+
 🎯 <b>Strategy</b>
 <b>Expected edge:</b> ${best.strategy.expectedEdgePct}%
 <b>Round-trip costs:</b> ${estimateRoundTripCostPct()}%
@@ -125,6 +130,8 @@ async function runCycle(chatId) {
 <b>Gross PnL:</b> ${mtm.grossPnlPct.toFixed(2)}%
 <b>Net PnL:</b> ${mtm.netPnlPct.toFixed(2)}%
 <b>Age:</b> ${(mtm.ageMs / 1000).toFixed(0)}s
+<b>High watermark:</b> ${pf.position.highWaterMarkPrice}
+<b>Low watermark:</b> ${pf.position.lowWaterMarkPrice}
 <b>Status:</b> ${exitCheck.reason}`
       );
 
@@ -191,7 +198,15 @@ async function runCycle(chatId) {
       stopLossPct: best.strategy.stopLossPct,
       takeProfitPct: best.strategy.takeProfitPct,
       reason: best.strategy.reason,
-      signalScore: best.score
+      signalScore: best.score,
+      signalContext: {
+        delta: best.delta,
+        accumulation: best.accumulation,
+        distribution: best.distribution,
+        absorption: best.absorption,
+        exceptionalOverride: best.exceptionalOverride,
+        reasons: best.reasons
+      }
     });
 
     if (!entry) {
