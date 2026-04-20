@@ -27,8 +27,8 @@ function normalizeAction(text) {
   if (normalized === "/runcopytrade" || normalized.includes("run copytrade")) return "run_copytrade";
   if (normalized === "/runmigration" || normalized.includes("run migration")) return "run_migration";
 
-  if (normalized === "/stop" || normalized === "stop" || normalized.includes(" stop")) return "stop";
-  if (normalized === "/kill" || normalized === "kill" || normalized.includes(" kill")) return "kill";
+  if (normalized === "/stop" || normalized === "stop" || normalized.endsWith(" stop")) return "stop";
+  if (normalized === "/kill" || normalized === "kill" || normalized.endsWith(" kill")) return "kill";
 
   if (normalized === "/status" || normalized.includes("status")) return "status";
   if (normalized === "/intents" || normalized.includes("pending intents")) return "intents";
@@ -66,6 +66,9 @@ export default class BotRouter {
     this.loopId = null;
     this.stopTimeoutId = null;
     this.AUTO_INTERVAL_MS = Number(process.env.AUTO_INTERVAL_MS || 60000);
+    this.publicGroupChatId = process.env.PUBLIC_GROUP_CHAT_ID || "";
+    this.adminChatId = process.env.ADMIN_CHAT_ID || "";
+    this.lastPinnedPublicMessageId = null;
     this.t = makeTranslator(() => this.kernel.getRuntime().activeConfig.language);
   }
 
@@ -95,30 +98,114 @@ export default class BotRouter {
 
   async sendPhotoOrText(chatId, imageUrl, caption, extra = {}) {
     const safeCaption = String(caption || "").slice(0, 1024);
+
     if (imageUrl) {
       try {
-        await this.bot.sendPhoto(chatId, imageUrl, {
+        return await this.bot.sendPhoto(chatId, imageUrl, {
           caption: safeCaption,
           parse_mode: "HTML",
           ...extra
         });
-        return;
       } catch (error) {
         this.logger.log("sendPhoto fallback:", error.message);
       }
     }
-    await this.sendMessage(chatId, caption, extra);
+
+    return this.sendMessage(chatId, caption, extra);
+  }
+
+  async sendPublicMessage(text, extra = {}) {
+    if (!this.publicGroupChatId) return null;
+
+    return this.bot.sendMessage(this.publicGroupChatId, text, {
+      parse_mode: "HTML",
+      disable_web_page_preview: false,
+      ...extra
+    });
+  }
+
+  async sendPublicPhotoOrText(imageUrl, caption, extra = {}) {
+    if (!this.publicGroupChatId) return null;
+
+    const safeCaption = String(caption || "").slice(0, 1024);
+
+    if (imageUrl) {
+      try {
+        return await this.bot.sendPhoto(this.publicGroupChatId, imageUrl, {
+          caption: safeCaption,
+          parse_mode: "HTML",
+          ...extra
+        });
+      } catch (error) {
+        this.logger.log("sendPublicPhoto fallback:", error.message);
+      }
+    }
+
+    return this.sendPublicMessage(caption, extra);
+  }
+
+  async pinPublicMessage(message) {
+    if (!this.publicGroupChatId || !message?.message_id) return null;
+
+    try {
+      if (
+        this.lastPinnedPublicMessageId &&
+        this.lastPinnedPublicMessageId !== message.message_id
+      ) {
+        try {
+          await this.bot.unpinChatMessage(this.publicGroupChatId, {
+            message_id: this.lastPinnedPublicMessageId
+          });
+        } catch (error) {
+          this.logger.log("unpinChatMessage failed:", error.message);
+        }
+      }
+
+      await this.bot.pinChatMessage(
+        this.publicGroupChatId,
+        message.message_id,
+        { disable_notification: true }
+      );
+      this.lastPinnedPublicMessageId = message.message_id;
+    } catch (error) {
+      this.logger.log("pinPublicMessage failed:", error.message);
+    }
+
+    return message;
+  }
+
+  async sendAdminMessage(text, extra = {}) {
+    if (!this.adminChatId) return null;
+
+    return this.bot.sendMessage(this.adminChatId, text, {
+      parse_mode: "HTML",
+      disable_web_page_preview: false,
+      ...extra
+    });
   }
 
   createSendBridge(chatId) {
     return {
       text: (text, extra = {}) =>
         this.sendMessage(chatId, text, { reply_markup: this.keyboard(), ...extra }),
+
       photoOrText: (imageUrl, caption, extra = {}) =>
         this.sendPhotoOrText(chatId, imageUrl, caption, {
           reply_markup: this.keyboard(),
           ...extra
-        })
+        }),
+
+      publicText: (text, extra = {}) =>
+        this.sendPublicMessage(text, extra),
+
+      publicPhotoOrText: (imageUrl, caption, extra = {}) =>
+        this.sendPublicPhotoOrText(imageUrl, caption, extra),
+
+      pinPublicMessage: (message) =>
+        this.pinPublicMessage(message),
+
+      adminText: (text, extra = {}) =>
+        this.sendAdminMessage(text, extra)
     };
   }
 
@@ -248,7 +335,8 @@ export default class BotRouter {
     XLSX.writeFile(this.statsToXlsxWorkbook(), filePath);
     await this.bot.sendDocument(chatId, filePath, {}, {
       filename: path.basename(filePath),
-      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      contentType:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     });
     await this.scheduleTempCleanup(filePath);
   }
