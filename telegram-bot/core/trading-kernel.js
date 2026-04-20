@@ -89,7 +89,7 @@ export default class TradingKernel {
     logger = console
   }) {
     this.logger = logger;
-    this.walletRouter = walletRouter;
+    this.walletRouter = walletRouter || null;
     this.copytradeManager = copytradeManager;
     this.gmgnLeaderIntel = gmgnLeaderIntel;
     this.persistence = persistence || null;
@@ -101,6 +101,7 @@ export default class TradingKernel {
         initialConfig || {
           language: "ru",
           dryRun: true,
+          startBalanceSol: 10,
           strategyBudget: { ...DEFAULT_STRATEGY_BUDGET },
           wallets: {},
           strategyRouting: {},
@@ -141,7 +142,12 @@ export default class TradingKernel {
 
     this.positionService = new PositionService({
       logger: this.logger,
-      walletOrchestrator: null
+      onExternalClose: async ({ runtimeConfig, position, reason, latestPrice }) => {
+        return this.runGMGNClose(position, reason, latestPrice, runtimeConfig);
+      },
+      onExternalPartial: async ({ runtimeConfig, position, partial, latestPrice }) => {
+        return this.runGMGNPartial(position, partial, latestPrice, runtimeConfig);
+      }
     });
 
     this.copytradeService = new CopytradeService({
@@ -280,25 +286,6 @@ export default class TradingKernel {
       "KILL_SWITCH"
     );
 
-    for (const row of closed) {
-      if (row?.walletId) {
-        await this.gmgnExecutionService.executeClose(this.runtime.activeConfig, {
-          walletId: row.walletId,
-          strategy: row.strategy,
-          token: {
-            name: row.token,
-            symbol: row.symbol,
-            ca: row.ca
-          },
-          intent: {
-            expectedExitPrice: row.exitReferencePrice || row.lastPrice || 0,
-            tokenAmount: row.tokenAmountRaw || 0
-          },
-          note: "force close all"
-        });
-      }
-    }
-
     await this.applyPendingIfPossible();
     finishRuntime(this.runtime);
     await this.persistSnapshot();
@@ -371,8 +358,8 @@ export default class TradingKernel {
     }
   }
 
-  async runGMGNOpen(walletId, plan, candidate) {
-    return this.gmgnExecutionService.executeOpen(this.runtime.activeConfig, {
+  async runGMGNOpen(walletId, plan, candidate, runtimeConfig = this.runtime.activeConfig) {
+    return this.gmgnExecutionService.executeOpen(runtimeConfig, {
       walletId,
       strategy: plan.strategyKey,
       token: candidate.token,
@@ -386,8 +373,10 @@ export default class TradingKernel {
     });
   }
 
-  async runGMGNClose(position, reason, latestPrice) {
-    return this.gmgnExecutionService.executeClose(this.runtime.activeConfig, {
+  async runGMGNClose(position, reason, latestPrice, runtimeConfig = this.runtime.activeConfig) {
+    if (!position?.walletId) return null;
+
+    return this.gmgnExecutionService.executeClose(runtimeConfig, {
       walletId: position.walletId,
       strategy: position.strategy,
       token: {
@@ -403,8 +392,10 @@ export default class TradingKernel {
     });
   }
 
-  async runGMGNPartial(position, partial, latestPrice) {
-    return this.gmgnExecutionService.executePartial(this.runtime.activeConfig, {
+  async runGMGNPartial(position, partial, latestPrice, runtimeConfig = this.runtime.activeConfig) {
+    if (!position?.walletId) return null;
+
+    return this.gmgnExecutionService.executePartial(runtimeConfig, {
       walletId: position.walletId,
       strategy: position.strategy,
       token: {
@@ -822,5 +813,26 @@ Send: <code>budget 25 25 25 25</code>`;
     await send.text(
       this.candidateService.buildAnalysisText(enrichedAnalyzed, result.plans)
     );
+  }
+
+  // compatibility with current bot-router
+  buildPendingIntentText(limit = 10) {
+    return this.buildGMGNOrdersText(limit);
+  }
+
+  async markIntentSigned() {
+    return null;
+  }
+
+  async markIntentSubmitted() {
+    return null;
+  }
+
+  async markIntentConfirmed() {
+    return null;
+  }
+
+  async markIntentFailed() {
+    return null;
   }
 }
