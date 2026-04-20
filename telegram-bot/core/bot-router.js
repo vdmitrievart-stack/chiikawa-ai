@@ -322,7 +322,7 @@ export default class BotRouter {
     if (action === "run_multi") {
       this.kernel.start("all", "infinite", chatId, userId);
       this.startLoop(chatId, userId);
-      await this.sendMessage(chatId, `${this.t("run_started")}: MULTI`, {
+      await this.sendMessage(chatId, `${this.t("run_started")}: MULTI (5 STRATEGIES)`, {
         reply_markup: this.keyboard()
       });
       return;
