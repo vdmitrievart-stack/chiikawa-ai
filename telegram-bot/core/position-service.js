@@ -123,6 +123,35 @@ export default class PositionService {
       return { close: false, reason: "RUNNER_HOLD" };
     }
 
+    if (position.strategy === "migration_survivor") {
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct || 8)) {
+        return { close: true, reason: "MIGRATION_STOP" };
+      }
+
+      const pullbackFromHighPct =
+        position.highestPrice > 0
+          ? ((position.highestPrice - mark.currentPrice) / position.highestPrice) * 100
+          : 0;
+
+      if (mark.grossPnlPct >= 24 && pullbackFromHighPct >= 11) {
+        return { close: true, reason: "MIGRATION_TRAIL_EXIT" };
+      }
+
+      if (analyzedNow?.corpse?.isCorpse) {
+        return { close: true, reason: "MIGRATION_CORPSE_EXIT" };
+      }
+
+      if (analyzedNow?.falseBounce?.rejected && mark.netPnlPct <= 5) {
+        return { close: true, reason: "MIGRATION_FALSE_BOUNCE_EXIT" };
+      }
+
+      if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 10) {
+        return { close: true, reason: "MIGRATION_TIME_EXIT" };
+      }
+
+      return { close: false, reason: "MIGRATION_HOLD" };
+    }
+
     if (position.strategy === "copytrade") {
       const exitState = this.buildCopytradeExitState(position, analyzedNow);
       position.copytradeExitState = exitState;
@@ -276,6 +305,7 @@ export default class PositionService {
         socials: candidate.socials,
         developer: candidate.developer,
         mechanics: candidate.mechanics,
+        migration: candidate.migration,
         dexPaid: candidate.dexPaid,
         reasons: candidate.reasons,
         baseStrategy: candidate.strategy,
