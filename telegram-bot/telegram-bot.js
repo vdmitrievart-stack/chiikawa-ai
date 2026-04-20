@@ -31,7 +31,8 @@ import {
   buildBalanceText,
   buildEntryText,
   buildExitText,
-  buildPositionUpdateText
+  buildPositionUpdateText,
+  buildPeriodicReport
 } from "./core/reporting-engine.js";
 
 import {
@@ -39,6 +40,20 @@ import {
   validateBudgetPercents,
   formatBudgetLines
 } from "./core/budget-manager.js";
+
+import {
+  buildDefaultRuntimeConfig,
+  createTradingRuntime,
+  startRuntime,
+  requestStop,
+  requestKill,
+  finishRuntime,
+  queuePendingConfig,
+  canApplyPendingConfig,
+  applyPendingConfig,
+  isStrategyAllowed,
+  canOpenNewPositions
+} from "./core/trading-runtime.js";
 
 import WalletExecutionRouter from "./wallets/wallet-execution-router.js";
 import CopytradeManager from "./copytrade/copytrade-manager.js";
@@ -62,63 +77,56 @@ const walletRouter = new WalletExecutionRouter({ logger: console });
 const copytradeManager = new CopytradeManager({ logger: console });
 const gmgnLeaderIntel = new GMGNLeaderIntelService({ logger: console });
 
+const runtime = createTradingRuntime(
+  buildDefaultRuntimeConfig({
+    language: "ru",
+    dryRun: true,
+    strategyBudget: { ...DEFAULT_STRATEGY_BUDGET },
+    wallets: {
+      wallet_trader_main: {
+        label: "Trader Main",
+        role: "trader",
+        enabled: true,
+        executionMode: "dry_run",
+        allowedStrategies: ["scalp", "reversal"],
+        secretRef: ""
+      },
+      wallet_runner_main: {
+        label: "Runner Main",
+        role: "trader",
+        enabled: true,
+        executionMode: "dry_run",
+        allowedStrategies: ["runner"],
+        secretRef: ""
+      },
+      wallet_copy_1: {
+        label: "Copy Follower 1",
+        role: "follower",
+        enabled: true,
+        executionMode: "dry_run",
+        allowedStrategies: ["copytrade"],
+        secretRef: ""
+      }
+    },
+    strategyRouting: {
+      scalp: ["wallet_trader_main"],
+      reversal: ["wallet_trader_main"],
+      runner: ["wallet_runner_main"],
+      copytrade: ["wallet_copy_1"]
+    },
+    copytrade: {
+      enabled: true,
+      rescoringEnabled: true,
+      minLeaderScore: 70,
+      cooldownMinutes: 180,
+      leaders: []
+    }
+  })
+);
+
 let loopId = null;
 let stopTimeoutId = null;
-let currentMode = "stopped";
-let activeChatId = null;
-let activeUserId = null;
-
-let runtimeConfig = {
-  language: "ru",
-  dryRun: true,
-  strategyBudget: { ...DEFAULT_STRATEGY_BUDGET },
-  pendingConfig: null,
-  wallets: {
-    wallet_trader_main: {
-      label: "Trader Main",
-      role: "trader",
-      enabled: true,
-      executionMode: "dry_run",
-      allowedStrategies: ["scalp", "reversal"],
-      secretRef: ""
-    },
-    wallet_runner_main: {
-      label: "Runner Main",
-      role: "trader",
-      enabled: true,
-      executionMode: "dry_run",
-      allowedStrategies: ["runner"],
-      secretRef: ""
-    },
-    wallet_copy_1: {
-      label: "Copy Follower 1",
-      role: "follower",
-      enabled: true,
-      executionMode: "dry_run",
-      allowedStrategies: ["copytrade"],
-      secretRef: ""
-    }
-  },
-  strategyRouting: {
-    scalp: ["wallet_trader_main"],
-    reversal: ["wallet_trader_main"],
-    runner: ["wallet_runner_main"],
-    copytrade: ["wallet_copy_1"]
-  },
-  copytrade: {
-    enabled: true,
-    rescoringEnabled: true,
-    minLeaderScore: 70,
-    cooldownMinutes: 180,
-    leaders: []
-  }
-};
-
-let runState = {
-  runId: null,
-  startedAt: null,
-  mode: "stopped"
-};
+let previousReportEquity = null;
 
 const recentlyTraded = new Map();
 const tempFiles = new Set();
@@ -126,9 +134,13 @@ const chatState = new Map();
 
 const I18N = {
   ru: {
-    menu_run4h: "▶️ Run 4h",
-    menu_runinf: "♾️ Run Infinite",
+    menu_run_multi: "🚀 Run Multi",
+    menu_run_scalp: "⚡ Run Scalp",
+    menu_run_reversal: "↩️ Run Reversal",
+    menu_run_runner: "🏃 Run Runner",
+    menu_run_copy: "📋 Run Copytrade",
     menu_stop: "🛑 Stop",
+    menu_kill: "☠️ Kill",
     menu_status: "📊 Status",
     menu_scan_market: "🔎 Scan Market",
     menu_scan_ca: "🧾 Scan CA",
@@ -147,7 +159,8 @@ const I18N = {
     send_ca: "🧾 <b>Send CA</b>\n\nОтправь контракт следующим сообщением.",
     invalid_ca: "❌ Это не похоже на валидный CA.",
     scan_hint: "Сначала нажми <b>🧾 Scan CA</b>, потом отправь адрес.",
-    bot_stopped: "🛑 Бот остановлен",
+    bot_stopped: "🛑 Мягкая остановка включена. Новые входы запрещены, открытые позиции будут сопровождаться до выхода.",
+    bot_killed: "☠️ Жесткая остановка выполнена. Все позиции закрыты.",
     market_scan_started: "🔎 <b>Скан рынка запущен</b>",
     choose_lang: "🌐 Выбери язык:\n<code>lang ru</code> или <code>lang en</code>",
     lang_set: "🌐 Язык переключен",
@@ -164,12 +177,18 @@ const I18N = {
     leader_added: "✅ Лидер добавлен",
     secret_saved: "✅ Secret ref сохранен",
     leaders_synced: "✅ Лидеры синхронизированы",
+    run_started: "✅ Запуск выполнен",
+    stop_complete: "✅ Stop завершен. Открытых позиций больше нет.",
     unknown: "Используйте меню ниже."
   },
   en: {
-    menu_run4h: "▶️ Run 4h",
-    menu_runinf: "♾️ Run Infinite",
+    menu_run_multi: "🚀 Run Multi",
+    menu_run_scalp: "⚡ Run Scalp",
+    menu_run_reversal: "↩️ Run Reversal",
+    menu_run_runner: "🏃 Run Runner",
+    menu_run_copy: "📋 Run Copytrade",
     menu_stop: "🛑 Stop",
+    menu_kill: "☠️ Kill",
     menu_status: "📊 Status",
     menu_scan_market: "🔎 Scan Market",
     menu_scan_ca: "🧾 Scan CA",
@@ -188,7 +207,8 @@ const I18N = {
     send_ca: "🧾 <b>Send CA</b>\n\nSend the token contract in the next message.",
     invalid_ca: "❌ This does not look like a valid CA.",
     scan_hint: "First press <b>🧾 Scan CA</b>, then send the address.",
-    bot_stopped: "🛑 Bot stopped",
+    bot_stopped: "🛑 Soft stop enabled. No new entries, existing positions will be managed until exit.",
+    bot_killed: "☠️ Hard stop executed. All positions closed.",
     market_scan_started: "🔎 <b>Market scan started</b>",
     choose_lang: "🌐 Choose language:\n<code>lang ru</code> or <code>lang en</code>",
     lang_set: "🌐 Language switched",
@@ -205,12 +225,14 @@ const I18N = {
     leader_added: "✅ Leader added",
     secret_saved: "✅ Secret ref saved",
     leaders_synced: "✅ Leaders synced",
+    run_started: "✅ Run started",
+    stop_complete: "✅ Stop completed. No open positions left.",
     unknown: "Use the menu below."
   }
 };
 
 function t(key) {
-  const lang = runtimeConfig.language || "ru";
+  const lang = runtime.activeConfig.language || "ru";
   return I18N[lang]?.[key] || I18N.ru[key] || key;
 }
 
@@ -235,8 +257,10 @@ function escapeHtml(input) {
 function keyboard() {
   return {
     keyboard: [
-      [t("menu_run4h"), t("menu_runinf")],
-      [t("menu_stop"), t("menu_status")],
+      [t("menu_run_multi"), t("menu_run_scalp")],
+      [t("menu_run_reversal"), t("menu_run_runner")],
+      [t("menu_run_copy"), t("menu_stop")],
+      [t("menu_kill"), t("menu_status")],
       [t("menu_scan_market"), t("menu_scan_ca")],
       [t("menu_balance"), t("menu_budget")],
       [t("menu_wallets"), t("menu_copytrade")],
@@ -267,9 +291,13 @@ function normalizeAction(text) {
   if (!raw) return null;
 
   if (raw === "/start" || raw === "/menu") return "start";
-  if (raw === "/run4h" || raw.includes("run 4h")) return "run4h";
-  if (raw === "/runinfinite" || raw.includes("infinite")) return "runinfinite";
+  if (raw === "/runmulti" || raw.includes("run multi")) return "run_multi";
+  if (raw === "/runscalp" || raw.includes("run scalp")) return "run_scalp";
+  if (raw === "/runreversal" || raw.includes("run reversal")) return "run_reversal";
+  if (raw === "/runrunner" || raw.includes("run runner")) return "run_runner";
+  if (raw === "/runcopytrade" || raw.includes("run copytrade")) return "run_copytrade";
   if (raw === "/stop" || raw.includes("stop")) return "stop";
+  if (raw === "/kill" || raw.includes("kill")) return "kill";
   if (raw === "/status" || raw.includes("status")) return "status";
   if (raw === "/balance" || raw.includes("balance")) return "balance";
   if (raw === "/scanmarket" || raw.includes("scan market")) return "scan_market";
@@ -405,8 +433,8 @@ ${reasons || "• none"}`;
 
 function buildWalletsText() {
   const lines = [t("wallets_title"), ""];
-  for (const [walletId, w] of Object.entries(runtimeConfig.wallets || {})) {
-    const validation = walletRouter.validateWalletForAnyUse(runtimeConfig, walletId);
+  for (const [walletId, w] of Object.entries(runtime.activeConfig.wallets || {})) {
+    const validation = walletRouter.validateWalletForAnyUse(runtime.activeConfig, walletId);
     lines.push(
       `• <b>${escapeHtml(walletId)}</b>
 label: ${escapeHtml(w.label || "-")}
@@ -424,12 +452,12 @@ ready: ${validation.ok ? "yes" : "no"} (${escapeHtml(validation.reason || "ok")}
 }
 
 function buildCopytradeText() {
-  const leaders = copytradeManager.listLeaders(runtimeConfig);
+  const leaders = copytradeManager.listLeaders(runtime.activeConfig);
   const lines = [t("copytrade_title"), ""];
-  lines.push(`enabled: ${runtimeConfig.copytrade.enabled ? "yes" : "no"}`);
-  lines.push(`rescoring: ${runtimeConfig.copytrade.rescoringEnabled ? "yes" : "no"}`);
-  lines.push(`min score: ${runtimeConfig.copytrade.minLeaderScore}`);
-  lines.push(`cooldown min: ${runtimeConfig.copytrade.cooldownMinutes}`);
+  lines.push(`enabled: ${runtime.activeConfig.copytrade.enabled ? "yes" : "no"}`);
+  lines.push(`rescoring: ${runtime.activeConfig.copytrade.rescoringEnabled ? "yes" : "no"}`);
+  lines.push(`min score: ${runtime.activeConfig.copytrade.minLeaderScore}`);
+  lines.push(`cooldown min: ${runtime.activeConfig.copytrade.cooldownMinutes}`);
   lines.push("");
 
   if (!leaders.length) {
@@ -452,8 +480,8 @@ last sync: ${escapeHtml(leader.lastSyncAt || "-")}`
 }
 
 function buildBudgetText() {
-  const current = runtimeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
-  const pending = runtimeConfig.pendingConfig?.strategyBudget || null;
+  const current = runtime.activeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
+  const pending = runtime.pendingConfig?.strategyBudget || null;
 
   return `${t("budget_title")}
 
@@ -481,7 +509,7 @@ cached leaders: ${h.cachedLeaders}`;
 }
 
 async function buildLeaderHealthText() {
-  const leaders = copytradeManager.listLeaders(runtimeConfig);
+  const leaders = copytradeManager.listLeaders(runtime.activeConfig);
   if (!leaders.length) {
     return `${t("leader_title")}
 
@@ -506,27 +534,6 @@ last sync: ${escapeHtml(row.lastSyncAt)}`
   }
 
   return lines.join("\n");
-}
-
-function applyPendingConfigIfSafe() {
-  if (!runtimeConfig.pendingConfig) return false;
-  if (getPositions().length > 0) return false;
-
-  if (runtimeConfig.pendingConfig.strategyBudget) {
-    runtimeConfig.strategyBudget = runtimeConfig.pendingConfig.strategyBudget;
-    const cfg = getStrategyConfig();
-    const nextCfg = {
-      ...cfg,
-      scalp: { ...(cfg.scalp || {}), allocationPct: runtimeConfig.strategyBudget.scalp },
-      reversal: { ...(cfg.reversal || {}), allocationPct: runtimeConfig.strategyBudget.reversal },
-      runner: { ...(cfg.runner || {}), allocationPct: runtimeConfig.strategyBudget.runner },
-      copytrade: { ...(cfg.copytrade || {}), allocationPct: runtimeConfig.strategyBudget.copytrade }
-    };
-    setStrategyConfig(nextCfg);
-  }
-
-  runtimeConfig.pendingConfig = null;
-  return true;
 }
 
 function shouldClosePosition(position, analyzedNow) {
@@ -630,8 +637,9 @@ function statsToXlsxWorkbook() {
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet([
-      { metric: "runId", value: runState.runId || "" },
-      { metric: "mode", value: currentMode },
+      { metric: "runId", value: runtime.runId || "" },
+      { metric: "mode", value: runtime.mode },
+      { metric: "scope", value: runtime.strategyScope },
       { metric: "cash", value: pf.cash },
       { metric: "equity", value: pf.equity },
       { metric: "realizedPnlSol", value: pf.realizedPnlSol },
@@ -644,7 +652,7 @@ function statsToXlsxWorkbook() {
 }
 
 async function exportJson(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.json`);
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runtime.runId || Date.now()}.json`);
   await fs.writeFile(filePath, JSON.stringify(getPortfolio(), null, 2), "utf8");
   await bot.sendDocument(chatId, filePath, {}, {
     filename: path.basename(filePath),
@@ -654,7 +662,7 @@ async function exportJson(chatId) {
 }
 
 async function exportCsv(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.csv`);
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runtime.runId || Date.now()}.csv`);
   await fs.writeFile(filePath, statsToCsv(), "utf8");
   await bot.sendDocument(chatId, filePath, {}, {
     filename: path.basename(filePath),
@@ -664,7 +672,7 @@ async function exportCsv(chatId) {
 }
 
 async function exportXlsx(chatId) {
-  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runState.runId || Date.now()}.xlsx`);
+  const filePath = path.join(os.tmpdir(), `chiikawa-stats-${runtime.runId || Date.now()}.xlsx`);
   XLSX.writeFile(statsToXlsxWorkbook(), filePath);
   await bot.sendDocument(chatId, filePath, {}, {
     filename: path.basename(filePath),
@@ -680,28 +688,65 @@ function pruneRecentlyTraded() {
   }
 }
 
+async function syncLeaderScores() {
+  const leaders = copytradeManager.listLeaders(runtime.activeConfig);
+  if (!leaders.length) return [];
+
+  const intel = await gmgnLeaderIntel.refreshMany(leaders.map((x) => x.address));
+  for (const row of intel) {
+    copytradeManager.setLeaderScore(runtime.activeConfig, row.address, row.score);
+  }
+  copytradeManager.refreshLeaderStates(runtime.activeConfig);
+  return intel;
+}
+
+function syncPortfolioStrategyBudget() {
+  const cfg = getStrategyConfig();
+  const nextCfg = {
+    ...cfg,
+    scalp: { ...(cfg.scalp || {}), allocationPct: runtime.activeConfig.strategyBudget.scalp },
+    reversal: { ...(cfg.reversal || {}), allocationPct: runtime.activeConfig.strategyBudget.reversal },
+    runner: { ...(cfg.runner || {}), allocationPct: runtime.activeConfig.strategyBudget.runner },
+    copytrade: { ...(cfg.copytrade || {}), allocationPct: runtime.activeConfig.strategyBudget.copytrade }
+  };
+  setStrategyConfig(nextCfg);
+}
+
+async function applyPendingIfPossible(chatId = null) {
+  if (!canApplyPendingConfig(runtime, getPositions().length)) return false;
+  applyPendingConfig(runtime);
+  syncPortfolioStrategyBudget();
+  if (chatId) {
+    await sendMessage(chatId, t("pending_applied"), { reply_markup: keyboard() });
+  }
+  return true;
+}
+
 function stopLoop() {
   if (loopId) clearInterval(loopId);
   if (stopTimeoutId) clearTimeout(stopTimeoutId);
   loopId = null;
   stopTimeoutId = null;
-  currentMode = "stopped";
-  runState.mode = "stopped";
+  finishRuntime(runtime);
 }
 
-async function syncLeaderScores() {
-  const leaders = copytradeManager.listLeaders(runtimeConfig);
-  if (!leaders.length) return [];
-
-  const intel = await gmgnLeaderIntel.refreshMany(leaders.map((x) => x.address));
-  for (const row of intel) {
-    copytradeManager.setLeaderScore(runtimeConfig, row.address, row.score);
+async function forceCloseAllPositions(reason = "KILL_SWITCH") {
+  const closed = [];
+  for (const p of [...getPositions()]) {
+    const price = p.lastPrice || p.entryReferencePrice;
+    const row = closePosition(p.id, price, reason);
+    if (row) {
+      recentlyTraded.set(row.ca, Date.now());
+      await recordTradeOutcomeFromSignalContext(row.signalContext, row.netPnlPct);
+      closed.push(row);
+    }
   }
-  copytradeManager.refreshLeaderStates(runtimeConfig);
-  return intel;
+  return closed;
 }
 
 async function cycle(chatId, userId) {
+  runtime.cycleCount += 1;
+  runtime.lastCycleAt = Date.now();
   pruneRecentlyTraded();
 
   const positions = getPositions();
@@ -741,6 +786,27 @@ async function cycle(chatId, userId) {
     }
   }
 
+  if (runtime.stopRequested && getPositions().length === 0) {
+    await applyPendingIfPossible(chatId);
+    stopLoop();
+    await sendMessage(chatId, t("stop_complete"), { reply_markup: keyboard() });
+    return;
+  }
+
+  if (!canOpenNewPositions(runtime)) {
+    const portfolio = getPortfolio();
+    const shouldReport =
+      !runtime.lastStatusAt || Date.now() - runtime.lastStatusAt >= 15 * 60 * 1000;
+
+    if (shouldReport) {
+      runtime.lastStatusAt = Date.now();
+      const report = buildPeriodicReport(runtime, portfolio, previousReportEquity);
+      previousReportEquity = portfolio.equity;
+      await sendMessage(chatId, report, { reply_markup: keyboard() });
+    }
+    return;
+  }
+
   const candidate = await getBestTrade({
     excludeCas: [...recentlyTraded.keys(), ...getPositions().map((p) => p.ca)]
   });
@@ -750,7 +816,9 @@ async function cycle(chatId, userId) {
     return;
   }
 
-  const plans = buildStrategyPlans(candidate);
+  const allPlans = buildStrategyPlans(candidate);
+  const plans = allPlans.filter((plan) => isStrategyAllowed(runtime, plan.strategyKey));
+
   const heroImage =
     candidate.token.headerUrl ||
     candidate.token.imageUrl ||
@@ -769,13 +837,13 @@ async function cycle(chatId, userId) {
     if (candidate.score < 85 && plan.strategyKey !== "copytrade") continue;
 
     if (plan.strategyKey === "copytrade") {
-      const leaderEval = copytradeManager.pickBestLeader(runtimeConfig);
+      const leaderEval = copytradeManager.pickBestLeader(runtime.activeConfig);
       if (!leaderEval) continue;
-      if (!copytradeManager.isLeaderTradable(runtimeConfig, leaderEval.address)) continue;
+      if (!copytradeManager.isLeaderTradable(runtime.activeConfig, leaderEval.address)) continue;
     }
 
-    const walletId = walletRouter.getPrimaryWalletId(runtimeConfig, plan.strategyKey);
-    const walletCheck = walletRouter.validateWalletForStrategy(runtimeConfig, walletId, plan.strategyKey);
+    const walletId = walletRouter.getPrimaryWalletId(runtime.activeConfig, plan.strategyKey);
+    const walletCheck = walletRouter.validateWalletForStrategy(runtime.activeConfig, walletId, plan.strategyKey);
     if (!walletCheck.ok) continue;
 
     const position = openPosition({
@@ -810,32 +878,29 @@ async function cycle(chatId, userId) {
     }
   }
 
-  if (applyPendingConfigIfSafe()) {
-    await sendMessage(chatId, t("pending_applied"), { reply_markup: keyboard() });
+  const portfolio = getPortfolio();
+  const shouldReport =
+    !runtime.lastStatusAt || Date.now() - runtime.lastStatusAt >= 15 * 60 * 1000;
+
+  if (shouldReport) {
+    runtime.lastStatusAt = Date.now();
+    const report = buildPeriodicReport(runtime, portfolio, previousReportEquity);
+    previousReportEquity = portfolio.equity;
+    await sendMessage(chatId, report, { reply_markup: keyboard() });
   }
 }
 
-function startRun(chatId, userId, mode) {
-  stopLoop();
+function resetRunStateIfNeeded() {
+  previousReportEquity = null;
+  syncPortfolioStrategyBudget();
+}
 
+function startStrategyRun(chatId, userId, strategyScope = "all", mode = "infinite") {
+  stopLoop();
+  startRuntime(runtime, { mode, strategyScope, chatId, userId });
   activeChatId = chatId;
   activeUserId = userId;
-  currentMode = mode;
-  runState = {
-    runId: `run-${Date.now()}`,
-    startedAt: Date.now(),
-    mode
-  };
-
-  if (mode === "4h") {
-    resetPortfolio(1, {
-      ...getStrategyConfig(),
-      scalp: { ...(getStrategyConfig().scalp || {}), allocationPct: runtimeConfig.strategyBudget.scalp },
-      reversal: { ...(getStrategyConfig().reversal || {}), allocationPct: runtimeConfig.strategyBudget.reversal },
-      runner: { ...(getStrategyConfig().runner || {}), allocationPct: runtimeConfig.strategyBudget.runner },
-      copytrade: { ...(getStrategyConfig().copytrade || {}), allocationPct: runtimeConfig.strategyBudget.copytrade }
-    });
-  }
+  resetRunStateIfNeeded();
 
   loopId = setInterval(() => {
     cycle(chatId, userId).catch((err) => {
@@ -845,11 +910,10 @@ function startRun(chatId, userId, mode) {
 
   if (mode === "4h") {
     stopTimeoutId = setTimeout(async () => {
-      stopLoop();
-      await sendMessage(chatId, "🛑 <b>AUTO STOPPED</b> (4h finished)");
-      await sendMessage(chatId, buildDashboard({ mode: currentMode, runId: runState.runId, activeConfig: runtimeConfig }, getPortfolio()), {
-        reply_markup: keyboard()
-      });
+      requestStop(runtime);
+      if (chatId) {
+        await sendMessage(chatId, t("bot_stopped"), { reply_markup: keyboard() });
+      }
     }, 4 * 60 * 60 * 1000);
   }
 }
@@ -916,7 +980,7 @@ async function analyzeCA(chatId, ca) {
   }
 
   const analyzed = await analyzeToken(token);
-  const plans = buildStrategyPlans(analyzed);
+  const plans = buildStrategyPlans(analyzed).filter((plan) => isStrategyAllowed(runtime, plan.strategyKey));
   const heroImage = analyzed.token.headerUrl || analyzed.token.imageUrl || analyzed.token.iconUrl || null;
 
   await sendPhotoOrText(chatId, heroImage, buildHeroCaption(analyzed));
@@ -932,43 +996,57 @@ async function handleAction(chatId, userId, action) {
     return;
   }
 
-  if (action === "run4h") {
-    await sendMessage(chatId, "🚀 Starting 4h multi-strategy simulation from 1 SOL", {
-      reply_markup: keyboard()
-    });
-    startRun(chatId, userId, "4h");
+  if (action === "run_multi") {
+    startStrategyRun(chatId, userId, "all", "infinite");
+    await sendMessage(chatId, `${t("run_started")}: MULTI`, { reply_markup: keyboard() });
     return;
   }
 
-  if (action === "runinfinite") {
-    if (!getPortfolio().startBalance) {
-      resetPortfolio(1);
-    }
-    await sendMessage(chatId, "♾️ Starting infinite multi-strategy run", {
-      reply_markup: keyboard()
-    });
-    startRun(chatId, userId, "infinite");
+  if (action === "run_scalp") {
+    startStrategyRun(chatId, userId, "scalp", "infinite");
+    await sendMessage(chatId, `${t("run_started")}: SCALP`, { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "run_reversal") {
+    startStrategyRun(chatId, userId, "reversal", "infinite");
+    await sendMessage(chatId, `${t("run_started")}: REVERSAL`, { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "run_runner") {
+    startStrategyRun(chatId, userId, "runner", "infinite");
+    await sendMessage(chatId, `${t("run_started")}: RUNNER`, { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "run_copytrade") {
+    startStrategyRun(chatId, userId, "copytrade", "infinite");
+    await sendMessage(chatId, `${t("run_started")}: COPYTRADE`, { reply_markup: keyboard() });
     return;
   }
 
   if (action === "stop") {
-    stopLoop();
-    if (applyPendingConfigIfSafe()) {
-      await sendMessage(chatId, t("pending_applied"), { reply_markup: keyboard() });
-    }
+    requestStop(runtime);
     await sendMessage(chatId, t("bot_stopped"), { reply_markup: keyboard() });
-    await sendMessage(
-      chatId,
-      buildDashboard({ mode: currentMode, runId: runState.runId, activeConfig: runtimeConfig }, getPortfolio()),
-      { reply_markup: keyboard() }
-    );
+    return;
+  }
+
+  if (action === "kill") {
+    requestKill(runtime);
+    const closed = await forceCloseAllPositions("KILL_SWITCH");
+    await applyPendingIfPossible(chatId);
+    stopLoop();
+    await sendMessage(chatId, `${t("bot_killed")}\nclosed: ${closed.length}`, {
+      reply_markup: keyboard()
+    });
     return;
   }
 
   if (action === "status") {
     await sendMessage(
       chatId,
-      buildDashboard({ mode: currentMode, runId: runState.runId, activeConfig: runtimeConfig }, getPortfolio()),
+      buildDashboard(runtime, getPortfolio()),
       { reply_markup: keyboard() }
     );
     return;
@@ -998,13 +1076,13 @@ async function handleAction(chatId, userId, action) {
   }
 
   if (action === "lang_ru") {
-    runtimeConfig.language = "ru";
+    runtime.activeConfig.language = "ru";
     await sendMessage(chatId, `${t("lang_set")}: RU`, { reply_markup: keyboard() });
     return;
   }
 
   if (action === "lang_en") {
-    runtimeConfig.language = "en";
+    runtime.activeConfig.language = "en";
     await sendMessage(chatId, `${t("lang_set")}: EN`, { reply_markup: keyboard() });
     return;
   }
@@ -1015,7 +1093,7 @@ async function handleAction(chatId, userId, action) {
   }
 
   if (action === "copytrade") {
-    copytradeManager.refreshLeaderStates(runtimeConfig);
+    copytradeManager.refreshLeaderStates(runtime.activeConfig);
     await sendMessage(chatId, buildCopytradeText(), { reply_markup: keyboard() });
     return;
   }
@@ -1055,13 +1133,12 @@ async function handleAction(chatId, userId, action) {
   }
 
   if (action === "apply_pending") {
-    if (applyPendingConfigIfSafe()) {
-      await sendMessage(chatId, t("pending_applied"), { reply_markup: keyboard() });
-    } else {
-      await sendMessage(chatId, "Pending config not applied yet. Stop the bot and close positions first.", {
-        reply_markup: keyboard()
-      });
+    if (await applyPendingIfPossible(chatId)) {
+      return;
     }
+    await sendMessage(chatId, "Pending config not applied yet. Stop the bot and close positions first.", {
+      reply_markup: keyboard()
+    });
     return;
   }
 
@@ -1101,7 +1178,7 @@ async function processStatefulInput(chatId, text) {
       await sendMessage(chatId, t("invalid_ca"), { reply_markup: keyboard() });
       return true;
     }
-    copytradeManager.addLeader(runtimeConfig, text, "manual");
+    copytradeManager.addLeader(runtime.activeConfig, text, "manual");
     clearChatMode(chatId);
     await sendMessage(chatId, `${t("leader_added")}\n<code>${escapeHtml(text)}</code>`, {
       reply_markup: keyboard()
@@ -1119,12 +1196,12 @@ async function processStatefulInput(chatId, text) {
     }
 
     const [, walletId, secretRef] = match;
-    if (!runtimeConfig.wallets[walletId]) {
+    if (!runtime.activeConfig.wallets[walletId]) {
       await sendMessage(chatId, "❌ Wallet not found", { reply_markup: keyboard() });
       return true;
     }
 
-    runtimeConfig.wallets[walletId].secretRef = secretRef;
+    runtime.activeConfig.wallets[walletId].secretRef = secretRef;
     clearChatMode(chatId);
     await sendMessage(chatId, `${t("secret_saved")}\n<b>${escapeHtml(walletId)}</b> → <code>${escapeHtml(secretRef)}</code>`, {
       reply_markup: keyboard()
@@ -1156,10 +1233,7 @@ bot.on("message", (msg) => {
         return;
       }
 
-      runtimeConfig.pendingConfig = {
-        ...(runtimeConfig.pendingConfig || {}),
-        strategyBudget: validated.budget
-      };
+      queuePendingConfig(runtime, { strategyBudget: validated.budget }, "budget_update");
 
       await sendMessage(chatId, `${t("pending_budget_saved")}
 
