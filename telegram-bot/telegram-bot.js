@@ -1,17 +1,16 @@
 import TelegramBot from "node-telegram-bot-api";
 
-import WalletExecutionRouter from "./wallets/wallet-execution-router.js";
 import CopytradeManager from "./copytrade/copytrade-manager.js";
 import GMGNLeaderIntelService from "./gmgn/gmgn-leader-intel-service.js";
 
 import TradingKernel from "./core/trading-kernel.js";
 import BotRouter from "./core/bot-router.js";
 import RuntimePersistence from "./core/runtime-persistence.js";
-import TxLifecycleStore from "./core/tx-lifecycle-store.js";
 import WebhookServer from "./core/webhook-server.js";
 
-import JupiterQuoteService from "./jupiter/jupiter-quote-service.js";
-import ManualApprovalBridge from "./wallets/manual-approval-bridge.js";
+import GMGNWalletService from "./gmgn/gmgn-wallet-service.js";
+import GMGNOrderStateStore from "./gmgn/gmgn-order-state-store.js";
+import GMGNExecutionService from "./gmgn/gmgn-execution-service.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
@@ -25,7 +24,6 @@ if (!TOKEN) {
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 
-const walletRouter = new WalletExecutionRouter({ logger: console });
 const copytradeManager = new CopytradeManager({ logger: console });
 const gmgnLeaderIntel = new GMGNLeaderIntelService({ logger: console });
 
@@ -33,28 +31,30 @@ const persistence = new RuntimePersistence({
   logger: console
 });
 
-const txStore = new TxLifecycleStore({
+const gmgnWalletService = new GMGNWalletService({
   logger: console
 });
 
-const jupiterQuoteService = new JupiterQuoteService({
+const gmgnOrderStore = new GMGNOrderStateStore({
   logger: console
 });
 
-const manualApprovalBridge = new ManualApprovalBridge({
+const gmgnExecutionService = new GMGNExecutionService({
   logger: console,
-  txStore,
-  jupiterQuoteService
+  walletService: gmgnWalletService,
+  orderStore: gmgnOrderStore,
+  defaultMode: process.env.GMGN_EXECUTION_MODE || "dry_run",
+  defaultSlippagePct: Number(process.env.GMGN_DEFAULT_SLIPPAGE_PCT || 1)
 });
 
 const kernel = new TradingKernel({
-  walletRouter,
+  walletRouter: null,
   copytradeManager,
   gmgnLeaderIntel,
   persistence,
-  txStore,
-  jupiterQuoteService,
-  manualApprovalBridge,
+  gmgnWalletService,
+  gmgnOrderStore,
+  gmgnExecutionService,
   logger: console,
   initialConfig: {
     language: "ru",
@@ -67,39 +67,60 @@ const kernel = new TradingKernel({
       copytrade: 0.25
     },
     wallets: {
-      wallet_trader_main: {
-        label: "Trader Main",
+      wallet_scalp_main: {
+        label: "GMGN Scalp Main",
         role: "trader",
         enabled: true,
-        executionMode: "dry_run",
-        allowedStrategies: ["scalp", "reversal"],
-        secretRef: "",
-        publicKey: process.env.WALLET_TRADER_MAIN_PUBLIC_KEY || ""
+        executionBackend: "gmgn",
+        executionMode: process.env.GMGN_EXECUTION_MODE || "dry_run",
+        allowedStrategies: ["scalp"],
+        gmgnWalletId: process.env.GMGN_WALLET_SCALP_ID || "",
+        gmgnAccountId: process.env.GMGN_ACCOUNT_ID || "",
+        publicKey: process.env.GMGN_WALLET_SCALP_PUBLIC_KEY || "",
+        secretRef: ""
+      },
+      wallet_reversal_main: {
+        label: "GMGN Reversal Main",
+        role: "trader",
+        enabled: true,
+        executionBackend: "gmgn",
+        executionMode: process.env.GMGN_EXECUTION_MODE || "dry_run",
+        allowedStrategies: ["reversal"],
+        gmgnWalletId: process.env.GMGN_WALLET_REVERSAL_ID || "",
+        gmgnAccountId: process.env.GMGN_ACCOUNT_ID || "",
+        publicKey: process.env.GMGN_WALLET_REVERSAL_PUBLIC_KEY || "",
+        secretRef: ""
       },
       wallet_runner_main: {
-        label: "Runner Main",
+        label: "GMGN Runner Main",
         role: "trader",
         enabled: true,
-        executionMode: "manual_approval",
+        executionBackend: "gmgn",
+        executionMode: process.env.GMGN_EXECUTION_MODE || "dry_run",
         allowedStrategies: ["runner"],
-        secretRef: "",
-        publicKey: process.env.WALLET_RUNNER_MAIN_PUBLIC_KEY || ""
+        gmgnWalletId: process.env.GMGN_WALLET_RUNNER_ID || "",
+        gmgnAccountId: process.env.GMGN_ACCOUNT_ID || "",
+        publicKey: process.env.GMGN_WALLET_RUNNER_PUBLIC_KEY || "",
+        secretRef: ""
       },
-      wallet_copy_1: {
-        label: "Copy Follower 1",
+      wallet_copytrade_main: {
+        label: "GMGN Copytrade Main",
         role: "follower",
         enabled: true,
-        executionMode: "manual_approval",
+        executionBackend: "gmgn",
+        executionMode: process.env.GMGN_EXECUTION_MODE || "dry_run",
         allowedStrategies: ["copytrade"],
-        secretRef: "",
-        publicKey: process.env.WALLET_COPY_1_PUBLIC_KEY || ""
+        gmgnWalletId: process.env.GMGN_WALLET_COPYTRADE_ID || "",
+        gmgnAccountId: process.env.GMGN_ACCOUNT_ID || "",
+        publicKey: process.env.GMGN_WALLET_COPYTRADE_PUBLIC_KEY || "",
+        secretRef: ""
       }
     },
     strategyRouting: {
-      scalp: ["wallet_trader_main"],
-      reversal: ["wallet_trader_main"],
+      scalp: ["wallet_scalp_main"],
+      reversal: ["wallet_reversal_main"],
       runner: ["wallet_runner_main"],
-      copytrade: ["wallet_copy_1"]
+      copytrade: ["wallet_copytrade_main"]
     },
     copytrade: {
       enabled: true,
@@ -140,6 +161,7 @@ async function main() {
     console.log("Chiikawa trading bot bootstrap initialized");
     console.log(`Webhook path: ${WEBHOOK_PATH}`);
     console.log(`Port: ${PORT}`);
+    console.log(`GMGN execution mode: ${process.env.GMGN_EXECUTION_MODE || "dry_run"}`);
   } catch (error) {
     console.error("Bootstrap failed:", error);
     process.exit(1);
