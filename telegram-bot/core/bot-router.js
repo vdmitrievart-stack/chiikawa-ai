@@ -412,10 +412,25 @@ export default class BotRouter {
   startLoop(chatId, userId) {
     this.stopLoop();
 
-    this.loopId = setInterval(() => {
-      this.kernel.tick(this.createSendBridge(chatId)).catch((err) => {
+    const runTick = async () => {
+      try {
+        await this.kernel.tick(this.createSendBridge(chatId));
+      } catch (err) {
         this.logger.log("tick error:", err.message);
-      });
+        try {
+          await this.sendMessage(
+            chatId,
+            `❌ <b>Tick error</b>\n<code>${String(err?.message || err).slice(0, 500)}</code>`,
+            { reply_markup: this.keyboard() }
+          );
+        } catch {}
+      }
+    };
+
+    void runTick();
+
+    this.loopId = setInterval(() => {
+      void runTick();
     }, this.AUTO_INTERVAL_MS);
   }
 
