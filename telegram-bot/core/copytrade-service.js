@@ -1,47 +1,379 @@
+function safeNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function asText(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
+}
+
+function isBadDevVerdict(verdict) {
+  const v = asText(verdict).toLowerCase();
+  return v === "bad" || v === "danger" || v === "risky";
+}
+
+function isStrongNarrative(verdict) {
+  const v = asText(verdict).toLowerCase();
+  return v === "strong" || v === "good" || v === "ok";
+}
+
 export default class CopytradeService {
   constructor(options = {}) {
     this.copytradeManager = options.copytradeManager;
     this.gmgnLeaderIntel = options.gmgnLeaderIntel;
     this.logger = options.logger || console;
+
+    this.rules = {
+      leaderMinScore: safeNum(options.leaderMinScore, 70),
+      copytradeTokenMinScore: safeNum(options.copytradeTokenMinScore, 72),
+      maxFollowDelaySec: safeNum(options.maxFollowDelaySec, 90),
+      maxPriceExtensionPct: safeNum(options.maxPriceExtensionPct, 18),
+      maxRugRisk: safeNum(options.maxRugRisk, 45),
+      minLiquidityUsd: safeNum(options.minLiquidityUsd, 12000),
+      maxHolderConcentration: safeNum(options.maxHolderConcentration, 42),
+      hardRejectBotActivity: safeNum(options.hardRejectBotActivity, 55),
+      hardRejectCorpseScore: safeNum(options.hardRejectCorpseScore, 70),
+      maxDistributionScore: safeNum(options.maxDistributionScore, 26),
+      minSocialCount: safeNum(options.minSocialCount, 1),
+      copytradeProbeOnlyOnBorderline:
+        options.copytradeProbeOnlyOnBorderline !== false,
+      copytradeHardStopPct: safeNum(options.copytradeHardStopPct, 7),
+      leaderPenaltyOnRejectedTrap: safeNum(options.leaderPenaltyOnRejectedTrap, 6),
+      leaderPenaltyOnHardTrap: safeNum(options.leaderPenaltyOnHardTrap, 12),
+      leaderRewardOnAcceptedQuality: safeNum(options.leaderRewardOnAcceptedQuality, 2)
+    };
+  }
+
+  ensureLeaderShape(leader) {
+    if (!leader) return null;
+
+    if (leader.rejectedTrapCount == null) leader.rejectedTrapCount = 0;
+    if (leader.acceptedGoodCount == null) leader.acceptedGoodCount = 0;
+    if (!leader.lastSyncAt) leader.lastSyncAt = nowIso();
+
+    return leader;
   }
 
   async syncLeaderScores(runtimeConfig) {
     const leaders = this.copytradeManager.listLeaders(runtimeConfig);
     if (!leaders.length) return [];
 
-    const intel = await this.gmgnLeaderIntel.refreshMany(leaders.map((x) => x.address));
+    const intel = await this.gmgnLeaderIntel.refreshMany(
+      leaders.map((x) => x.address)
+    );
+
     for (const row of intel) {
       this.copytradeManager.setLeaderScore(runtimeConfig, row.address, row.score);
+      const leader = runtimeConfig?.copytrade?.leaders?.find(
+        (x) => x.address === row.address
+      );
+      this.ensureLeaderShape(leader);
+      if (leader) {
+        leader.lastIntel = clone(row);
+        leader.lastSyncAt = nowIso();
+      }
     }
+
     this.copytradeManager.refreshLeaderStates(runtimeConfig);
     return intel;
   }
 
-  canTradeCopy(runtimeConfig) {
-    const leaderEval = this.copytradeManager.pickBestLeader(runtimeConfig);
-    if (!leaderEval) return false;
-    return this.copytradeManager.isLeaderTradable(runtimeConfig, leaderEval.address);
+  pickLeader(runtimeConfig) {
+    const leader =
+      this.copytradeManager.pickBestLeader(runtimeConfig) || null;
+
+    return leader ? this.ensureLeaderShape(leader) : null;
+  }
+
+  canTradeCopy(runtimeConfig, candidate = null, context = {}) {
+    const leader = this.pickLeader(runtimeConfig);
+    if (!leader) {
+      return {
+        allow: false,
+        mode: "reject",
+        reason: "NO_LEADER",
+        reasons: ["No copytrade leader available"],
+        leader: null,
+        adjustedPlan: null
+      };
+    }
+
+    if (!this.copytradeManager.isLeaderTradable(runtimeConfig, leader.address)) {
+      return {
+        allow: false,
+        mode: "reject",
+        reason: "LEADER_NOT_TRADABLE",
+        reasons: [`Leader ${leader.address} is not tradable now`],
+        leader,
+        adjustedPlan: null
+      };
+    }
+
+    if (!candidate) {
+      return {
+        allow: true,
+        mode: "allow",
+        reason: "LEADER_OK_NO_TOKEN_CHECK",
+        reasons: ["Leader passed base checks"],
+        leader,
+        adjustedPlan: null
+      };
+    }
+
+    const verdict = this.evaluateCopytradeEntry(runtimeConfig, candidate, context, leader);
+    return {
+      ...verdict,
+      leader
+    };
+  }
+
+  evaluateCopytradeEntry(runtimeConfig, candidate, context = {}, leader = null) {
+    const rules = this.rules;
+
+    const tokenScore = safeNum(candidate?.score, 0);
+    const rugRisk = safeNum(candidate?.rug?.risk, 0);
+    const corpseScore = safeNum(candidate?.corpse?.score, 0);
+    const isCorpse = Boolean(candidate?.corpse?.isCorpse);
+    const falseBounce = Boolean(candidate?.falseBounce?.rejected);
+    const devVerdict = candidate?.developer?.verdict || "";
+    const liquidityUsd =
+      safeNum(candidate?.token?.liquidity, 0) ||
+      safeNum(candidate?.liquidity?.usd, 0);
+    const concentration =
+      safeNum(candidate?.wallet?.concentration, 0) ||
+      safeNum(candidate?.holders?.concentration, 0);
+    const botActivity = safeNum(candidate?.bots?.botActivity, 0);
+    const distribution = safeNum(candidate?.distribution?.score, 0);
+    const accumulation = safeNum(candidate?.accumulation?.score, 0);
+    const absorption = safeNum(candidate?.absorption?.score, 0);
+    const deltaPrice = safeNum(candidate?.delta?.priceDeltaPct, 0);
+    const socialCount = safeNum(candidate?.socials?.socialCount, 0);
+    const hasTwitter = Boolean(candidate?.socials?.links?.twitter);
+    const hasTelegram = Boolean(candidate?.socials?.links?.telegram);
+    const hasWebsite = Boolean(candidate?.socials?.links?.website);
+    const narrativeVerdict = candidate?.narrative?.verdict || "";
+    const tokenType = candidate?.mechanics?.tokenType || "";
+    const rewardModel = candidate?.mechanics?.rewardModel || "";
+
+    const followDelaySec = safeNum(context?.followDelaySec, 0);
+    const priceExtensionPct = safeNum(
+      context?.priceExtensionPct,
+      Math.max(0, deltaPrice)
+    );
+
+    const reasons = [];
+    const softReasons = [];
+    const hardReasons = [];
+
+    if (tokenScore < rules.copytradeTokenMinScore) {
+      softReasons.push(`tokenScore ${tokenScore} < ${rules.copytradeTokenMinScore}`);
+    }
+
+    if (rugRisk > rules.maxRugRisk) {
+      hardReasons.push(`rugRisk ${rugRisk} > ${rules.maxRugRisk}`);
+    }
+
+    if (isCorpse || corpseScore >= rules.hardRejectCorpseScore) {
+      hardReasons.push(`corpse risk too high`);
+    }
+
+    if (falseBounce) {
+      hardReasons.push(`false bounce rejected`);
+    }
+
+    if (isBadDevVerdict(devVerdict)) {
+      hardReasons.push(`developer verdict is bad`);
+    }
+
+    if (liquidityUsd < rules.minLiquidityUsd) {
+      softReasons.push(`liquidity ${liquidityUsd} < ${rules.minLiquidityUsd}`);
+    }
+
+    if (concentration > rules.maxHolderConcentration) {
+      hardReasons.push(
+        `holder concentration ${concentration} > ${rules.maxHolderConcentration}`
+      );
+    }
+
+    if (botActivity >= rules.hardRejectBotActivity) {
+      hardReasons.push(
+        `bot activity ${botActivity} >= ${rules.hardRejectBotActivity}`
+      );
+    }
+
+    if (distribution > rules.maxDistributionScore) {
+      softReasons.push(
+        `distribution ${distribution} > ${rules.maxDistributionScore}`
+      );
+    }
+
+    if (followDelaySec > rules.maxFollowDelaySec) {
+      softReasons.push(
+        `follow delay ${followDelaySec}s > ${rules.maxFollowDelaySec}s`
+      );
+    }
+
+    if (priceExtensionPct > rules.maxPriceExtensionPct) {
+      hardReasons.push(
+        `price extension ${priceExtensionPct}% > ${rules.maxPriceExtensionPct}%`
+      );
+    }
+
+    const socialsOk =
+      socialCount >= rules.minSocialCount || hasTwitter || hasTelegram || hasWebsite;
+
+    if (!socialsOk) {
+      softReasons.push(`social layer too weak`);
+    }
+
+    if (!isStrongNarrative(narrativeVerdict) && !socialsOk) {
+      softReasons.push(`narrative not strong`);
+    }
+
+    if (accumulation <= 0 && absorption <= 0 && distribution >= 20) {
+      softReasons.push(`flow structure weak for follow`);
+    }
+
+    if (hardReasons.length) {
+      reasons.push(...hardReasons, ...softReasons);
+      return {
+        allow: false,
+        mode: "reject",
+        reason: "COPYTRAP_HARD_REJECT",
+        reasons,
+        adjustedPlan: {
+          forceStopLossPct: rules.copytradeHardStopPct
+        }
+      };
+    }
+
+    if (softReasons.length && rules.copytradeProbeOnlyOnBorderline) {
+      reasons.push(...softReasons);
+      return {
+        allow: true,
+        mode: "probe_only",
+        reason: "COPYTRAP_BORDERLINE",
+        reasons,
+        adjustedPlan: {
+          forceEntryMode: "PROBE",
+          forceStopLossPct: rules.copytradeHardStopPct
+        }
+      };
+    }
+
+    reasons.push(
+      `leader accepted`,
+      `token score ok`,
+      `rug risk ok`,
+      `timing acceptable`,
+      `copytrade filter passed`
+    );
+
+    if (tokenType) reasons.push(`tokenType ${tokenType}`);
+    if (rewardModel && rewardModel !== "None") reasons.push(`rewardModel ${rewardModel}`);
+
+    return {
+      allow: true,
+      mode: "allow",
+      reason: "COPYTRAP_PASS",
+      reasons,
+      adjustedPlan: {
+        forceStopLossPct: rules.copytradeHardStopPct
+      }
+    };
+  }
+
+  registerRejectedTrap(runtimeConfig, leaderAddress, severity = "soft") {
+    const leader = runtimeConfig?.copytrade?.leaders?.find(
+      (x) => x.address === leaderAddress
+    );
+    if (!leader) return null;
+
+    this.ensureLeaderShape(leader);
+
+    const penalty =
+      severity === "hard"
+        ? this.rules.leaderPenaltyOnHardTrap
+        : this.rules.leaderPenaltyOnRejectedTrap;
+
+    leader.score = clamp(safeNum(leader.score, 0) - penalty, 0, 100);
+    leader.rejectedTrapCount += 1;
+    leader.lastSyncAt = nowIso();
+
+    if (leader.score < this.rules.leaderMinScore) {
+      leader.cooldownUntil = new Date(
+        Date.now() + safeNum(runtimeConfig?.copytrade?.cooldownMinutes, 180) * 60 * 1000
+      ).toISOString();
+      leader.state = "cooldown";
+    }
+
+    return clone(leader);
+  }
+
+  registerAcceptedQuality(runtimeConfig, leaderAddress) {
+    const leader = runtimeConfig?.copytrade?.leaders?.find(
+      (x) => x.address === leaderAddress
+    );
+    if (!leader) return null;
+
+    this.ensureLeaderShape(leader);
+
+    leader.score = clamp(
+      safeNum(leader.score, 0) + this.rules.leaderRewardOnAcceptedQuality,
+      0,
+      100
+    );
+    leader.acceptedGoodCount += 1;
+    leader.lastSyncAt = nowIso();
+
+    return clone(leader);
   }
 
   buildCopytradeText(runtimeConfig) {
     const leaders = this.copytradeManager.listLeaders(runtimeConfig);
+    const r = this.rules;
+
     const lines = ["📋 <b>Copytrade</b>", ""];
     lines.push(`enabled: ${runtimeConfig.copytrade.enabled ? "yes" : "no"}`);
-    lines.push(`rescoring: ${runtimeConfig.copytrade.rescoringEnabled ? "yes" : "no"}`);
-    lines.push(`min score: ${runtimeConfig.copytrade.minLeaderScore}`);
-    lines.push(`cooldown min: ${runtimeConfig.copytrade.cooldownMinutes}`);
+    lines.push(
+      `rescoring: ${runtimeConfig.copytrade.rescoringEnabled ? "yes" : "no"}`
+    );
+    lines.push(`leader min score: ${r.leaderMinScore}`);
+    lines.push(`token min score: ${r.copytradeTokenMinScore}`);
+    lines.push(`max delay sec: ${r.maxFollowDelaySec}`);
+    lines.push(`max extension pct: ${r.maxPriceExtensionPct}`);
+    lines.push(`max rug risk: ${r.maxRugRisk}`);
+    lines.push(`min liquidity usd: ${r.minLiquidityUsd}`);
+    lines.push(`max concentration: ${r.maxHolderConcentration}`);
+    lines.push(`hard stop pct: ${r.copytradeHardStopPct}`);
     lines.push("");
 
     if (!leaders.length) {
       lines.push("leaders: none");
     } else {
       for (const leader of leaders) {
+        this.ensureLeaderShape(leader);
         lines.push(
           `• <b>${leader.address}</b>
 state: ${leader.state}
-score: ${leader.score}
-source: ${leader.source || "manual"}
-last sync: ${leader.lastSyncAt || "-"}`
+score: ${safeNum(leader.score)}
+source: ${asText(leader.source, "manual")}
+rejected traps: ${safeNum(leader.rejectedTrapCount)}
+accepted good: ${safeNum(leader.acceptedGoodCount)}
+last sync: ${asText(leader.lastSyncAt, "-")}`
         );
         lines.push("");
       }
@@ -59,21 +391,32 @@ last sync: ${leader.lastSyncAt || "-"}`
 leaders: none`;
     }
 
-    const intel = await this.gmgnLeaderIntel.refreshMany(leaders.map((x) => x.address));
+    const intel = await this.gmgnLeaderIntel.refreshMany(
+      leaders.map((x) => x.address)
+    );
+
     const lines = ["🫀 <b>Leader Health</b>", ""];
     for (const row of intel) {
+      const leader = runtimeConfig?.copytrade?.leaders?.find(
+        (x) => x.address === row.address
+      );
+      this.ensureLeaderShape(leader);
+
       lines.push(
         `• <b>${row.address}</b>
 state: ${row.state}
-score: ${row.score}
-recent winrate: ${row.recentWinrate}%
-recent pnl: ${row.recentPnlPct}%
-max drawdown: ${row.maxDrawdownPct}%
-source: ${row.source}
-last sync: ${row.lastSyncAt}`
+score: ${safeNum(row.score)}
+recent winrate: ${safeNum(row.recentWinrate)}%
+recent pnl: ${safeNum(row.recentPnlPct)}%
+max drawdown: ${safeNum(row.maxDrawdownPct)}%
+rejected traps: ${safeNum(leader?.rejectedTrapCount)}
+accepted good: ${safeNum(leader?.acceptedGoodCount)}
+source: ${asText(row.source, "-")}
+last sync: ${asText(row.lastSyncAt, "-")}`
       );
       lines.push("");
     }
+
     return lines.join("\n");
   }
 
@@ -82,12 +425,12 @@ last sync: ${row.lastSyncAt}`
     return `🛰 <b>GMGN Status</b>
 
 enabled: ${h.enabled ? "yes" : "no"}
-mode: ${h.mode}
-auto refresh sec: ${h.autoRefreshSec}
-min recent winrate: ${h.minRecentWinrate}
-min recent pnl pct: ${h.minRecentPnlPct}
-max drawdown pct: ${h.maxLeaderDrawdownPct}
-cooldown min: ${h.cooldownMin}
-cached leaders: ${h.cachedLeaders}`;
+mode: ${asText(h.mode, "-")}
+auto refresh sec: ${safeNum(h.autoRefreshSec)}
+min recent winrate: ${safeNum(h.minRecentWinrate)}
+min recent pnl pct: ${safeNum(h.minRecentPnlPct)}
+max drawdown pct: ${safeNum(h.maxLeaderDrawdownPct)}
+cooldown min: ${safeNum(h.cooldownMin)}
+cached leaders: ${safeNum(h.cachedLeaders)}`;
   }
 }
