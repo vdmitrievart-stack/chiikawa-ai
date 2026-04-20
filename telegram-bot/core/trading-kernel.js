@@ -263,6 +263,10 @@ export default class TradingKernel {
       copytrade: {
         ...(cfg.copytrade || {}),
         allocationPct: this.runtime.activeConfig.strategyBudget.copytrade
+      },
+      migration_survivor: {
+        ...(cfg.migration_survivor || {}),
+        allocationPct: this.runtime.activeConfig.strategyBudget.migration_survivor
       }
     };
     setStrategyConfig(nextCfg);
@@ -509,7 +513,6 @@ export default class TradingKernel {
     let { candidate, plans, heroImage } = result;
     candidate = await this.enrichCandidateForCopytrade(candidate);
 
-    // На авто-цикле не спамим про чужие сети. Просто молча пропускаем.
     if (!isSolanaChain(candidate?.token?.chainId)) {
       await this.persistSnapshot();
       return;
@@ -531,10 +534,13 @@ export default class TradingKernel {
       if (alreadyOpenSameStrategy) continue;
 
       if (!isSolanaChain(candidate?.token?.chainId)) continue;
-      if (candidate.corpse?.isCorpse && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.falseBounce?.rejected && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.developer?.verdict === "Bad" && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.score < 85 && rawPlan.strategyKey !== "copytrade") continue;
+      if (candidate.corpse?.isCorpse && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
+      if (candidate.falseBounce?.rejected && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
+      if (candidate.developer?.verdict === "Bad" && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
+      if (
+        candidate.score < 85 &&
+        !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)
+      ) continue;
 
       let plan = clone(rawPlan);
 
@@ -563,7 +569,6 @@ export default class TradingKernel {
             );
           }
 
-          // NO_LEADER в multi-режиме вообще не шлем.
           const isCopyOnlyMode = this.runtime.strategyScope === "copytrade";
           const isNoLeader = copyVerdict.reason === "NO_LEADER";
 
@@ -817,7 +822,8 @@ ${formatBudgetLines(current)}
 <b>Pending</b>
 ${pending ? formatBudgetLines(pending) : "none"}
 
-Send: <code>budget 25 25 25 25</code>`;
+Send:
+<code>budget 20 20 20 20 20</code>`;
   }
 
   buildGmgnStatusText() {
