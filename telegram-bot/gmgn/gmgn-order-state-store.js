@@ -1,864 +1,502 @@
-import {
-  getPortfolio,
-  getPositions,
-  getStrategyConfig,
-  resetPortfolio,
-  setStrategyConfig,
-  getClosedTrades
-} from "../portfolio.js";
+import fs from "node:fs/promises";
+import path from "node:path";
 
-import {
-  buildDashboard,
-  buildBalanceText,
-  buildPeriodicReport
-} from "./reporting-engine.js";
-
-import {
-  DEFAULT_STRATEGY_BUDGET,
-  validateBudgetPercents,
-  formatBudgetLines
-} from "./budget-manager.js";
-
-import {
-  buildDefaultRuntimeConfig,
-  createTradingRuntime,
-  startRuntime,
-  requestStop,
-  requestKill,
-  finishRuntime,
-  queuePendingConfig,
-  canApplyPendingConfig,
-  applyPendingConfig,
-  canOpenNewPositions
-} from "./trading-runtime.js";
-
-import CandidateService from "./candidate-service.js";
-import PositionService from "./position-service.js";
-import CopytradeService from "./copytrade-service.js";
-import NotificationService from "./notification-service.js";
-
-import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
-import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
-import GMGNExecutionService from "../gmgn/gmgn-execution-service.js";
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-function escapeHtml(input) {
-  return String(input ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function asText(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
 }
 
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value));
+function nowIso() {
+  return new Date().toISOString();
 }
 
-function normalizePlanWithCopyVerdict(plan, copyVerdict) {
-  const nextPlan = clone(plan);
-
-  if (copyVerdict?.mode === "probe_only") {
-    nextPlan.entryMode = "PROBE";
-  }
-
-  if (copyVerdict?.adjustedPlan?.forceEntryMode) {
-    nextPlan.entryMode = copyVerdict.adjustedPlan.forceEntryMode;
-  }
-
-  if (safeNum(copyVerdict?.adjustedPlan?.forceStopLossPct, 0) > 0) {
-    nextPlan.stopLossPct = copyVerdict.adjustedPlan.forceStopLossPct;
-  }
-
-  return nextPlan;
+function ensureArray(v) {
+  return Array.isArray(v) ? v : [];
 }
 
-export default class TradingKernel {
-  constructor({
-    walletRouter,
-    copytradeManager,
-    gmgnLeaderIntel,
-    persistence,
-    gmgnWalletService,
-    gmgnOrderStore,
-    gmgnExecutionService,
-    initialConfig,
-    logger = console
-  }) {
-    this.logger = logger;
-    this.walletRouter = walletRouter || null;
-    this.copytradeManager = copytradeManager;
-    this.gmgnLeaderIntel = gmgnLeaderIntel;
-    this.persistence = persistence || null;
+export default class GMGNOrderStateStore {
+  constructor(options = {}) {
+    this.logger = options.logger || console;
+    this.baseDir = options.baseDir || path.resolve("./runtime-data");
+    this.filePath =
+      options.filePath || path.join(this.baseDir, "gmgn-order-state-store.json");
 
-    this.startBalanceSol = safeNum(initialConfig?.startBalanceSol, 10);
-
-    this.runtime = createTradingRuntime(
-      buildDefaultRuntimeConfig(
-        initialConfig || {
-          language: "ru",
-          dryRun: true,
-          startBalanceSol: 10,
-          strategyBudget: { ...DEFAULT_STRATEGY_BUDGET },
-          wallets: {},
-          strategyRouting: {},
-          copytrade: {
-            enabled: true,
-            rescoringEnabled: true,
-            minLeaderScore: 70,
-            cooldownMinutes: 180,
-            leaders: []
-          }
-        }
-      )
-    );
-
-    this.gmgnWalletService =
-      gmgnWalletService ||
-      new GMGNWalletService({
-        logger: this.logger
-      });
-
-    this.gmgnOrderStore =
-      gmgnOrderStore ||
-      new GMGNOrderStateStore({
-        logger: this.logger
-      });
-
-    this.gmgnExecutionService =
-      gmgnExecutionService ||
-      new GMGNExecutionService({
-        logger: this.logger,
-        walletService: this.gmgnWalletService,
-        orderStore: this.gmgnOrderStore
-      });
-
-    this.candidateService = new CandidateService({
-      logger: this.logger
-    });
-
-    this.positionService = new PositionService({
-      logger: this.logger,
-      onExternalClose: async ({ runtimeConfig, position, reason, latestPrice }) => {
-        return this.runGMGNClose(position, reason, latestPrice, runtimeConfig);
-      },
-      onExternalPartial: async ({ runtimeConfig, position, partial, latestPrice }) => {
-        return this.runGMGNPartial(position, partial, latestPrice, runtimeConfig);
-      }
-    });
-
-    this.copytradeService = new CopytradeService({
-      copytradeManager: this.copytradeManager,
-      gmgnLeaderIntel: this.gmgnLeaderIntel,
-      logger: this.logger
-    });
-
-    this.recentlyTraded = new Map();
-    this.previousReportEquity = null;
-  }
-
-  async initialize() {
-    await this.gmgnOrderStore.load();
-    await this.restoreIfAvailable();
-    return true;
-  }
-
-  async restoreIfAvailable() {
-    if (!this.persistence) return false;
-
-    const runtimeSnapshot = await this.persistence.loadRuntimeSnapshot();
-    if (!runtimeSnapshot) return false;
-
-    if (runtimeSnapshot?.runtime?.activeConfig) {
-      this.runtime.activeConfig = runtimeSnapshot.runtime.activeConfig;
-      this.runtime.pendingConfig = runtimeSnapshot.runtime.pendingConfig || null;
-      this.runtime.pendingReason = runtimeSnapshot.runtime.pendingReason || null;
-      this.runtime.pendingQueuedAt = runtimeSnapshot.runtime.pendingQueuedAt || null;
-      this.runtime.mode = "stopped";
-      this.runtime.strategyScope = "all";
-      this.runtime.stopRequested = false;
-      this.runtime.killRequested = false;
-      this.startBalanceSol = safeNum(
-        runtimeSnapshot.runtime.startBalanceSol,
-        this.startBalanceSol
-      );
-      this.syncPortfolioStrategyBudget();
-    }
-
-    return true;
-  }
-
-  async persistSnapshot() {
-    if (!this.persistence) return false;
-
-    const runtimeSaved = await this.persistence.saveRuntimeSnapshot({
-      runtime: {
-        activeConfig: this.runtime.activeConfig,
-        pendingConfig: this.runtime.pendingConfig,
-        pendingReason: this.runtime.pendingReason,
-        pendingQueuedAt: this.runtime.pendingQueuedAt,
-        startBalanceSol: this.startBalanceSol
-      }
-    });
-
-    const portfolioSaved = await this.persistence.savePortfolioSnapshot({
-      portfolio: getPortfolio(),
-      runtimeMeta: {
-        runId: this.runtime.runId,
-        mode: this.runtime.mode,
-        strategyScope: this.runtime.strategyScope,
-        savedAt: new Date().toISOString()
-      }
-    });
-
-    return runtimeSaved && portfolioSaved;
-  }
-
-  getRuntime() {
-    return this.runtime;
-  }
-
-  getActiveConfig() {
-    return this.runtime.activeConfig;
-  }
-
-  getPortfolio() {
-    return getPortfolio();
-  }
-
-  getClosedTrades() {
-    return getClosedTrades();
-  }
-
-  setLanguage(lang) {
-    this.runtime.activeConfig.language = lang === "en" ? "en" : "ru";
-    this.persistSnapshot();
-    return this.runtime.activeConfig.language;
-  }
-
-  syncPortfolioStrategyBudget() {
-    const cfg = getStrategyConfig();
-    const nextCfg = {
-      ...cfg,
-      scalp: {
-        ...(cfg.scalp || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.scalp
-      },
-      reversal: {
-        ...(cfg.reversal || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.reversal
-      },
-      runner: {
-        ...(cfg.runner || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.runner
-      },
-      copytrade: {
-        ...(cfg.copytrade || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.copytrade
-      }
+    this.state = {
+      orders: []
     };
-    setStrategyConfig(nextCfg);
+
+    this.validStatuses = new Set([
+      "created",
+      "submitted",
+      "filled",
+      "partial",
+      "failed",
+      "cancelled"
+    ]);
+
+    this.validOperations = new Set([
+      "open",
+      "close",
+      "partial"
+    ]);
   }
 
-  start(strategyScope = "all", mode = "infinite", chatId = null, userId = null) {
-    startRuntime(this.runtime, { mode, strategyScope, chatId, userId });
-    this.previousReportEquity = null;
-    this.syncPortfolioStrategyBudget();
-    resetPortfolio(this.startBalanceSol, getStrategyConfig());
-    this.persistSnapshot();
-    return this.runtime;
+  async ensureDir() {
+    await fs.mkdir(this.baseDir, { recursive: true });
   }
 
-  requestSoftStop() {
-    requestStop(this.runtime);
-    this.persistSnapshot();
-    return this.runtime;
-  }
-
-  async requestHardKill() {
-    requestKill(this.runtime);
-
-    const closed = await this.positionService.forceCloseAll(
-      this.runtime.activeConfig,
-      "KILL_SWITCH"
-    );
-
-    await this.applyPendingIfPossible();
-    finishRuntime(this.runtime);
-    await this.persistSnapshot();
-
-    return closed;
-  }
-
-  queueBudgetUpdate(values) {
-    const validated = validateBudgetPercents(values);
-    if (!validated.ok) return validated;
-
-    queuePendingConfig(
-      this.runtime,
-      { strategyBudget: validated.budget },
-      "budget_update"
-    );
-
-    this.persistSnapshot();
-
-    return {
-      ok: true,
-      budget: validated.budget
-    };
-  }
-
-  async applyPendingIfPossible() {
-    if (!canApplyPendingConfig(this.runtime, getPositions().length)) {
-      return false;
-    }
-
-    applyPendingConfig(this.runtime);
-    this.syncPortfolioStrategyBudget();
-    await this.persistSnapshot();
-
-    return true;
-  }
-
-  pruneRecentlyTraded() {
-    const now = Date.now();
-    for (const [ca, ts] of this.recentlyTraded.entries()) {
-      if (now - ts > 2 * 60 * 60 * 1000) {
-        this.recentlyTraded.delete(ca);
-      }
-    }
-  }
-
-  async syncLeaderScores() {
-    const intel = await this.copytradeService.syncLeaderScores(
-      this.runtime.activeConfig
-    );
-    await this.persistSnapshot();
-    return intel;
-  }
-
-  async enrichCandidateForCopytrade(candidate) {
-    if (!candidate) return candidate;
-
-    if (!this.gmgnLeaderIntel?.enrichCandidateWithLeaderTrade) {
-      return candidate;
-    }
+  async load() {
+    await this.ensureDir();
 
     try {
-      return await this.gmgnLeaderIntel.enrichCandidateWithLeaderTrade(
-        this.runtime.activeConfig,
-        candidate
-      );
+      const raw = await fs.readFile(this.filePath, "utf8");
+      const parsed = JSON.parse(raw);
+
+      this.state = {
+        orders: ensureArray(parsed?.orders)
+      };
     } catch (error) {
-      this.logger.log("copytrade enrich failed:", error.message);
-      return candidate;
-    }
-  }
-
-  async runGMGNOpen(walletId, plan, candidate, runtimeConfig = this.runtime.activeConfig) {
-    return this.gmgnExecutionService.executeOpen(runtimeConfig, {
-      walletId,
-      strategy: plan.strategyKey,
-      token: candidate.token,
-      intent: {
-        expectedEdgePct: plan.expectedEdgePct,
-        expectedEntryPrice: candidate?.token?.price || 0,
-        amountSol: 0,
-        slippagePct: 1
-      },
-      note: `${plan.strategyKey}:${plan.entryMode || "NORMAL"}`
-    });
-  }
-
-  async runGMGNClose(position, reason, latestPrice, runtimeConfig = this.runtime.activeConfig) {
-    if (!position?.walletId) return null;
-
-    return this.gmgnExecutionService.executeClose(runtimeConfig, {
-      walletId: position.walletId,
-      strategy: position.strategy,
-      token: {
-        name: position.token,
-        symbol: position.symbol,
-        ca: position.ca
-      },
-      intent: {
-        expectedExitPrice: latestPrice || position.lastPrice || 0,
-        tokenAmount: position.tokenAmountRaw || 0
-      },
-      note: reason || "close"
-    });
-  }
-
-  async runGMGNPartial(position, partial, latestPrice, runtimeConfig = this.runtime.activeConfig) {
-    if (!position?.walletId) return null;
-
-    return this.gmgnExecutionService.executePartial(runtimeConfig, {
-      walletId: position.walletId,
-      strategy: position.strategy,
-      token: {
-        name: position.token,
-        symbol: position.symbol,
-        ca: position.ca
-      },
-      soldFraction: safeNum(partial?.soldFraction, 0),
-      currentPrice: latestPrice || 0,
-      intent: {
-        tokenAmount: position.tokenAmountRaw || 0
-      },
-      note: `runner partial ${safeNum(partial?.targetPct, 0)}`
-    });
-  }
-
-  async tick(sendBridge) {
-    this.runtime.cycleCount += 1;
-    this.runtime.lastCycleAt = Date.now();
-    this.pruneRecentlyTraded();
-
-    const notificationService = new NotificationService({
-      send: sendBridge
-    });
-
-    await this.positionService.updateOpenPositions({
-      runtimeConfig: this.runtime.activeConfig,
-      notificationService,
-      recentlyTraded: this.recentlyTraded,
-      candidateProbeFn: async (ca) => {
-        const probe = await this.candidateService
-          .findBestCandidate({
-            runtime: this.runtime,
-            openPositions: [],
-            recentlyTraded: []
-          })
-          .catch(() => null);
-
-        const baseCandidate = probe?.candidate?.token?.ca === ca ? probe.candidate : null;
-        if (!baseCandidate) return null;
-
-        return this.enrichCandidateForCopytrade(baseCandidate);
+      if (error?.code !== "ENOENT") {
+        this.logger.log("gmgn order store load error:", error.message);
       }
+      this.state = { orders: [] };
+    }
+
+    return this.getState();
+  }
+
+  async save() {
+    await this.ensureDir();
+
+    try {
+      await fs.writeFile(this.filePath, JSON.stringify(this.state, null, 2), "utf8");
+      return true;
+    } catch (error) {
+      this.logger.log("gmgn order store save error:", error.message);
+      return false;
+    }
+  }
+
+  getState() {
+    return clone(this.state);
+  }
+
+  listOrders() {
+    return clone(this.state.orders || []);
+  }
+
+  listRecentOrders(limit = 20) {
+    return this.listOrders()
+      .sort((a, b) => {
+        const at = new Date(a?.updatedAt || a?.createdAt || 0).getTime();
+        const bt = new Date(b?.updatedAt || b?.createdAt || 0).getTime();
+        return bt - at;
+      })
+      .slice(0, limit);
+  }
+
+  listOpenOrders() {
+    return this.listOrders().filter((row) =>
+      ["created", "submitted", "partial"].includes(asText(row?.status).toLowerCase())
+    );
+  }
+
+  listOrdersByWallet(walletId) {
+    const id = asText(walletId);
+    return this.listOrders().filter((row) => asText(row?.walletId) === id);
+  }
+
+  listOrdersByStrategy(strategy) {
+    const key = asText(strategy);
+    return this.listOrders().filter((row) => asText(row?.strategy) === key);
+  }
+
+  listOrdersByTokenCa(tokenCa) {
+    const ca = asText(tokenCa);
+    return this.listOrders().filter((row) => asText(row?.token?.ca) === ca);
+  }
+
+  getOrderByOrderId(orderId) {
+    const id = asText(orderId);
+    return clone(
+      (this.state.orders || []).find((row) => asText(row?.orderId) === id) || null
+    );
+  }
+
+  getOrderByClientOrderId(clientOrderId) {
+    const id = asText(clientOrderId);
+    return clone(
+      (this.state.orders || []).find((row) => asText(row?.clientOrderId) === id) || null
+    );
+  }
+
+  findOrder({ orderId, clientOrderId }) {
+    if (orderId) {
+      const byOrderId = this.getOrderByOrderId(orderId);
+      if (byOrderId) return byOrderId;
+    }
+
+    if (clientOrderId) {
+      const byClientOrderId = this.getOrderByClientOrderId(clientOrderId);
+      if (byClientOrderId) return byClientOrderId;
+    }
+
+    return null;
+  }
+
+  normalizeStatus(status) {
+    const s = asText(status, "created").toLowerCase();
+    return this.validStatuses.has(s) ? s : "created";
+  }
+
+  normalizeOperation(operation) {
+    const op = asText(operation, "open").toLowerCase();
+    return this.validOperations.has(op) ? op : "open";
+  }
+
+  buildStatusEvent(status, patch = {}) {
+    return {
+      status: this.normalizeStatus(status),
+      at: nowIso(),
+      reason: asText(patch.reason, ""),
+      note: asText(patch.note, ""),
+      filledPct: safeNum(patch.filledPct, 0),
+      filledAmount: safeNum(patch.filledAmount, 0),
+      filledValueUsd: safeNum(patch.filledValueUsd, 0),
+      signature: asText(patch.signature, ""),
+      raw: clone(patch.raw || null)
+    };
+  }
+
+  normalizeOrder(input = {}) {
+    const status = this.normalizeStatus(input.status || "created");
+    const createdAt = asText(input.createdAt, nowIso());
+
+    return {
+      orderId: asText(input.orderId, ""),
+      clientOrderId: asText(input.clientOrderId, ""),
+      walletId: asText(input.walletId, ""),
+      gmgnWalletId: asText(input.gmgnWalletId, ""),
+      gmgnAccountId: asText(input.gmgnAccountId, ""),
+      strategy: asText(input.strategy, ""),
+      operation: this.normalizeOperation(input.operation || "open"),
+      side: asText(input.side, ""),
+      status,
+      token: clone(input.token || {}),
+      size: {
+        amountSol: safeNum(input?.size?.amountSol, 0),
+        amountUsd: safeNum(input?.size?.amountUsd, 0),
+        tokenAmount: safeNum(input?.size?.tokenAmount, 0)
+      },
+      pricing: {
+        expectedEntryPrice: safeNum(input?.pricing?.expectedEntryPrice, 0),
+        executedEntryPrice: safeNum(input?.pricing?.executedEntryPrice, 0),
+        expectedExitPrice: safeNum(input?.pricing?.expectedExitPrice, 0),
+        executedExitPrice: safeNum(input?.pricing?.executedExitPrice, 0),
+        slippagePct: safeNum(input?.pricing?.slippagePct, 0)
+      },
+      metrics: {
+        pnlHintPct: safeNum(input?.metrics?.pnlHintPct, 0),
+        pnlHintSol: safeNum(input?.metrics?.pnlHintSol, 0),
+        soldFraction: safeNum(input?.metrics?.soldFraction, 0)
+      },
+      source: asText(input.source, "gmgn"),
+      mode: asText(input.mode, "live"),
+      note: asText(input.note, ""),
+      reason: asText(input.reason, ""),
+      signature: asText(input.signature, ""),
+      createdAt,
+      updatedAt: asText(input.updatedAt, createdAt),
+      history: ensureArray(input.history),
+      raw: clone(input.raw || null)
+    };
+  }
+
+  async createOrder(input = {}) {
+    const normalized = this.normalizeOrder(input);
+
+    if (!normalized.orderId && !normalized.clientOrderId) {
+      throw new Error("createOrder requires orderId or clientOrderId");
+    }
+
+    const existing = this.findOrder({
+      orderId: normalized.orderId,
+      clientOrderId: normalized.clientOrderId
     });
 
-    if (this.runtime.stopRequested && getPositions().length === 0) {
-      await this.applyPendingIfPossible();
-      finishRuntime(this.runtime);
-      await this.persistSnapshot();
-      await notificationService.sendText("✅ Stop completed. No open positions left.");
-      return;
+    if (existing) {
+      return this.upsertOrder(normalized);
     }
 
-    if (!canOpenNewPositions(this.runtime)) {
-      const portfolio = getPortfolio();
-      const shouldReport =
-        !this.runtime.lastStatusAt ||
-        Date.now() - this.runtime.lastStatusAt >= 15 * 60 * 1000;
-
-      if (shouldReport) {
-        this.runtime.lastStatusAt = Date.now();
-        const report = buildPeriodicReport(
-          this.runtime,
-          portfolio,
-          this.previousReportEquity
-        );
-        this.previousReportEquity = portfolio.equity;
-        await notificationService.sendText(report);
-      }
-
-      await this.persistSnapshot();
-      return;
+    if (!normalized.history.length) {
+      normalized.history.push(
+        this.buildStatusEvent(normalized.status, {
+          reason: normalized.reason,
+          note: normalized.note,
+          signature: normalized.signature,
+          raw: normalized.raw
+        })
+      );
     }
 
-    const result = await this.candidateService.findBestCandidate({
-      runtime: this.runtime,
-      openPositions: getPositions(),
-      recentlyTraded: [...this.recentlyTraded.keys()]
+    this.state.orders.push(normalized);
+    await this.save();
+
+    return this.findOrder({
+      orderId: normalized.orderId,
+      clientOrderId: normalized.clientOrderId
     });
+  }
 
-    if (!result) {
-      await notificationService.sendText("❌ No candidates found");
-      await this.persistSnapshot();
-      return;
+  async upsertOrder(input = {}) {
+    const normalized = this.normalizeOrder(input);
+
+    if (!normalized.orderId && !normalized.clientOrderId) {
+      throw new Error("upsertOrder requires orderId or clientOrderId");
     }
 
-    let { candidate, plans, heroImage } = result;
-    candidate = await this.enrichCandidateForCopytrade(candidate);
-
-    await notificationService.sendPhotoOrText(
-      heroImage,
-      this.candidateService.buildHeroCaption(candidate)
+    const idx = (this.state.orders || []).findIndex(
+      (row) =>
+        (normalized.orderId && asText(row?.orderId) === normalized.orderId) ||
+        (normalized.clientOrderId &&
+          asText(row?.clientOrderId) === normalized.clientOrderId)
     );
 
-    await notificationService.sendText(
-      this.candidateService.buildAnalysisText(candidate, plans)
+    if (idx === -1) {
+      return this.createOrder(normalized);
+    }
+
+    const prev = this.state.orders[idx];
+    const next = {
+      ...prev,
+      ...normalized,
+      token: { ...(prev.token || {}), ...(normalized.token || {}) },
+      size: { ...(prev.size || {}), ...(normalized.size || {}) },
+      pricing: { ...(prev.pricing || {}), ...(normalized.pricing || {}) },
+      metrics: { ...(prev.metrics || {}), ...(normalized.metrics || {}) },
+      updatedAt: nowIso()
+    };
+
+    const prevHistory = ensureArray(prev.history);
+    const nextHistory = ensureArray(normalized.history);
+
+    next.history = [...prevHistory, ...nextHistory];
+
+    this.state.orders[idx] = next;
+    await this.save();
+
+    return this.findOrder({
+      orderId: next.orderId,
+      clientOrderId: next.clientOrderId
+    });
+  }
+
+  async setStatus(identifier = {}, status, patch = {}) {
+    const target = this.findOrder(identifier);
+    if (!target) return null;
+
+    const nextStatus = this.normalizeStatus(status);
+
+    const idx = (this.state.orders || []).findIndex(
+      (row) =>
+        (target.orderId && asText(row?.orderId) === asText(target.orderId)) ||
+        (target.clientOrderId &&
+          asText(row?.clientOrderId) === asText(target.clientOrderId))
     );
 
-    for (const rawPlan of plans) {
-      const alreadyOpenSameStrategy = getPositions().some(
-        (p) => p.strategy === rawPlan.strategyKey
-      );
-      if (alreadyOpenSameStrategy) continue;
-      if (candidate.corpse?.isCorpse && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.falseBounce?.rejected && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.developer?.verdict === "Bad" && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.score < 85 && rawPlan.strategyKey !== "copytrade") continue;
+    if (idx === -1) return null;
 
-      let plan = clone(rawPlan);
+    const row = this.state.orders[idx];
+    const history = ensureArray(row.history);
 
-      if (plan.strategyKey === "copytrade") {
-        const followDelaySec = safeNum(candidate?.copytradeMeta?.followDelaySec, 0);
-        const priceExtensionPct = safeNum(
-          candidate?.copytradeMeta?.priceExtensionPct,
-          safeNum(candidate?.delta?.priceDeltaPct, 0)
-        );
+    history.push(this.buildStatusEvent(nextStatus, patch));
 
-        const copyVerdict = this.copytradeService.canTradeCopy(
-          this.runtime.activeConfig,
-          candidate,
-          {
-            followDelaySec,
-            priceExtensionPct
-          }
-        );
+    row.status = nextStatus;
+    row.updatedAt = nowIso();
 
-        if (!copyVerdict.allow) {
-          if (copyVerdict.leader?.address) {
-            this.copytradeService.registerRejectedTrap(
-              this.runtime.activeConfig,
-              copyVerdict.leader.address,
-              copyVerdict.mode === "reject" ? "hard" : "soft"
-            );
-          }
+    if (patch.operation != null) row.operation = this.normalizeOperation(patch.operation);
+    if (patch.reason != null) row.reason = asText(patch.reason, row.reason || "");
+    if (patch.note != null) row.note = asText(patch.note, row.note || "");
+    if (patch.signature != null) row.signature = asText(patch.signature, row.signature || "");
 
-          await notificationService.sendText(
-            `🚫 <b>COPYTRADE REJECTED</b>
-
-<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
-<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}
-<b>Details:</b>
-${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
-          );
-          await this.persistSnapshot();
-          continue;
-        }
-
-        plan = normalizePlanWithCopyVerdict(plan, copyVerdict);
-
-        if (copyVerdict.leader?.address) {
-          this.copytradeService.registerAcceptedQuality(
-            this.runtime.activeConfig,
-            copyVerdict.leader.address
-          );
-        }
-
-        if (copyVerdict.mode === "probe_only") {
-          await notificationService.sendText(
-            `⚠️ <b>COPYTRADE PROBE MODE</b>
-
-<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
-<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
-<b>Details:</b>
-${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
-          );
-        }
-      }
-
-      const walletId = this.gmgnWalletService.getPrimaryWalletId(
-        this.runtime.activeConfig,
-        plan.strategyKey
-      );
-
-      const walletCheck = this.gmgnWalletService.validateWalletForStrategy(
-        this.runtime.activeConfig,
-        walletId,
-        plan.strategyKey
-      );
-
-      if (!walletCheck.ok) continue;
-
-      const order = await this.runGMGNOpen(walletId, plan, candidate);
-      if (!order) continue;
-
-      const position = this.positionService.maybeOpenPosition({
-        plan,
-        candidate,
-        heroImage,
-        walletId
-      });
-
-      if (position) {
-        await notificationService.sendEntry(heroImage, position);
-      }
+    if (patch.token) {
+      row.token = { ...(row.token || {}), ...clone(patch.token) };
     }
 
-    const portfolio = getPortfolio();
-    const shouldReport =
-      !this.runtime.lastStatusAt ||
-      Date.now() - this.runtime.lastStatusAt >= 15 * 60 * 1000;
-
-    if (shouldReport) {
-      this.runtime.lastStatusAt = Date.now();
-      const report = buildPeriodicReport(
-        this.runtime,
-        portfolio,
-        this.previousReportEquity
-      );
-      this.previousReportEquity = portfolio.equity;
-      await notificationService.sendText(report);
+    if (patch.size) {
+      row.size = {
+        ...(row.size || {}),
+        amountSol:
+          patch.size.amountSol != null
+            ? safeNum(patch.size.amountSol, 0)
+            : safeNum(row?.size?.amountSol, 0),
+        amountUsd:
+          patch.size.amountUsd != null
+            ? safeNum(patch.size.amountUsd, 0)
+            : safeNum(row?.size?.amountUsd, 0),
+        tokenAmount:
+          patch.size.tokenAmount != null
+            ? safeNum(patch.size.tokenAmount, 0)
+            : safeNum(row?.size?.tokenAmount, 0)
+      };
     }
 
-    await this.persistSnapshot();
-  }
-
-  buildCopytradeStatusSummary() {
-    const leaders = this.runtime.activeConfig?.copytrade?.leaders || [];
-    if (!leaders.length) {
-      return `📋 <b>Copytrade status</b>
-leader: -
-state: -
-score: 0
-rejected traps: 0
-accepted good: 0
-open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
+    if (patch.pricing) {
+      row.pricing = {
+        ...(row.pricing || {}),
+        expectedEntryPrice:
+          patch.pricing.expectedEntryPrice != null
+            ? safeNum(patch.pricing.expectedEntryPrice, 0)
+            : safeNum(row?.pricing?.expectedEntryPrice, 0),
+        executedEntryPrice:
+          patch.pricing.executedEntryPrice != null
+            ? safeNum(patch.pricing.executedEntryPrice, 0)
+            : safeNum(row?.pricing?.executedEntryPrice, 0),
+        expectedExitPrice:
+          patch.pricing.expectedExitPrice != null
+            ? safeNum(patch.pricing.expectedExitPrice, 0)
+            : safeNum(row?.pricing?.expectedExitPrice, 0),
+        executedExitPrice:
+          patch.pricing.executedExitPrice != null
+            ? safeNum(patch.pricing.executedExitPrice, 0)
+            : safeNum(row?.pricing?.executedExitPrice, 0),
+        slippagePct:
+          patch.pricing.slippagePct != null
+            ? safeNum(patch.pricing.slippagePct, 0)
+            : safeNum(row?.pricing?.slippagePct, 0)
+      };
     }
 
-    const sorted = [...leaders].sort(
-      (a, b) => safeNum(b?.score, 0) - safeNum(a?.score, 0)
-    );
-    const leader = sorted[0] || {};
+    if (patch.metrics) {
+      row.metrics = {
+        ...(row.metrics || {}),
+        pnlHintPct:
+          patch.metrics.pnlHintPct != null
+            ? safeNum(patch.metrics.pnlHintPct, 0)
+            : safeNum(row?.metrics?.pnlHintPct, 0),
+        pnlHintSol:
+          patch.metrics.pnlHintSol != null
+            ? safeNum(patch.metrics.pnlHintSol, 0)
+            : safeNum(row?.metrics?.pnlHintSol, 0),
+        soldFraction:
+          patch.metrics.soldFraction != null
+            ? safeNum(patch.metrics.soldFraction, 0)
+            : safeNum(row?.metrics?.soldFraction, 0)
+      };
+    }
 
-    return `📋 <b>Copytrade status</b>
-leader: ${escapeHtml(leader.address || "-")}
-state: ${escapeHtml(leader.state || "-")}
-score: ${safeNum(leader.score, 0)}
-rejected traps: ${safeNum(leader.rejectedTrapCount, 0)}
-accepted good: ${safeNum(leader.acceptedGoodCount, 0)}
-open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
+    if (patch.raw != null) {
+      row.raw = clone(patch.raw);
+    }
+
+    row.history = history;
+
+    await this.save();
+
+    return this.findOrder({
+      orderId: row.orderId,
+      clientOrderId: row.clientOrderId
+    });
   }
 
-  buildExecutionModelSummary() {
-    const r = this.copytradeService?.rules || {};
-    return `🧠 <b>Execution model</b>
-entry by leader: ${r.entryUsesLeader ? "yes" : "no"}
-exit by bot strategy: yes
-leader sell mode: ${escapeHtml(String(r.exitUsesLeaderMode || "soft_only"))}
-leader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}
-leader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}
-own TP priority: ${r.ownTpPriority ? "yes" : "no"}
-own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
+  async markSubmitted(identifier = {}, patch = {}) {
+    return this.setStatus(identifier, "submitted", patch);
   }
 
-  buildRecentGMGNEventsSummary(limit = 3) {
-    const rows = this.gmgnOrderStore.listRecentOrders(limit);
+  async markFilled(identifier = {}, patch = {}) {
+    return this.setStatus(identifier, "filled", patch);
+  }
+
+  async markPartial(identifier = {}, patch = {}) {
+    return this.setStatus(identifier, "partial", patch);
+  }
+
+  async markFailed(identifier = {}, patch = {}) {
+    return this.setStatus(identifier, "failed", patch);
+  }
+
+  async markCancelled(identifier = {}, patch = {}) {
+    return this.setStatus(identifier, "cancelled", patch);
+  }
+
+  countByStatus() {
+    const counters = {
+      created: 0,
+      submitted: 0,
+      filled: 0,
+      partial: 0,
+      failed: 0,
+      cancelled: 0
+    };
+
+    for (const row of this.state.orders || []) {
+      const s = this.normalizeStatus(row?.status);
+      counters[s] += 1;
+    }
+
+    return counters;
+  }
+
+  countByOperation() {
+    const counters = {
+      open: 0,
+      close: 0,
+      partial: 0
+    };
+
+    for (const row of this.state.orders || []) {
+      const op = this.normalizeOperation(row?.operation);
+      counters[op] += 1;
+    }
+
+    return counters;
+  }
+
+  buildOrdersText(limit = 15) {
+    const rows = this.listRecentOrders(limit);
 
     if (!rows.length) {
-      return `🕘 <b>Recent GMGN events</b>
+      return `📦 <b>GMGN Orders</b>
+
 none`;
     }
 
-    const lines = ["🕘 <b>Recent GMGN events</b>", ""];
+    const lines = ["📦 <b>GMGN Orders</b>", ""];
 
     for (const row of rows) {
       lines.push(
-        `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}
-strategy: ${escapeHtml(row.strategy || "-")}
-token: ${escapeHtml(row?.token?.symbol || row?.token?.name || row?.token?.ca || "-")}
-note: ${escapeHtml(row.note || "-")}
-updated: ${escapeHtml(row.updatedAt || "-")}`
+        `• <b>${asText(row.clientOrderId || row.orderId, "-")}</b>
+operation: ${asText(row.operation, "-")}
+status: ${asText(row.status, "-")}
+wallet: ${asText(row.walletId, "-")}
+gmgnWalletId: ${asText(row.gmgnWalletId, "-")}
+strategy: ${asText(row.strategy, "-")}
+side: ${asText(row.side, "-")}
+token: ${asText(row?.token?.name || row?.token?.ca, "-")}
+amountSol: ${safeNum(row?.size?.amountSol, 0)}
+tokenAmount: ${safeNum(row?.size?.tokenAmount, 0)}
+expectedEntry: ${safeNum(row?.pricing?.expectedEntryPrice, 0)}
+executedEntry: ${safeNum(row?.pricing?.executedEntryPrice, 0)}
+expectedExit: ${safeNum(row?.pricing?.expectedExitPrice, 0)}
+executedExit: ${safeNum(row?.pricing?.executedExitPrice, 0)}
+pnlHintPct: ${safeNum(row?.metrics?.pnlHintPct, 0)}
+pnlHintSol: ${safeNum(row?.metrics?.pnlHintSol, 0)}
+soldFraction: ${safeNum(row?.metrics?.soldFraction, 0)}
+note: ${asText(row.note, "-")}
+updatedAt: ${asText(row.updatedAt, "-")}`
       );
       lines.push("");
     }
 
     return lines.join("\n");
-  }
-
-  buildStatusText() {
-    const base = buildDashboard(this.runtime, getPortfolio());
-    return `${base}
-
-${this.buildCopytradeStatusSummary()}
-
-${this.buildExecutionModelSummary()}
-
-${this.buildGMGNExecutionText()}
-
-${this.buildRecentGMGNEventsSummary()}`;
-  }
-
-  buildBalanceText() {
-    return buildBalanceText(getPortfolio());
-  }
-
-  buildWalletsText() {
-    return `${this.gmgnWalletService.buildWalletSummaryText(this.runtime.activeConfig)}
-
-${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}`;
-  }
-
-  buildCopytradeText() {
-    return this.copytradeService.buildCopytradeText(this.runtime.activeConfig);
-  }
-
-  buildBudgetText() {
-    const current =
-      this.runtime.activeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
-    const pending = this.runtime.pendingConfig?.strategyBudget || null;
-
-    return `🧮 <b>Budget</b>
-
-<b>Current</b>
-${formatBudgetLines(current)}
-
-<b>Pending</b>
-${pending ? formatBudgetLines(pending) : "none"}
-
-Send: <code>budget 25 25 25 25</code>`;
-  }
-
-  buildGmgnStatusText() {
-    return this.copytradeService.buildGmgnStatusText();
-  }
-
-  buildGMGNExecutionText() {
-    return this.gmgnExecutionService.buildExecutionSummaryText(
-      this.runtime.activeConfig
-    );
-  }
-
-  buildGMGNOrdersText(limit = 15) {
-    return this.gmgnExecutionService.buildOrdersText(limit);
-  }
-
-  async buildLeaderHealthText() {
-    return this.copytradeService.buildLeaderHealthText(
-      this.runtime.activeConfig
-    );
-  }
-
-  addLeader(address) {
-    const row = this.copytradeManager.addLeader(
-      this.runtime.activeConfig,
-      address,
-      "manual"
-    );
-    this.persistSnapshot();
-    return row;
-  }
-
-  setWalletSecretRef(walletId, secretRef) {
-    if (!this.runtime.activeConfig.wallets[walletId]) return false;
-    this.runtime.activeConfig.wallets[walletId].secretRef = secretRef;
-    this.persistSnapshot();
-    return true;
-  }
-
-  async fetchTokenByCA(ca) {
-    const DEX_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
-    const res = await fetch(`${DEX_TOKEN_API}/${encodeURIComponent(ca)}`);
-    if (!res.ok) {
-      throw new Error(`DexScreener HTTP ${res.status}`);
-    }
-
-    const json = await res.json();
-    const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
-    if (!pairs.length) return null;
-
-    const bestRaw = pairs.sort(
-      (a, b) =>
-        safeNum(b?.liquidity?.usd) - safeNum(a?.liquidity?.usd) ||
-        safeNum(b?.volume?.h24) - safeNum(a?.volume?.h24)
-    )[0];
-
-    const socials = Array.isArray(bestRaw?.info?.socials)
-      ? bestRaw.info.socials
-      : [];
-    const websites = Array.isArray(bestRaw?.info?.websites)
-      ? bestRaw.info.websites
-      : [];
-
-    const links = [
-      ...socials.map((x) => ({
-        type: x?.type || "",
-        label: x?.type || "",
-        url: x?.url || ""
-      })),
-      ...websites.map((x) => ({
-        type: "website",
-        label: "website",
-        url: x?.url || ""
-      }))
-    ];
-
-    return {
-      name: bestRaw?.baseToken?.name || bestRaw?.baseToken?.symbol || "UNKNOWN",
-      symbol: bestRaw?.baseToken?.symbol || "",
-      ca: bestRaw?.baseToken?.address || "",
-      pairAddress: bestRaw?.pairAddress || "",
-      chainId: bestRaw?.chainId || "",
-      dexId: bestRaw?.dexId || "",
-      price: safeNum(bestRaw?.priceUsd),
-      liquidity: safeNum(bestRaw?.liquidity?.usd),
-      volume: safeNum(bestRaw?.volume?.h24),
-      buys: safeNum(bestRaw?.txns?.h24?.buys),
-      sells: safeNum(bestRaw?.txns?.h24?.sells),
-      txns:
-        safeNum(bestRaw?.txns?.h24?.buys) +
-        safeNum(bestRaw?.txns?.h24?.sells),
-      fdv: safeNum(bestRaw?.fdv),
-      pairCreatedAt: safeNum(bestRaw?.pairCreatedAt),
-      url: bestRaw?.url || "",
-      imageUrl: bestRaw?.info?.imageUrl || null,
-      description:
-        bestRaw?.info?.description || bestRaw?.info?.header || "",
-      links
-    };
-  }
-
-  async scanCA(ca, send) {
-    await send.text(`🧾 <b>Scanning CA</b>\n<code>${escapeHtml(ca)}</code>`);
-
-    const result = await this.candidateService.scanCA({
-      runtime: this.runtime,
-      fetchTokenByCA: (value) => this.fetchTokenByCA(value),
-      ca
-    });
-
-    if (!result) {
-      await send.text("❌ Token not found by CA.");
-      return;
-    }
-
-    const enrichedAnalyzed = await this.enrichCandidateForCopytrade(result.analyzed);
-
-    await send.photoOrText(
-      result.heroImage,
-      this.candidateService.buildHeroCaption(enrichedAnalyzed)
-    );
-
-    await send.text(
-      this.candidateService.buildAnalysisText(enrichedAnalyzed, result.plans)
-    );
-  }
-
-  // compatibility with current bot-router
-  buildPendingIntentText(limit = 10) {
-    return this.buildGMGNOrdersText(limit);
-  }
-
-  async markIntentSigned() {
-    return null;
-  }
-
-  async markIntentSubmitted() {
-    return null;
-  }
-
-  async markIntentConfirmed() {
-    return null;
-  }
-
-  async markIntentFailed() {
-    return null;
   }
 }
