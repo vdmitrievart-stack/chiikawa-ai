@@ -15,17 +15,33 @@ export default class WalletExecutionRouter {
     return runtimeConfig?.wallets?.[walletId] || null;
   }
 
-  validateWalletForStrategy(runtimeConfig, walletId, strategyKey) {
+  validateWalletForAnyUse(runtimeConfig, walletId) {
     const wallet = this.getWalletMeta(runtimeConfig, walletId);
     if (!wallet) return { ok: false, reason: "wallet_not_found" };
     if (!wallet.enabled) return { ok: false, reason: "wallet_disabled" };
+
+    if (wallet.executionMode === "live") {
+      if (!wallet.secretRef) return { ok: false, reason: "missing_secret_ref" };
+      const resolved = this.secretResolver.resolve(wallet.secretRef);
+      if (!resolved.ok) return { ok: false, reason: resolved.reason };
+    }
+
+    return { ok: true, reason: "ok", wallet };
+  }
+
+  validateWalletForStrategy(runtimeConfig, walletId, strategyKey) {
+    const base = this.validateWalletForAnyUse(runtimeConfig, walletId);
+    if (!base.ok) return base;
+
+    const wallet = base.wallet;
     if (
       Array.isArray(wallet.allowedStrategies) &&
       !wallet.allowedStrategies.includes(strategyKey)
     ) {
-      return { ok: false, reason: "strategy_not_allowed" };
+      return { ok: false, reason: "strategy_not_allowed", wallet };
     }
-    return { ok: true, wallet };
+
+    return { ok: true, reason: "ok", wallet };
   }
 
   getWalletIdsForStrategy(runtimeConfig, strategyKey) {
@@ -40,11 +56,12 @@ export default class WalletExecutionRouter {
   }
 
   buildExecutionEngine(runtimeConfig, walletId) {
-    const wallet = this.getWalletMeta(runtimeConfig, walletId);
-    if (!wallet) {
-      return { ok: false, reason: "wallet_not_found" };
+    const validated = this.validateWalletForAnyUse(runtimeConfig, walletId);
+    if (!validated.ok) {
+      return { ok: false, reason: validated.reason };
     }
 
+    const wallet = validated.wallet;
     const mode = wallet.executionMode || (runtimeConfig?.dryRun ? "dry_run" : "live");
     const cacheKey = `${walletId}:${mode}:${wallet.secretRef || ""}`;
 
@@ -52,10 +69,9 @@ export default class WalletExecutionRouter {
       return { ok: true, engine: this.cache.get(cacheKey), wallet };
     }
 
-    const live = mode === "live";
     let secretKeyBase58 = "";
 
-    if (live) {
+    if (mode === "live") {
       const resolved = this.secretResolver.resolve(wallet.secretRef || "");
       if (!resolved.ok) {
         return { ok: false, reason: resolved.reason };
@@ -68,17 +84,20 @@ export default class WalletExecutionRouter {
         logger: this.logger,
         rpcUrl: process.env.SOLANA_RPC_URL,
         jupiterApiKey: process.env.JUP_API_KEY,
-        isDryRun: !live,
-        secretKeyBase58: live
-          ? secretKeyBase58
-          : process.env.SOLANA_PRIVATE_KEY_BASE58 ||
-            "11111111111111111111111111111111"
+        isDryRun: mode !== "live",
+        secretKeyBase58:
+          mode === "live"
+            ? secretKeyBase58
+            : process.env.SOLANA_PRIVATE_KEY_BASE58 || "11111111111111111111111111111111"
       });
 
       this.cache.set(cacheKey, engine);
       return { ok: true, engine, wallet };
     } catch (error) {
-      return { ok: false, reason: error.message || "engine_build_failed" };
+      return {
+        ok: false,
+        reason: error?.message || "engine_build_failed"
+      };
     }
   }
 }
