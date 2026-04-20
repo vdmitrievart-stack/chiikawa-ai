@@ -16,6 +16,14 @@ function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+function hasPartialLadder(position) {
+  return Array.isArray(position?.runnerTargetsPct) && position.runnerTargetsPct.length > 0;
+}
+
+function usesPartialLadder(position) {
+  return ["runner", "migration_survivor"].includes(String(position?.strategy || ""));
+}
+
 export default class PositionService {
   constructor(options = {}) {
     this.logger = options.logger || console;
@@ -133,7 +141,11 @@ export default class PositionService {
           ? ((position.highestPrice - mark.currentPrice) / position.highestPrice) * 100
           : 0;
 
-      if (mark.grossPnlPct >= 24 && pullbackFromHighPct >= 11) {
+      if (mark.grossPnlPct >= 70 && pullbackFromHighPct >= 10) {
+        return { close: true, reason: "MIGRATION_TRAIL_HARD_EXIT" };
+      }
+
+      if (mark.grossPnlPct >= 35 && pullbackFromHighPct >= 12) {
         return { close: true, reason: "MIGRATION_TRAIL_EXIT" };
       }
 
@@ -141,11 +153,11 @@ export default class PositionService {
         return { close: true, reason: "MIGRATION_CORPSE_EXIT" };
       }
 
-      if (analyzedNow?.falseBounce?.rejected && mark.netPnlPct <= 5) {
+      if (analyzedNow?.falseBounce?.rejected && mark.netPnlPct <= 12) {
         return { close: true, reason: "MIGRATION_FALSE_BOUNCE_EXIT" };
       }
 
-      if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 10) {
+      if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 12) {
         return { close: true, reason: "MIGRATION_TIME_EXIT" };
       }
 
@@ -232,7 +244,11 @@ export default class PositionService {
       const mark = portfolioMarkPosition(p, latest.price);
       if (!mark) continue;
 
-      const partial = portfolioMaybeTakeRunnerPartial(p, latest.price);
+      const partial =
+        usesPartialLadder(p) && hasPartialLadder(p)
+          ? portfolioMaybeTakeRunnerPartial(p, latest.price)
+          : null;
+
       if (partial) {
         try {
           if (this.onExternalPartial) {
