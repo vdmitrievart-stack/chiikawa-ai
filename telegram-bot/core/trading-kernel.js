@@ -4,7 +4,8 @@ import {
   getStrategyConfig,
   resetPortfolio,
   setStrategyConfig,
-  getClosedTrades
+  getClosedTrades,
+  hydratePortfolioSnapshot
 } from "../portfolio.js";
 
 import {
@@ -80,6 +81,56 @@ function normalizePlanWithCopyVerdict(plan, copyVerdict) {
   return nextPlan;
 }
 
+function normalizeRestoredStrategyBudget(raw = {}) {
+  const hasMigration = Object.prototype.hasOwnProperty.call(raw || {}, "migration_survivor");
+  const oldFourTotal =
+    safeNum(raw?.scalp, 0) +
+    safeNum(raw?.reversal, 0) +
+    safeNum(raw?.runner, 0) +
+    safeNum(raw?.copytrade, 0);
+
+  if (!hasMigration && Math.abs(oldFourTotal - 1) < 0.001) {
+    return { ...DEFAULT_STRATEGY_BUDGET };
+  }
+
+  return {
+    scalp: safeNum(raw?.scalp, DEFAULT_STRATEGY_BUDGET.scalp),
+    reversal: safeNum(raw?.reversal, DEFAULT_STRATEGY_BUDGET.reversal),
+    runner: safeNum(raw?.runner, DEFAULT_STRATEGY_BUDGET.runner),
+    copytrade: safeNum(raw?.copytrade, DEFAULT_STRATEGY_BUDGET.copytrade),
+    migration_survivor: safeNum(
+      raw?.migration_survivor,
+      DEFAULT_STRATEGY_BUDGET.migration_survivor
+    )
+  };
+}
+
+function normalizeRestoredActiveConfig(raw = {}, fallbackStartBalance = 10) {
+  return buildDefaultRuntimeConfig({
+    ...raw,
+    startBalanceSol: safeNum(raw?.startBalanceSol, fallbackStartBalance),
+    strategyBudget: normalizeRestoredStrategyBudget(raw?.strategyBudget || {}),
+    strategyEnabled: {
+      scalp: raw?.strategyEnabled?.scalp !== false,
+      reversal: raw?.strategyEnabled?.reversal !== false,
+      runner: raw?.strategyEnabled?.runner !== false,
+      copytrade: raw?.strategyEnabled?.copytrade !== false,
+      migration_survivor: raw?.strategyEnabled?.migration_survivor !== false
+    },
+    wallets: clone(raw?.wallets || {}),
+    strategyRouting: clone(raw?.strategyRouting || {}),
+    copytrade: clone(
+      raw?.copytrade || {
+        enabled: true,
+        rescoringEnabled: true,
+        minLeaderScore: 70,
+        cooldownMinutes: 180,
+        leaders: []
+      }
+    )
+  });
+}
+
 export default class TradingKernel {
   constructor({
     walletRouter,
@@ -98,7 +149,8 @@ export default class TradingKernel {
     this.gmgnLeaderIntel = gmgnLeaderIntel;
     this.persistence = persistence || null;
 
-    this.startBalanceSol = safeNum(initialConfig?.startBalanceSol, 10);
+    this.defaultStartBalanceSol = safeNum(initialConfig?.startBalanceSol, 10);
+    this.startBalanceSol = this.defaultStartBalanceSol;
 
     this.runtime = createTradingRuntime(
       buildDefaultRuntimeConfig(
@@ -172,28 +224,73 @@ export default class TradingKernel {
   }
 
   async restoreIfAvailable() {
-    if (!this.persistence) return false;
+    let runtimeLoaded = false;
+    let portfolioLoaded = false;
 
-    const runtimeSnapshot = await this.persistence.loadRuntimeSnapshot();
-    if (!runtimeSnapshot) return false;
+    if (this.persistence) {
+      const runtimeSnapshot = await this.persistence.loadRuntimeSnapshot();
 
-    if (runtimeSnapshot?.runtime?.activeConfig) {
-      this.runtime.activeConfig = runtimeSnapshot.runtime.activeConfig;
-      this.runtime.pendingConfig = runtimeSnapshot.runtime.pendingConfig || null;
-      this.runtime.pendingReason = runtimeSnapshot.runtime.pendingReason || null;
-      this.runtime.pendingQueuedAt = runtimeSnapshot.runtime.pendingQueuedAt || null;
-      this.runtime.mode = "stopped";
-      this.runtime.strategyScope = "all";
-      this.runtime.stopRequested = false;
-      this.runtime.killRequested = false;
-      this.startBalanceSol = safeNum(
-        runtimeSnapshot.runtime.startBalanceSol,
-        this.startBalanceSol
-      );
-      this.syncPortfolioStrategyBudget();
+      if (runtimeSnapshot?.runtime?.activeConfig) {
+        this.runtime.activeConfig = normalizeRestoredActiveConfig(
+          runtimeSnapshot.runtime.activeConfig,
+          this.defaultStartBalanceSol
+        );
+
+        this.runtime.pendingConfig = runtimeSnapshot.runtime.pendingConfig
+          ? normalizeRestoredActiveConfig(
+              runtimeSnapshot.runtime.pendingConfig,
+              this.defaultStartBalanceSol
+            )
+          : null;
+
+        this.runtime.pendingReason = runtimeSnapshot.runtime.pendingReason || null;
+        this.runtime.pendingQueuedAt = runtimeSnapshot.runtime.pendingQueuedAt || null;
+        this.runtime.mode = "stopped";
+        this.runtime.strategyScope = "all";
+        this.runtime.stopRequested = false;
+        this.runtime.killRequested = false;
+        this.startBalanceSol = safeNum(
+          runtimeSnapshot.runtime.startBalanceSol,
+          this.defaultStartBalanceSol
+        );
+
+        runtimeLoaded = true;
+      }
     }
 
-    return true;
+    this.syncPortfolioStrategyBudget();
+
+    if (this.persistence) {
+      const portfolioSnapshot = await this.persistence.loadPortfolioSnapshot();
+      const savedPortfolio = portfolioSnapshot?.portfolio || null;
+
+      const hasMeaningfulHistory =
+        Boolean(savedPortfolio?.positions?.length) ||
+        Boolean(savedPortfolio?.closedTrades?.length);
+
+      if (!hasMeaningfulHistory && safeNum(this.startBalanceSol, 0) <= 1) {
+        this.startBalanceSol = this.defaultStartBalanceSol;
+      }
+
+      if (savedPortfolio && !(safeNum(savedPortfolio?.startBalance, 0) <= 1 && !hasMeaningfulHistory)) {
+        hydratePortfolioSnapshot(
+          portfolioSnapshot,
+          getStrategyConfig(),
+          this.startBalanceSol
+        );
+        portfolioLoaded = true;
+      }
+    }
+
+    if (!portfolioLoaded) {
+      resetPortfolio(this.startBalanceSol, getStrategyConfig());
+    }
+
+    if (!runtimeLoaded) {
+      await this.persistSnapshot();
+    }
+
+    return runtimeLoaded || portfolioLoaded;
   }
 
   async persistSnapshot() {
