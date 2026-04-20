@@ -25,7 +25,7 @@ function pctText(value) {
 
 export default class NotificationService {
   constructor(options = {}) {
-    this.send = options.send;
+    this.send = options.send || {};
     this.groupFormatter =
       options.groupFormatter || new GroupMessageFormatter();
     this.enableDebugPositionUpdates =
@@ -37,16 +37,39 @@ export default class NotificationService {
     return this.send.text(text, extra);
   }
 
-  async sendEntry(heroImage, position) {
+  async sendPhotoOrText(imageUrl, caption, extra = {}) {
     if (this.send?.photoOrText) {
-      await this.send.photoOrText(
-        heroImage,
-        this.buildControlEntryText(position)
-      );
+      return this.send.photoOrText(imageUrl, caption, extra);
     }
+    if (this.send?.text) {
+      return this.send.text(caption, extra);
+    }
+    return null;
+  }
 
-    if (isPublicEntry(position) && this.send?.publicPhotoOrText) {
-      const sent = await this.send.publicPhotoOrText(
+  async sendPublicText(text, extra = {}) {
+    if (!this.send?.publicText) return null;
+    return this.send.publicText(text, extra);
+  }
+
+  async sendPublicPhotoOrText(imageUrl, caption, extra = {}) {
+    if (this.send?.publicPhotoOrText) {
+      return this.send.publicPhotoOrText(imageUrl, caption, extra);
+    }
+    if (this.send?.publicText) {
+      return this.send.publicText(caption, extra);
+    }
+    return null;
+  }
+
+  async sendEntry(heroImage, position) {
+    await this.sendPhotoOrText(
+      heroImage,
+      this.buildControlEntryText(position)
+    );
+
+    if (isPublicEntry(position)) {
+      const sent = await this.sendPublicPhotoOrText(
         heroImage,
         this.groupFormatter.buildEntryPost(position)
       );
@@ -60,15 +83,13 @@ export default class NotificationService {
   }
 
   async sendExit(imageUrl, closedTrade) {
-    if (this.send?.photoOrText) {
-      await this.send.photoOrText(
-        imageUrl,
-        this.buildControlExitText(closedTrade)
-      );
-    }
+    await this.sendPhotoOrText(
+      imageUrl,
+      this.buildControlExitText(closedTrade)
+    );
 
-    if (isPublicExit(closedTrade) && this.send?.publicPhotoOrText) {
-      const sent = await this.send.publicPhotoOrText(
+    if (isPublicExit(closedTrade)) {
+      const sent = await this.sendPublicPhotoOrText(
         imageUrl,
         this.groupFormatter.buildExitPost(closedTrade)
       );
@@ -82,9 +103,7 @@ export default class NotificationService {
   }
 
   async sendRunnerPartial(position, partial) {
-    if (!this.send?.text) return null;
-
-    return this.send.text(
+    return this.sendText(
       `🪜 <b>PARTIAL</b>
 
 <b>Token:</b> ${escapeHtml(position?.token || position?.symbol || "-")}
@@ -96,9 +115,9 @@ export default class NotificationService {
   }
 
   async sendPositionUpdate(position, mark, reason) {
-    if (!this.enableDebugPositionUpdates || !this.send?.text) return null;
+    if (!this.enableDebugPositionUpdates) return null;
 
-    return this.send.text(
+    return this.sendText(
       `📍 <b>POSITION UPDATE</b>
 
 <b>Token:</b> ${escapeHtml(position?.token || position?.symbol || "-")}
