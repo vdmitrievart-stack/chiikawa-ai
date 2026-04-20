@@ -25,7 +25,7 @@ export default class GMGNExecutionService {
     this.defaultMode = asText(
       options.defaultMode || process.env.GMGN_EXECUTION_MODE,
       "dry_run"
-    ); // dry_run | external_manual | disabled
+    );
 
     this.defaultSlippagePct = safeNum(
       options.defaultSlippagePct ?? process.env.GMGN_DEFAULT_SLIPPAGE_PCT,
@@ -77,6 +77,7 @@ export default class GMGNExecutionService {
 
     if (amountSol <= 0) {
       if (strategy === "runner") amountSol = 1.2;
+      else if (strategy === "migration_survivor") amountSol = 0.9;
       else if (strategy === "copytrade") amountSol = 0.7;
       else if (strategy === "reversal") amountSol = 0.8;
       else amountSol = 0.5;
@@ -387,7 +388,13 @@ export default class GMGNExecutionService {
     const statusCounts = this.orderStore.countByStatus();
     const opCounts = this.orderStore.countByOperation();
 
-    const strategyLines = ["scalp", "reversal", "runner", "copytrade"]
+    const strategyLines = [
+      "scalp",
+      "reversal",
+      "runner",
+      "copytrade",
+      "migration_survivor"
+    ]
       .map((strategy) => {
         const walletId = this.walletService.getPrimaryWalletId(runtimeConfig, strategy);
         return `• ${strategy}: ${asText(walletId, "-")}`;
