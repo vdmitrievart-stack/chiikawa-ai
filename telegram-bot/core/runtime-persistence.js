@@ -9,40 +9,59 @@ export default class RuntimePersistence {
   constructor(options = {}) {
     this.logger = options.logger || console;
     this.baseDir = options.baseDir || path.resolve("./runtime-data");
-    this.filePath =
-      options.filePath || path.join(this.baseDir, "bot-runtime-snapshot.json");
+    this.runtimePath =
+      options.runtimePath || path.join(this.baseDir, "bot-runtime-snapshot.json");
+    this.portfolioPath =
+      options.portfolioPath || path.join(this.baseDir, "bot-portfolio-snapshot.json");
   }
 
   async ensureDir() {
     await fs.mkdir(this.baseDir, { recursive: true });
   }
 
-  async loadSnapshot() {
+  async loadJson(filePath) {
     await this.ensureDir();
     try {
-      const raw = await fs.readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" ? parsed : null;
+      const raw = await fs.readFile(filePath, "utf8");
+      return JSON.parse(raw);
     } catch (error) {
       if (error?.code !== "ENOENT") {
-        this.logger.log("runtime load error:", error.message);
+        this.logger.log("persistence load error:", error.message);
       }
       return null;
     }
   }
 
-  async saveSnapshot(snapshot) {
+  async saveJson(filePath, payload) {
     await this.ensureDir();
     try {
-      const payload = clone({
-        savedAt: new Date().toISOString(),
-        ...snapshot
-      });
-      await fs.writeFile(this.filePath, JSON.stringify(payload, null, 2), "utf8");
+      await fs.writeFile(filePath, JSON.stringify(clone(payload), null, 2), "utf8");
       return true;
     } catch (error) {
-      this.logger.log("runtime save error:", error.message);
+      this.logger.log("persistence save error:", error.message);
       return false;
     }
+  }
+
+  async loadRuntimeSnapshot() {
+    return this.loadJson(this.runtimePath);
+  }
+
+  async saveRuntimeSnapshot(snapshot) {
+    return this.saveJson(this.runtimePath, {
+      savedAt: new Date().toISOString(),
+      ...snapshot
+    });
+  }
+
+  async loadPortfolioSnapshot() {
+    return this.loadJson(this.portfolioPath);
+  }
+
+  async savePortfolioSnapshot(snapshot) {
+    return this.saveJson(this.portfolioPath, {
+      savedAt: new Date().toISOString(),
+      ...snapshot
+    });
   }
 }
