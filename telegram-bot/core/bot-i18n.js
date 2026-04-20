@@ -1,130 +1,374 @@
-export const I18N = {
-  ru: {
-    menu_run_multi: "🚀 Run Multi",
-    menu_run_scalp: "⚡ Run Scalp",
-    menu_run_reversal: "↩️ Run Reversal",
-    menu_run_runner: "🏃 Run Runner",
-    menu_run_copy: "📋 Run Copytrade",
-    menu_stop: "🛑 Stop",
-    menu_kill: "☠️ Kill",
-    menu_status: "📊 Status",
-    menu_intents: "🧾 Pending Intents",
-    menu_scan_market: "🔎 Scan Market",
-    menu_scan_ca: "🧾 Scan CA",
-    menu_balance: "💰 Balance",
-    menu_wallets: "👛 Wallets",
-    menu_copytrade: "📋 Copytrade",
-    menu_budget: "🧮 Budget",
-    menu_gmgn_status: "🛰 GMGN Status",
-    menu_gmgn_orders: "📦 GMGN Orders",
-    menu_leader_health: "🫀 Leader Health",
-    menu_sync_leaders: "🔄 Sync Leaders",
-    menu_language: "🌐 Language",
-    menu_export_csv: "📈 Export CSV",
-    menu_export_json: "📦 Export JSON",
-    menu_export_xlsx: "📊 Export XLSX",
-
-    ready: "🤖 <b>Бот готов</b>",
-    send_ca: "🧾 <b>Send CA</b>\n\nОтправь контракт следующим сообщением.",
-    invalid_ca: "❌ Это не похоже на валидный CA.",
-    scan_hint: "Сначала нажми <b>🧾 Scan CA</b>, потом отправь адрес.",
-    soft_stop:
-      "🛑 Мягкая остановка включена. Новые входы запрещены, открытые позиции будут сопровождаться до выхода.",
-    hard_kill: "☠️ Жесткая остановка выполнена.",
-    choose_lang: "🌐 Выбери язык:\n<code>lang ru</code> или <code>lang en</code>",
-    lang_set: "🌐 Язык переключен",
-    add_leader_prompt: "✍️ Отправь address лидера следующим сообщением.",
-    add_secret_prompt:
-      "🔐 Отправь в следующем сообщении строку вида:\n<code>wallet_id env:SECRET_NAME</code>",
-    pending_budget_saved: "✅ Pending budget сохранен",
-    leader_added: "✅ Лидер добавлен",
-    secret_saved: "✅ Secret ref сохранен",
-    leaders_synced: "✅ Лидеры синхронизированы",
-    run_started: "✅ Запуск выполнен",
-    pending_applied: "✅ Pending config применен",
-    unknown: "Используйте меню ниже.",
-    budget_invalid: "❌ Budget invalid. Sum must be 100.",
-    wallet_not_found: "❌ Wallet not found",
-    secret_format: "❌ Format: <code>wallet_id env:SECRET_NAME</code>",
-    pending_not_ready:
-      "Pending config not applied yet. Stop the bot and close positions first."
-  },
-  en: {
-    menu_run_multi: "🚀 Run Multi",
-    menu_run_scalp: "⚡ Run Scalp",
-    menu_run_reversal: "↩️ Run Reversal",
-    menu_run_runner: "🏃 Run Runner",
-    menu_run_copy: "📋 Run Copytrade",
-    menu_stop: "🛑 Stop",
-    menu_kill: "☠️ Kill",
-    menu_status: "📊 Status",
-    menu_intents: "🧾 Pending Intents",
-    menu_scan_market: "🔎 Scan Market",
-    menu_scan_ca: "🧾 Scan CA",
-    menu_balance: "💰 Balance",
-    menu_wallets: "👛 Wallets",
-    menu_copytrade: "📋 Copytrade",
-    menu_budget: "🧮 Budget",
-    menu_gmgn_status: "🛰 GMGN Status",
-    menu_gmgn_orders: "📦 GMGN Orders",
-    menu_leader_health: "🫀 Leader Health",
-    menu_sync_leaders: "🔄 Sync Leaders",
-    menu_language: "🌐 Language",
-    menu_export_csv: "📈 Export CSV",
-    menu_export_json: "📦 Export JSON",
-    menu_export_xlsx: "📊 Export XLSX",
-
-    ready: "🤖 <b>Bot ready</b>",
-    send_ca: "🧾 <b>Send CA</b>\n\nSend the token contract in the next message.",
-    invalid_ca: "❌ This does not look like a valid CA.",
-    scan_hint: "First press <b>🧾 Scan CA</b>, then send the address.",
-    soft_stop:
-      "🛑 Soft stop enabled. No new entries, existing positions will be managed until exit.",
-    hard_kill: "☠️ Hard stop executed.",
-    choose_lang: "🌐 Choose language:\n<code>lang ru</code> or <code>lang en</code>",
-    lang_set: "🌐 Language switched",
-    add_leader_prompt: "✍️ Send leader address in the next message.",
-    add_secret_prompt:
-      "🔐 Send a line in the next message like:\n<code>wallet_id env:SECRET_NAME</code>",
-    pending_budget_saved: "✅ Pending budget saved",
-    leader_added: "✅ Leader added",
-    secret_saved: "✅ Secret ref saved",
-    leaders_synced: "✅ Leaders synced",
-    run_started: "✅ Run started",
-    pending_applied: "✅ Pending config applied",
-    unknown: "Use the menu below.",
-    budget_invalid: "❌ Budget invalid. Sum must be 100.",
-    wallet_not_found: "❌ Wallet not found",
-    secret_format: "❌ Format: <code>wallet_id env:SECRET_NAME</code>",
-    pending_not_ready:
-      "Pending config not applied yet. Stop the bot and close positions first."
-  }
-};
-
-export function makeTranslator(getLang) {
-  return function t(key) {
-    const lang = (typeof getLang === "function" ? getLang() : "ru") || "ru";
-    return I18N[lang]?.[key] || I18N.ru[key] || key;
-  };
+function safeNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
 }
 
-export function buildKeyboard(t) {
-  return {
-    keyboard: [
-      [t("menu_run_multi"), t("menu_run_scalp")],
-      [t("menu_run_reversal"), t("menu_run_runner")],
-      [t("menu_run_copy"), t("menu_stop")],
-      [t("menu_kill"), t("menu_status")],
-      [t("menu_intents"), t("menu_scan_ca")],
-      [t("menu_scan_market"), t("menu_balance")],
-      [t("menu_wallets"), t("menu_budget")],
-      [t("menu_copytrade"), t("menu_gmgn_status")],
-      [t("menu_leader_health"), t("menu_sync_leaders")],
-      [t("menu_gmgn_orders"), t("menu_language")],
-      [t("menu_export_csv"), t("menu_export_json")],
-      [t("menu_export_xlsx")]
-    ],
-    resize_keyboard: true,
-    persistent: true
-  };
+function asText(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
+}
+
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function shortId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+export default class GMGNExecutionService {
+  constructor(options = {}) {
+    this.logger = options.logger || console;
+    this.walletService = options.walletService;
+    this.orderStore = options.orderStore;
+
+    this.defaultMode = asText(
+      options.defaultMode || process.env.GMGN_EXECUTION_MODE,
+      "dry_run"
+    ); // dry_run | external_manual | disabled
+
+    this.defaultSlippagePct = safeNum(
+      options.defaultSlippagePct ?? process.env.GMGN_DEFAULT_SLIPPAGE_PCT,
+      1
+    );
+
+    this.dryRunAutoFill = options.dryRunAutoFill !== false;
+  }
+
+  requireDeps() {
+    if (!this.walletService) {
+      throw new Error("GMGNExecutionService requires walletService");
+    }
+    if (!this.orderStore) {
+      throw new Error("GMGNExecutionService requires orderStore");
+    }
+  }
+
+  makeClientOrderId(strategy, walletId, tokenCa, side, operation) {
+    return [
+      "gmgn",
+      asText(strategy, "strategy"),
+      asText(operation, "op"),
+      asText(side, "side"),
+      asText(walletId, "wallet"),
+      asText(tokenCa, "token").slice(0, 10),
+      Date.now(),
+      shortId()
+    ].join("-");
+  }
+
+  normalizeSide(side) {
+    const s = asText(side, "BUY").toUpperCase();
+    return s === "SELL" ? "SELL" : "BUY";
+  }
+
+  normalizeOperation(operation) {
+    const op = asText(operation, "open").toLowerCase();
+    if (op === "close") return "close";
+    if (op === "partial") return "partial";
+    return "open";
+  }
+
+  estimateSizeFromIntent(intent = {}, operation = "open") {
+    const strategy = asText(intent.strategy).toLowerCase();
+    const edge = safeNum(intent.expectedEdgePct, 0);
+
+    let amountSol = safeNum(intent.amountSol, 0);
+
+    if (amountSol <= 0) {
+      if (strategy === "runner") amountSol = 1.2;
+      else if (strategy === "copytrade") amountSol = 0.7;
+      else if (strategy === "reversal") amountSol = 0.8;
+      else amountSol = 0.5;
+
+      if (edge >= 20) amountSol += 0.3;
+      if (edge >= 35) amountSol += 0.2;
+
+      if (operation === "partial") {
+        amountSol = Math.max(0.1, amountSol * 0.5);
+      }
+    }
+
+    return {
+      amountSol,
+      amountUsd: safeNum(intent.amountUsd, 0),
+      tokenAmount: safeNum(intent.tokenAmount, 0)
+    };
+  }
+
+  buildOrderPayload(runtimeConfig, {
+    walletId,
+    strategy,
+    operation,
+    side,
+    token,
+    intent = {},
+    note = ""
+  }) {
+    this.requireDeps();
+
+    const profile = this.walletService.getWalletExecutionProfile(runtimeConfig, walletId);
+    if (!profile) {
+      throw new Error(`Wallet profile not found for ${walletId}`);
+    }
+
+    const tokenObj = clone(token || {});
+    const normalizedOperation = this.normalizeOperation(operation);
+    const clientOrderId = this.makeClientOrderId(
+      strategy,
+      walletId,
+      tokenObj.ca,
+      side,
+      normalizedOperation
+    );
+
+    return {
+      orderId: "",
+      clientOrderId,
+      walletId,
+      gmgnWalletId: asText(profile.gmgnWalletId),
+      gmgnAccountId: asText(profile.gmgnAccountId),
+      strategy: asText(strategy),
+      operation: normalizedOperation,
+      side: this.normalizeSide(side),
+      status: "created",
+      token: {
+        name: asText(tokenObj.name),
+        symbol: asText(tokenObj.symbol),
+        ca: asText(tokenObj.ca),
+        chainId: asText(tokenObj.chainId),
+        dexId: asText(tokenObj.dexId),
+        url: asText(tokenObj.url)
+      },
+      size: this.estimateSizeFromIntent(
+        {
+          ...clone(intent),
+          strategy
+        },
+        normalizedOperation
+      ),
+      pricing: {
+        expectedEntryPrice: safeNum(intent.expectedEntryPrice ?? tokenObj.price, 0),
+        executedEntryPrice: 0,
+        expectedExitPrice: safeNum(intent.expectedExitPrice, 0),
+        executedExitPrice: 0,
+        slippagePct: safeNum(intent.slippagePct, this.defaultSlippagePct)
+      },
+      source: "gmgn",
+      mode: asText(profile.executionMode, this.defaultMode),
+      note: asText(note),
+      reason: "",
+      signature: "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      history: [],
+      raw: {
+        walletProfile: profile,
+        intent: clone(intent)
+      }
+    };
+  }
+
+  buildDryRunFillPatch(order) {
+    const operation = this.normalizeOperation(order?.operation);
+    const side = this.normalizeSide(order?.side);
+    const expectedEntryPrice = safeNum(order?.pricing?.expectedEntryPrice, 0);
+    const expectedExitPrice = safeNum(order?.pricing?.expectedExitPrice, 0);
+
+    const pricing = {
+      expectedEntryPrice,
+      executedEntryPrice: 0,
+      expectedExitPrice,
+      executedExitPrice: 0,
+      slippagePct: safeNum(order?.pricing?.slippagePct, this.defaultSlippagePct)
+    };
+
+    if (operation === "open" && side === "BUY") {
+      pricing.executedEntryPrice = expectedEntryPrice;
+    } else {
+      pricing.executedExitPrice = expectedExitPrice > 0 ? expectedExitPrice : expectedEntryPrice;
+    }
+
+    return {
+      operation,
+      note: `dry_run auto-filled (${operation})`,
+      pricing
+    };
+  }
+
+  async createOrder(runtimeConfig, params) {
+    const payload = this.buildOrderPayload(runtimeConfig, params);
+    return this.orderStore.createOrder(payload);
+  }
+
+  async submitOrder(runtimeConfig, params) {
+    const order = await this.createOrder(runtimeConfig, params);
+    const mode = asText(order?.mode, this.defaultMode);
+
+    if (mode === "disabled") {
+      return this.orderStore.markFailed(
+        { clientOrderId: order.clientOrderId },
+        {
+          operation: order.operation,
+          reason: "execution_disabled",
+          note: "GMGN execution disabled"
+        }
+      );
+    }
+
+    const submitted = await this.orderStore.markSubmitted(
+      { clientOrderId: order.clientOrderId },
+      {
+        operation: order.operation,
+        note:
+          mode === "external_manual"
+            ? "waiting for external GMGN wallet execution"
+            : `submitted (${mode})`
+      }
+    );
+
+    if (mode === "dry_run" && this.dryRunAutoFill) {
+      return this.orderStore.markFilled(
+        { clientOrderId: order.clientOrderId },
+        this.buildDryRunFillPatch(submitted || order)
+      );
+    }
+
+    if (mode === "external_manual" || mode === "dry_run") {
+      return this.orderStore.findOrder({ clientOrderId: order.clientOrderId });
+    }
+
+    return this.orderStore.markFailed(
+      { clientOrderId: order.clientOrderId },
+      {
+        operation: order.operation,
+        reason: "unsupported_execution_mode",
+        note: `mode=${mode}`
+      }
+    );
+  }
+
+  async executeOpen(runtimeConfig, {
+    walletId,
+    strategy,
+    token,
+    intent = {},
+    note = ""
+  }) {
+    return this.submitOrder(runtimeConfig, {
+      walletId,
+      strategy,
+      operation: "open",
+      side: "BUY",
+      token,
+      intent,
+      note
+    });
+  }
+
+  async executeClose(runtimeConfig, {
+    walletId,
+    strategy,
+    token,
+    intent = {},
+    note = ""
+  }) {
+    return this.submitOrder(runtimeConfig, {
+      walletId,
+      strategy,
+      operation: "close",
+      side: "SELL",
+      token,
+      intent,
+      note
+    });
+  }
+
+  async executePartial(runtimeConfig, {
+    walletId,
+    strategy,
+    token,
+    soldFraction = 0,
+    currentPrice = 0,
+    intent = {},
+    note = ""
+  }) {
+    return this.submitOrder(runtimeConfig, {
+      walletId,
+      strategy,
+      operation: "partial",
+      side: "SELL",
+      token,
+      intent: {
+        ...clone(intent),
+        soldFraction: safeNum(soldFraction, 0),
+        expectedExitPrice: safeNum(currentPrice, 0)
+      },
+      note: note || `partial sell ${safeNum(soldFraction, 0)}`
+    });
+  }
+
+  async markOrderFilled(identifier, patch = {}) {
+    return this.orderStore.markFilled(identifier, patch);
+  }
+
+  async markOrderPartial(identifier, patch = {}) {
+    return this.orderStore.markPartial(identifier, patch);
+  }
+
+  async markOrderFailed(identifier, patch = {}) {
+    return this.orderStore.markFailed(identifier, patch);
+  }
+
+  async markOrderCancelled(identifier, patch = {}) {
+    return this.orderStore.markCancelled(identifier, patch);
+  }
+
+  getOrder(identifier = {}) {
+    return this.orderStore.findOrder(identifier);
+  }
+
+  listOpenOrders() {
+    return this.orderStore.listOpenOrders();
+  }
+
+  buildOrdersText(limit = 15) {
+    return this.orderStore.buildOrdersText(limit);
+  }
+
+  buildExecutionSummaryText(runtimeConfig) {
+    const openOrders = this.listOpenOrders();
+    const mode = asText(this.defaultMode, "dry_run");
+    const statusCounts = this.orderStore.countByStatus();
+    const opCounts = this.orderStore.countByOperation();
+
+    const strategyLines = ["scalp", "reversal", "runner", "copytrade"]
+      .map((strategy) => {
+        const walletId = this.walletService.getPrimaryWalletId(runtimeConfig, strategy);
+        return `• ${strategy}: ${asText(walletId, "-")}`;
+      })
+      .join("\n");
+
+    return `📦 <b>GMGN Execution</b>
+
+mode: ${mode}
+open orders: ${openOrders.length}
+default slippage pct: ${safeNum(this.defaultSlippagePct, 0)}
+
+<b>Status counters</b>
+created: ${safeNum(statusCounts.created)}
+submitted: ${safeNum(statusCounts.submitted)}
+filled: ${safeNum(statusCounts.filled)}
+partial: ${safeNum(statusCounts.partial)}
+failed: ${safeNum(statusCounts.failed)}
+cancelled: ${safeNum(statusCounts.cancelled)}
+
+<b>Operation counters</b>
+open: ${safeNum(opCounts.open)}
+close: ${safeNum(opCounts.close)}
+partial: ${safeNum(opCounts.partial)}
+
+<b>Primary wallets</b>
+${strategyLines}`;
+  }
 }
