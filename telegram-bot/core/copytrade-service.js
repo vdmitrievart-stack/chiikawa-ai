@@ -53,7 +53,14 @@ export default class CopytradeService {
       copytradeHardStopPct: safeNum(options.copytradeHardStopPct, 7),
       leaderPenaltyOnRejectedTrap: safeNum(options.leaderPenaltyOnRejectedTrap, 6),
       leaderPenaltyOnHardTrap: safeNum(options.leaderPenaltyOnHardTrap, 12),
-      leaderRewardOnAcceptedQuality: safeNum(options.leaderRewardOnAcceptedQuality, 2)
+      leaderRewardOnAcceptedQuality: safeNum(options.leaderRewardOnAcceptedQuality, 2),
+
+      entryUsesLeader: options.entryUsesLeader !== false,
+      exitUsesLeaderMode: asText(options.exitUsesLeaderMode, "soft_only"),
+      leaderSellTightensStop: options.leaderSellTightensStop !== false,
+      leaderSellImmediateExit: options.leaderSellImmediateExit === true,
+      ownTpPriority: options.ownTpPriority !== false,
+      ownTrailPriority: options.ownTrailPriority !== false
     };
   }
 
@@ -342,6 +349,18 @@ export default class CopytradeService {
     return clone(leader);
   }
 
+  buildExecutionModeText() {
+    const r = this.rules;
+    return `🧠 <b>Execution Model</b>
+entry by leader: ${r.entryUsesLeader ? "yes" : "no"}
+exit by bot strategy: yes
+leader sell mode: ${asText(r.exitUsesLeaderMode, "soft_only")}
+leader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}
+leader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}
+own TP priority: ${r.ownTpPriority ? "yes" : "no"}
+own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
+  }
+
   buildCopytradeText(runtimeConfig) {
     const leaders = this.copytradeManager.listLeaders(runtimeConfig);
     const r = this.rules;
@@ -359,6 +378,8 @@ export default class CopytradeService {
     lines.push(`min liquidity usd: ${r.minLiquidityUsd}`);
     lines.push(`max concentration: ${r.maxHolderConcentration}`);
     lines.push(`hard stop pct: ${r.copytradeHardStopPct}`);
+    lines.push("");
+    lines.push(this.buildExecutionModeText());
     lines.push("");
 
     if (!leaders.length) {
