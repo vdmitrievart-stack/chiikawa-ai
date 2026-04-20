@@ -3,81 +3,107 @@ function safeNum(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
 export default class GMGNLeaderIntelService {
   constructor(options = {}) {
-    this.client = options.client;
     this.logger = options.logger || console;
-    this.cacheMs = Number.isFinite(options.cacheMs) ? options.cacheMs : 90_000;
-    this.map = new Map();
+    this.cache = new Map();
+    this.enabled = process.env.GMGN_ENABLED === "true";
+    this.mode = process.env.GMGN_MODE || "intel";
+    this.autoRefreshSec = safeNum(process.env.GMGN_AUTO_REFRESH_SEC, 90);
+    this.minRecentWinrate = safeNum(process.env.GMGN_MIN_LEADER_RECENT_WINRATE, 55);
+    this.minRecentPnlPct = safeNum(process.env.GMGN_MIN_LEADER_RECENT_PNL_PCT, 0);
+    this.maxLeaderDrawdownPct = safeNum(process.env.GMGN_MAX_LEADER_DRAWDOWN_PCT, 25);
+    this.cooldownMin = safeNum(process.env.GMGN_LEADER_COOLDOWN_MIN, 180);
   }
 
-  normalizeLeader(address, payload = {}) {
-    const stats = payload?.stats || payload?.data || payload || {};
-    const recentWinRate = safeNum(stats.recentWinRate, safeNum(stats.winRate30dPct, 0));
-    const recentPnlPct = safeNum(stats.recentPnlPct, safeNum(stats.pnl30dPct, 0));
-    const maxDrawdownPct = safeNum(stats.maxDrawdownPct, 0);
-    const medianRoi = safeNum(stats.medianRoi, 1);
-    const chasePenalty = safeNum(stats.chasePenalty, 0);
-    const dumpPenalty = safeNum(stats.dumpPenalty, 0);
-    const consistency = safeNum(stats.consistencyScore, 0.5);
+  getHealth() {
+    return {
+      enabled: this.enabled,
+      mode: this.mode,
+      autoRefreshSec: this.autoRefreshSec,
+      minRecentWinrate: this.minRecentWinrate,
+      minRecentPnlPct: this.minRecentPnlPct,
+      maxLeaderDrawdownPct: this.maxLeaderDrawdownPct,
+      cooldownMin: this.cooldownMin,
+      cachedLeaders: this.cache.size
+    };
+  }
+
+  buildMockIntel(address) {
+    const seed = String(address || "").length;
+    const recentWinrate = 52 + (seed % 21);
+    const recentPnlPct = -2 + (seed % 13);
+    const maxDrawdownPct = 8 + (seed % 18);
 
     let score = 50;
-    if (recentWinRate >= 65) score += 12;
-    else if (recentWinRate < 45) score -= 15;
+    score += recentWinrate >= this.minRecentWinrate ? 15 : -12;
+    score += recentPnlPct >= this.minRecentPnlPct ? 10 : -10;
+    score += maxDrawdownPct <= this.maxLeaderDrawdownPct ? 12 : -15;
 
-    if (recentPnlPct >= 40) score += 12;
-    else if (recentPnlPct < -10) score -= 12;
-
-    if (medianRoi >= 1.5) score += 8;
-    else if (medianRoi < 1) score -= 8;
-
-    if (maxDrawdownPct > 18) score -= 15;
-    if (chasePenalty > 0.55) score -= 10;
-    if (dumpPenalty > 0.45) score -= 10;
-    if (consistency >= 0.7) score += 8;
-
-    score = Math.max(0, Math.min(100, Math.round(score)));
-
-    let state = "active";
-    if (score < 55 || maxDrawdownPct > 20) state = "cooldown";
-    else if (score < 70) state = "watch";
+    let state = "watch";
+    if (score >= 82) state = "active";
+    else if (score >= 65) state = "watch";
+    else if (score >= 45) state = "cooldown";
+    else state = "ignored";
 
     return {
       address,
       score,
-      state,
-      recentWinRate,
+      recentWinrate,
       recentPnlPct,
       maxDrawdownPct,
-      medianRoi,
-      chasePenalty,
-      dumpPenalty,
-      consistency,
-      refreshedAt: Date.now(),
-      raw: payload
+      state,
+      source: this.enabled ? "gmgn_ready_mock" : "mock",
+      lastSyncAt: nowIso(),
+      reasons: [
+        `recentWinrate=${recentWinrate}`,
+        `recentPnlPct=${recentPnlPct}`,
+        `maxDrawdownPct=${maxDrawdownPct}`
+      ]
     };
   }
 
   async getLeaderIntel(address) {
     const key = String(address || "").trim();
-    if (!key) return null;
-
-    const cached = this.map.get(key);
-    if (cached && Date.now() - cached.refreshedAt < this.cacheMs) {
-      return cached;
+    if (!key) {
+      return {
+        address: "",
+        score: 0,
+        recentWinrate: 0,
+        recentPnlPct: 0,
+        maxDrawdownPct: 100,
+        state: "ignored",
+        source: "empty",
+        lastSyncAt: nowIso(),
+        reasons: ["empty_address"]
+      };
     }
 
-    if (!this.client) {
-      return this.normalizeLeader(key, {});
+    const cached = this.cache.get(key);
+    const now = Date.now();
+    if (cached && now - safeNum(cached.cachedAt) < this.autoRefreshSec * 1000) {
+      return cached.value;
     }
 
-    const stats = await this.client.fetchLeaderStats(key);
-    if (!stats?.ok) {
-      return cached || this.normalizeLeader(key, { stats: {} });
-    }
+    const intel = this.buildMockIntel(key);
 
-    const normalized = this.normalizeLeader(key, stats.data);
-    this.map.set(key, normalized);
-    return normalized;
+    this.cache.set(key, {
+      cachedAt: now,
+      value: intel
+    });
+
+    return intel;
+  }
+
+  async refreshMany(addresses = []) {
+    const results = [];
+    for (const address of addresses) {
+      results.push(await this.getLeaderIntel(address));
+    }
+    return results;
   }
 }
