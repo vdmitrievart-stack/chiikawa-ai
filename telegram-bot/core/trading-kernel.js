@@ -584,8 +584,37 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
     await this.persistSnapshot();
   }
 
+  buildCopytradeStatusSummary() {
+    const leaders = this.runtime.activeConfig?.copytrade?.leaders || [];
+    if (!leaders.length) {
+      return `📋 <b>Copytrade status</b>
+leader: -
+state: -
+score: 0
+rejected traps: 0
+accepted good: 0
+pending intents: ${this.txStore.listPendingIntents().length}`;
+    }
+
+    const sorted = [...leaders].sort(
+      (a, b) => safeNum(b?.score, 0) - safeNum(a?.score, 0)
+    );
+    const leader = sorted[0] || {};
+
+    return `📋 <b>Copytrade status</b>
+leader: ${escapeHtml(leader.address || "-")}
+state: ${escapeHtml(leader.state || "-")}
+score: ${safeNum(leader.score, 0)}
+rejected traps: ${safeNum(leader.rejectedTrapCount, 0)}
+accepted good: ${safeNum(leader.acceptedGoodCount, 0)}
+pending intents: ${this.txStore.listPendingIntents().length}`;
+  }
+
   buildStatusText() {
-    return buildDashboard(this.runtime, getPortfolio());
+    const base = buildDashboard(this.runtime, getPortfolio());
+    return `${base}
+
+${this.buildCopytradeStatusSummary()}`;
   }
 
   buildBalanceText() {
