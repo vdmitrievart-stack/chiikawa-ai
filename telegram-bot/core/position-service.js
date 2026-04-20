@@ -19,7 +19,8 @@ function clone(value) {
 export default class PositionService {
   constructor(options = {}) {
     this.logger = options.logger || console;
-    this.walletOrchestrator = options.walletOrchestrator || null;
+    this.onExternalClose = options.onExternalClose || null;
+    this.onExternalPartial = options.onExternalPartial || null;
   }
 
   getPositions() {
@@ -29,7 +30,9 @@ export default class PositionService {
   buildCopytradeExitState(position, analyzedNow) {
     const meta = clone(position.copytradeExitState || {});
     const leaderTrade = analyzedNow?.leaderTrade || null;
-    const leaderSold = Boolean(leaderTrade?.action === "sell" || analyzedNow?.copytradeMeta?.leaderSold);
+    const leaderSold = Boolean(
+      leaderTrade?.action === "sell" || analyzedNow?.copytradeMeta?.leaderSold
+    );
 
     if (!meta.createdAt) meta.createdAt = Date.now();
     if (!meta.mode) meta.mode = "independent_exit";
@@ -202,14 +205,17 @@ export default class PositionService {
 
       const partial = portfolioMaybeTakeRunnerPartial(p, latest.price);
       if (partial) {
-        if (this.walletOrchestrator) {
-          await this.walletOrchestrator.executePartial(runtimeConfig, {
-            walletId: p.walletId,
-            position: p,
-            targetPct: partial.targetPct,
-            soldFraction: partial.soldFraction,
-            currentPrice: latest.price
-          });
+        try {
+          if (this.onExternalPartial) {
+            await this.onExternalPartial({
+              runtimeConfig,
+              position: p,
+              partial,
+              latestPrice: latest.price
+            });
+          }
+        } catch (error) {
+          this.logger.log("external partial hook error:", error.message);
         }
 
         await notificationService.sendRunnerPartial(p, partial);
@@ -221,13 +227,17 @@ export default class PositionService {
       await notificationService.sendPositionUpdate(p, mark, verdict.reason);
 
       if (verdict.close) {
-        if (this.walletOrchestrator) {
-          await this.walletOrchestrator.executeClose(runtimeConfig, {
-            walletId: p.walletId,
-            position: p,
-            reason: verdict.reason,
-            exitReferencePrice: latest.price
-          });
+        try {
+          if (this.onExternalClose) {
+            await this.onExternalClose({
+              runtimeConfig,
+              position: p,
+              reason: verdict.reason,
+              latestPrice: latest.price
+            });
+          }
+        } catch (error) {
+          this.logger.log("external close hook error:", error.message);
         }
 
         const closed = portfolioClosePosition(p.id, latest.price, verdict.reason);
@@ -290,41 +300,23 @@ export default class PositionService {
     });
   }
 
-  async orchestrateAndOpen(runtimeConfig, { plan, candidate, heroImage, walletId }) {
-    if (this.walletOrchestrator) {
-      const { execution } = await this.walletOrchestrator.executeOpen(runtimeConfig, {
-        walletId,
-        plan,
-        candidate,
-        heroImage
-      });
-
-      if (!execution?.ok) {
-        return null;
-      }
-    }
-
-    return this.maybeOpenPosition({
-      plan,
-      candidate,
-      heroImage,
-      walletId
-    });
-  }
-
   async forceCloseAll(runtimeConfig, reason = "KILL_SWITCH") {
     const closed = [];
 
     for (const p of [...portfolioGetPositions()]) {
       const price = p.lastPrice || p.entryReferencePrice;
 
-      if (this.walletOrchestrator) {
-        await this.walletOrchestrator.executeClose(runtimeConfig, {
-          walletId: p.walletId,
-          position: p,
-          reason,
-          exitReferencePrice: price
-        });
+      try {
+        if (this.onExternalClose) {
+          await this.onExternalClose({
+            runtimeConfig,
+            position: p,
+            reason,
+            latestPrice: price
+          });
+        }
+      } catch (error) {
+        this.logger.log("external close hook error:", error.message);
       }
 
       const row = portfolioClosePosition(p.id, price, reason);
