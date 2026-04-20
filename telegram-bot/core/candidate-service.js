@@ -168,6 +168,74 @@ export default class CandidateService {
     return Math.max(0, Math.min(99, Math.round(score)));
   }
 
+  buildMigrationSignals(token, extra = {}) {
+    const now = Date.now();
+    const pairCreatedAt = safeNum(token?.pairCreatedAt, 0);
+    const pairAgeMin = pairCreatedAt > 0 ? Math.max(0, (now - pairCreatedAt) / 60000) : 99999;
+
+    const liquidity = safeNum(token?.liquidity, 0);
+    const volume = safeNum(token?.volume, 0);
+    const txns = safeNum(token?.txns, 0);
+    const fdv = safeNum(token?.fdv, 0);
+    const socialCount = safeNum(extra?.socialCount, 0);
+    const buyPressure = safeNum(extra?.buyPressure, 0);
+    const priceDeltaPct = safeNum(extra?.priceDeltaPct, 0);
+
+    const fdvLiquidityRatio = liquidity > 0 ? fdv / Math.max(liquidity, 1) : 999;
+    const liqToMcapPct = fdv > 0 ? (liquidity / Math.max(fdv, 1)) * 100 : 0;
+    const volToLiqPct = liquidity > 0 ? (volume / Math.max(liquidity, 1)) * 100 : 0;
+
+    let survivorScore = 0;
+
+    if (pairAgeMin >= 10 && pairAgeMin <= 120) survivorScore += 18;
+    else if (pairAgeMin >= 5 && pairAgeMin <= 180) survivorScore += 10;
+
+    if (liquidity >= 15000) survivorScore += 14;
+    if (liquidity >= 25000) survivorScore += 8;
+
+    if (volume >= 15000) survivorScore += 10;
+    if (volume >= 50000) survivorScore += 8;
+
+    if (txns >= 100) survivorScore += 8;
+    if (txns >= 300) survivorScore += 6;
+
+    if (fdv >= 25000 && fdv <= 250000) survivorScore += 12;
+    else if (fdv >= 15000 && fdv <= 400000) survivorScore += 6;
+
+    if (liqToMcapPct >= 20) survivorScore += 8;
+    if (volToLiqPct >= 25) survivorScore += 8;
+    if (buyPressure >= 52) survivorScore += 6;
+    if (priceDeltaPct >= 8 && priceDeltaPct <= 140) survivorScore += 8;
+    if (socialCount >= 1) survivorScore += 4;
+
+    const inAgeWindow = pairAgeMin >= 10 && pairAgeMin <= 180;
+    const retainedLiquidity = liquidity >= 15000;
+    const retainedFlow = volume >= 15000 && txns >= 100;
+    const mcapWindow = fdv >= 25000 && fdv <= 250000;
+    const demandHealthy = buyPressure >= 50 && volToLiqPct >= 20;
+
+    const passes =
+      inAgeWindow &&
+      retainedLiquidity &&
+      retainedFlow &&
+      mcapWindow &&
+      demandHealthy &&
+      survivorScore >= 50;
+
+    return {
+      pairAgeMin,
+      liqToMcapPct,
+      volToLiqPct,
+      survivorScore,
+      inAgeWindow,
+      retainedLiquidity,
+      retainedFlow,
+      mcapWindow,
+      demandHealthy,
+      passes
+    };
+  }
+
   analyzeToken(token) {
     const links = Array.isArray(token?.links) ? token.links : [];
     const linksMap = this.buildLinksMap(links);
@@ -195,7 +263,6 @@ export default class CandidateService {
     const fdvLiquidityRatio =
       liquidity > 0 && fdv > 0 ? fdv / Math.max(liquidity, 1) : 4;
 
-    // Только proxy, не даем ему улетать в 100.
     const proxyConcentration = Math.round(
       Math.min(65, Math.max(18, fdvLiquidityRatio * 2))
     );
@@ -246,12 +313,22 @@ export default class CandidateService {
     const tokenType = "meme";
     const rewardModel = "None";
 
+    const migration = this.buildMigrationSignals(token, {
+      socialCount,
+      buyPressure,
+      priceDeltaPct
+    });
+
     const reasons = [
       "solana chain only",
       liquidity >= 12000 ? "liquidity acceptable" : "liquidity moderate",
       socialCount > 0 ? "socials detected" : "no socials",
       buyPressure >= 50 ? "buy pressure acceptable" : "buy pressure weak"
     ];
+
+    if (migration.passes) {
+      reasons.push("post-migration survivor profile");
+    }
 
     return {
       token,
@@ -307,6 +384,7 @@ export default class CandidateService {
         tokenType,
         rewardModel
       },
+      migration,
       dexPaid: false,
       copytradeMeta: {
         followDelaySec: 0,
@@ -321,6 +399,7 @@ export default class CandidateService {
     const analyzed = this.analyzeToken(token);
 
     const priceDeltaPct =
+      safeNum(pair?.priceChange?.m5, 0) ||
       safeNum(pair?.priceChange?.h1, 0) ||
       safeNum(pair?.priceChange?.h6, 0) ||
       safeNum(pair?.priceChange?.h24, 0);
@@ -339,6 +418,15 @@ export default class CandidateService {
     if (boostsActive > 0) {
       analyzed.reasons.push(`dex boost active ${boostsActive}`);
     }
+
+    analyzed.migration = this.buildMigrationSignals(token, {
+      socialCount: safeNum(analyzed?.socials?.socialCount, 0),
+      buyPressure:
+        safeNum(token?.buys, 0) + safeNum(token?.sells, 0) > 0
+          ? (safeNum(token?.buys, 0) / Math.max(safeNum(token?.buys, 0) + safeNum(token?.sells, 0), 1)) * 100
+          : 0,
+      priceDeltaPct
+    });
 
     return analyzed;
   }
@@ -395,6 +483,22 @@ export default class CandidateService {
       });
     }
 
+    if (candidate?.migration?.passes) {
+      plans.push({
+        strategyKey: "migration_survivor",
+        thesis: "Post-migration survivor with retained demand",
+        plannedHoldMs: 3 * 60 * 60 * 1000,
+        stopLossPct: 8,
+        takeProfitPct: 0,
+        runnerTargetsPct: [25, 50, 80],
+        signalScore: Math.max(score, safeNum(candidate?.migration?.survivorScore, 0)),
+        expectedEdgePct: 22,
+        entryMode: "NORMAL",
+        planName: "Migration Survivor",
+        objective: "post-migration expansion"
+      });
+    }
+
     if (score >= 86) {
       plans.push({
         strategyKey: "runner",
@@ -428,10 +532,23 @@ export default class CandidateService {
     return pairs
       .map((pair) => this.analyzePair(pair))
       .filter((candidate) => isSolanaChain(candidate?.token?.chainId))
-      .filter((candidate) => safeNum(candidate?.score, 0) >= 65)
-      .sort((a, b) => {
+      .filter((candidate) => {
         return (
-          safeNum(b?.score, 0) - safeNum(a?.score, 0) ||
+          safeNum(candidate?.score, 0) >= 65 ||
+          Boolean(candidate?.migration?.passes)
+        );
+      })
+      .sort((a, b) => {
+        const bScore = Math.max(
+          safeNum(b?.score, 0),
+          safeNum(b?.migration?.survivorScore, 0)
+        );
+        const aScore = Math.max(
+          safeNum(a?.score, 0),
+          safeNum(a?.migration?.survivorScore, 0)
+        );
+        return (
+          bScore - aScore ||
           safeNum(b?.token?.liquidity, 0) - safeNum(a?.token?.liquidity, 0) ||
           safeNum(b?.token?.volume, 0) - safeNum(a?.token?.volume, 0)
         );
@@ -476,11 +593,13 @@ export default class CandidateService {
     return `🧭 <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
 chain: ${escapeHtml(token.chainId || "-")}
 score: ${safeNum(candidate?.score, 0)}
+migration score: ${safeNum(candidate?.migration?.survivorScore, 0)}
 price: ${safeNum(token.price, 0)}
 liquidity: ${safeNum(token.liquidity, 0)}
 volume 24h: ${safeNum(token.volume, 0)}
 txns 24h: ${safeNum(token.txns, 0)}
 fdv: ${safeNum(token.fdv, 0)}
+pair age min: ${safeNum(candidate?.migration?.pairAgeMin, 0).toFixed(1)}
 dex: ${escapeHtml(token.dexId || "-")}
 url: ${escapeHtml(token.url || "-")}`;
   }
@@ -489,6 +608,7 @@ url: ${escapeHtml(token.url || "-")}`;
     const token = candidate?.token || {};
     const socials = candidate?.socials?.links || {};
     const planLine = plans.map((p) => p.strategyKey).join(", ") || "none";
+    const migration = candidate?.migration || {};
 
     return `🔎 <b>ANALYSIS</b>
 
@@ -512,6 +632,13 @@ FDV: ${safeNum(token.fdv, 0)}
 🧩 Token Type: ${escapeHtml(candidate?.mechanics?.tokenType || "-")}
 🎁 Reward Model: ${escapeHtml(candidate?.mechanics?.rewardModel || "-")}
 💵 Dex Paid: ${candidate?.dexPaid ? "yes" : "no"}
+
+🌊 Migration:
+pair age min: ${safeNum(migration?.pairAgeMin, 0).toFixed(1)}
+survivor score: ${safeNum(migration?.survivorScore, 0)}
+liq/mcap %: ${safeNum(migration?.liqToMcapPct, 0).toFixed(1)}
+vol/liq %: ${safeNum(migration?.volToLiqPct, 0).toFixed(1)}
+passes: ${migration?.passes ? "yes" : "no"}
 
 Narrative summary:
 ${escapeHtml(candidate?.narrative?.summary || "No narrative available.")}
