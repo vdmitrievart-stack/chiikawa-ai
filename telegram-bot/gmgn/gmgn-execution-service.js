@@ -1,864 +1,419 @@
-import {
-  getPortfolio,
-  getPositions,
-  getStrategyConfig,
-  resetPortfolio,
-  setStrategyConfig,
-  getClosedTrades
-} from "../portfolio.js";
-
-import {
-  buildDashboard,
-  buildBalanceText,
-  buildPeriodicReport
-} from "./reporting-engine.js";
-
-import {
-  DEFAULT_STRATEGY_BUDGET,
-  validateBudgetPercents,
-  formatBudgetLines
-} from "./budget-manager.js";
-
-import {
-  buildDefaultRuntimeConfig,
-  createTradingRuntime,
-  startRuntime,
-  requestStop,
-  requestKill,
-  finishRuntime,
-  queuePendingConfig,
-  canApplyPendingConfig,
-  applyPendingConfig,
-  canOpenNewPositions
-} from "./trading-runtime.js";
-
-import CandidateService from "./candidate-service.js";
-import PositionService from "./position-service.js";
-import CopytradeService from "./copytrade-service.js";
-import NotificationService from "./notification-service.js";
-
-import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
-import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
-import GMGNExecutionService from "../gmgn/gmgn-execution-service.js";
-
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-function escapeHtml(input) {
-  return String(input ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function asText(v, fallback = "") {
+  const s = String(v ?? "").trim();
+  return s || fallback;
 }
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
-function normalizePlanWithCopyVerdict(plan, copyVerdict) {
-  const nextPlan = clone(plan);
-
-  if (copyVerdict?.mode === "probe_only") {
-    nextPlan.entryMode = "PROBE";
-  }
-
-  if (copyVerdict?.adjustedPlan?.forceEntryMode) {
-    nextPlan.entryMode = copyVerdict.adjustedPlan.forceEntryMode;
-  }
-
-  if (safeNum(copyVerdict?.adjustedPlan?.forceStopLossPct, 0) > 0) {
-    nextPlan.stopLossPct = copyVerdict.adjustedPlan.forceStopLossPct;
-  }
-
-  return nextPlan;
+function shortId() {
+  return Math.random().toString(36).slice(2, 10);
 }
 
-export default class TradingKernel {
-  constructor({
-    walletRouter,
-    copytradeManager,
-    gmgnLeaderIntel,
-    persistence,
-    gmgnWalletService,
-    gmgnOrderStore,
-    gmgnExecutionService,
-    initialConfig,
-    logger = console
+export default class GMGNExecutionService {
+  constructor(options = {}) {
+    this.logger = options.logger || console;
+    this.walletService = options.walletService;
+    this.orderStore = options.orderStore;
+
+    this.defaultMode = asText(
+      options.defaultMode || process.env.GMGN_EXECUTION_MODE,
+      "dry_run"
+    ); // dry_run | external_manual | disabled
+
+    this.defaultSlippagePct = safeNum(
+      options.defaultSlippagePct ?? process.env.GMGN_DEFAULT_SLIPPAGE_PCT,
+      1
+    );
+
+    this.dryRunAutoFill = options.dryRunAutoFill !== false;
+  }
+
+  requireDeps() {
+    if (!this.walletService) {
+      throw new Error("GMGNExecutionService requires walletService");
+    }
+    if (!this.orderStore) {
+      throw new Error("GMGNExecutionService requires orderStore");
+    }
+  }
+
+  makeClientOrderId(strategy, walletId, tokenCa, side, operation) {
+    return [
+      "gmgn",
+      asText(strategy, "strategy"),
+      asText(operation, "op"),
+      asText(side, "side"),
+      asText(walletId, "wallet"),
+      asText(tokenCa, "token").slice(0, 10),
+      Date.now(),
+      shortId()
+    ].join("-");
+  }
+
+  normalizeSide(side) {
+    const s = asText(side, "BUY").toUpperCase();
+    return s === "SELL" ? "SELL" : "BUY";
+  }
+
+  normalizeOperation(operation) {
+    const op = asText(operation, "open").toLowerCase();
+    if (op === "close") return "close";
+    if (op === "partial") return "partial";
+    return "open";
+  }
+
+  estimateSizeFromIntent(intent = {}, operation = "open") {
+    const strategy = asText(intent.strategy).toLowerCase();
+    const edge = safeNum(intent.expectedEdgePct, 0);
+
+    let amountSol = safeNum(intent.amountSol, 0);
+
+    if (amountSol <= 0) {
+      if (strategy === "runner") amountSol = 1.2;
+      else if (strategy === "copytrade") amountSol = 0.7;
+      else if (strategy === "reversal") amountSol = 0.8;
+      else amountSol = 0.5;
+
+      if (edge >= 20) amountSol += 0.3;
+      if (edge >= 35) amountSol += 0.2;
+
+      if (operation === "partial") {
+        amountSol = Math.max(0.1, amountSol * 0.5);
+      }
+    }
+
+    return {
+      amountSol,
+      amountUsd: safeNum(intent.amountUsd, 0),
+      tokenAmount: safeNum(intent.tokenAmount, 0)
+    };
+  }
+
+  buildOrderPayload(runtimeConfig, {
+    walletId,
+    strategy,
+    operation,
+    side,
+    token,
+    intent = {},
+    note = ""
   }) {
-    this.logger = logger;
-    this.walletRouter = walletRouter || null;
-    this.copytradeManager = copytradeManager;
-    this.gmgnLeaderIntel = gmgnLeaderIntel;
-    this.persistence = persistence || null;
+    this.requireDeps();
 
-    this.startBalanceSol = safeNum(initialConfig?.startBalanceSol, 10);
-
-    this.runtime = createTradingRuntime(
-      buildDefaultRuntimeConfig(
-        initialConfig || {
-          language: "ru",
-          dryRun: true,
-          startBalanceSol: 10,
-          strategyBudget: { ...DEFAULT_STRATEGY_BUDGET },
-          wallets: {},
-          strategyRouting: {},
-          copytrade: {
-            enabled: true,
-            rescoringEnabled: true,
-            minLeaderScore: 70,
-            cooldownMinutes: 180,
-            leaders: []
-          }
-        }
-      )
-    );
-
-    this.gmgnWalletService =
-      gmgnWalletService ||
-      new GMGNWalletService({
-        logger: this.logger
-      });
-
-    this.gmgnOrderStore =
-      gmgnOrderStore ||
-      new GMGNOrderStateStore({
-        logger: this.logger
-      });
-
-    this.gmgnExecutionService =
-      gmgnExecutionService ||
-      new GMGNExecutionService({
-        logger: this.logger,
-        walletService: this.gmgnWalletService,
-        orderStore: this.gmgnOrderStore
-      });
-
-    this.candidateService = new CandidateService({
-      logger: this.logger
-    });
-
-    this.positionService = new PositionService({
-      logger: this.logger,
-      onExternalClose: async ({ runtimeConfig, position, reason, latestPrice }) => {
-        return this.runGMGNClose(position, reason, latestPrice, runtimeConfig);
-      },
-      onExternalPartial: async ({ runtimeConfig, position, partial, latestPrice }) => {
-        return this.runGMGNPartial(position, partial, latestPrice, runtimeConfig);
-      }
-    });
-
-    this.copytradeService = new CopytradeService({
-      copytradeManager: this.copytradeManager,
-      gmgnLeaderIntel: this.gmgnLeaderIntel,
-      logger: this.logger
-    });
-
-    this.recentlyTraded = new Map();
-    this.previousReportEquity = null;
-  }
-
-  async initialize() {
-    await this.gmgnOrderStore.load();
-    await this.restoreIfAvailable();
-    return true;
-  }
-
-  async restoreIfAvailable() {
-    if (!this.persistence) return false;
-
-    const runtimeSnapshot = await this.persistence.loadRuntimeSnapshot();
-    if (!runtimeSnapshot) return false;
-
-    if (runtimeSnapshot?.runtime?.activeConfig) {
-      this.runtime.activeConfig = runtimeSnapshot.runtime.activeConfig;
-      this.runtime.pendingConfig = runtimeSnapshot.runtime.pendingConfig || null;
-      this.runtime.pendingReason = runtimeSnapshot.runtime.pendingReason || null;
-      this.runtime.pendingQueuedAt = runtimeSnapshot.runtime.pendingQueuedAt || null;
-      this.runtime.mode = "stopped";
-      this.runtime.strategyScope = "all";
-      this.runtime.stopRequested = false;
-      this.runtime.killRequested = false;
-      this.startBalanceSol = safeNum(
-        runtimeSnapshot.runtime.startBalanceSol,
-        this.startBalanceSol
-      );
-      this.syncPortfolioStrategyBudget();
+    const profile = this.walletService.getWalletExecutionProfile(runtimeConfig, walletId);
+    if (!profile) {
+      throw new Error(`Wallet profile not found for ${walletId}`);
     }
 
-    return true;
-  }
-
-  async persistSnapshot() {
-    if (!this.persistence) return false;
-
-    const runtimeSaved = await this.persistence.saveRuntimeSnapshot({
-      runtime: {
-        activeConfig: this.runtime.activeConfig,
-        pendingConfig: this.runtime.pendingConfig,
-        pendingReason: this.runtime.pendingReason,
-        pendingQueuedAt: this.runtime.pendingQueuedAt,
-        startBalanceSol: this.startBalanceSol
-      }
-    });
-
-    const portfolioSaved = await this.persistence.savePortfolioSnapshot({
-      portfolio: getPortfolio(),
-      runtimeMeta: {
-        runId: this.runtime.runId,
-        mode: this.runtime.mode,
-        strategyScope: this.runtime.strategyScope,
-        savedAt: new Date().toISOString()
-      }
-    });
-
-    return runtimeSaved && portfolioSaved;
-  }
-
-  getRuntime() {
-    return this.runtime;
-  }
-
-  getActiveConfig() {
-    return this.runtime.activeConfig;
-  }
-
-  getPortfolio() {
-    return getPortfolio();
-  }
-
-  getClosedTrades() {
-    return getClosedTrades();
-  }
-
-  setLanguage(lang) {
-    this.runtime.activeConfig.language = lang === "en" ? "en" : "ru";
-    this.persistSnapshot();
-    return this.runtime.activeConfig.language;
-  }
-
-  syncPortfolioStrategyBudget() {
-    const cfg = getStrategyConfig();
-    const nextCfg = {
-      ...cfg,
-      scalp: {
-        ...(cfg.scalp || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.scalp
-      },
-      reversal: {
-        ...(cfg.reversal || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.reversal
-      },
-      runner: {
-        ...(cfg.runner || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.runner
-      },
-      copytrade: {
-        ...(cfg.copytrade || {}),
-        allocationPct: this.runtime.activeConfig.strategyBudget.copytrade
-      }
-    };
-    setStrategyConfig(nextCfg);
-  }
-
-  start(strategyScope = "all", mode = "infinite", chatId = null, userId = null) {
-    startRuntime(this.runtime, { mode, strategyScope, chatId, userId });
-    this.previousReportEquity = null;
-    this.syncPortfolioStrategyBudget();
-    resetPortfolio(this.startBalanceSol, getStrategyConfig());
-    this.persistSnapshot();
-    return this.runtime;
-  }
-
-  requestSoftStop() {
-    requestStop(this.runtime);
-    this.persistSnapshot();
-    return this.runtime;
-  }
-
-  async requestHardKill() {
-    requestKill(this.runtime);
-
-    const closed = await this.positionService.forceCloseAll(
-      this.runtime.activeConfig,
-      "KILL_SWITCH"
-    );
-
-    await this.applyPendingIfPossible();
-    finishRuntime(this.runtime);
-    await this.persistSnapshot();
-
-    return closed;
-  }
-
-  queueBudgetUpdate(values) {
-    const validated = validateBudgetPercents(values);
-    if (!validated.ok) return validated;
-
-    queuePendingConfig(
-      this.runtime,
-      { strategyBudget: validated.budget },
-      "budget_update"
-    );
-
-    this.persistSnapshot();
-
-    return {
-      ok: true,
-      budget: validated.budget
-    };
-  }
-
-  async applyPendingIfPossible() {
-    if (!canApplyPendingConfig(this.runtime, getPositions().length)) {
-      return false;
-    }
-
-    applyPendingConfig(this.runtime);
-    this.syncPortfolioStrategyBudget();
-    await this.persistSnapshot();
-
-    return true;
-  }
-
-  pruneRecentlyTraded() {
-    const now = Date.now();
-    for (const [ca, ts] of this.recentlyTraded.entries()) {
-      if (now - ts > 2 * 60 * 60 * 1000) {
-        this.recentlyTraded.delete(ca);
-      }
-    }
-  }
-
-  async syncLeaderScores() {
-    const intel = await this.copytradeService.syncLeaderScores(
-      this.runtime.activeConfig
-    );
-    await this.persistSnapshot();
-    return intel;
-  }
-
-  async enrichCandidateForCopytrade(candidate) {
-    if (!candidate) return candidate;
-
-    if (!this.gmgnLeaderIntel?.enrichCandidateWithLeaderTrade) {
-      return candidate;
-    }
-
-    try {
-      return await this.gmgnLeaderIntel.enrichCandidateWithLeaderTrade(
-        this.runtime.activeConfig,
-        candidate
-      );
-    } catch (error) {
-      this.logger.log("copytrade enrich failed:", error.message);
-      return candidate;
-    }
-  }
-
-  async runGMGNOpen(walletId, plan, candidate, runtimeConfig = this.runtime.activeConfig) {
-    return this.gmgnExecutionService.executeOpen(runtimeConfig, {
+    const tokenObj = clone(token || {});
+    const normalizedOperation = this.normalizeOperation(operation);
+    const clientOrderId = this.makeClientOrderId(
+      strategy,
       walletId,
-      strategy: plan.strategyKey,
-      token: candidate.token,
-      intent: {
-        expectedEdgePct: plan.expectedEdgePct,
-        expectedEntryPrice: candidate?.token?.price || 0,
-        amountSol: 0,
-        slippagePct: 1
-      },
-      note: `${plan.strategyKey}:${plan.entryMode || "NORMAL"}`
-    });
-  }
-
-  async runGMGNClose(position, reason, latestPrice, runtimeConfig = this.runtime.activeConfig) {
-    if (!position?.walletId) return null;
-
-    return this.gmgnExecutionService.executeClose(runtimeConfig, {
-      walletId: position.walletId,
-      strategy: position.strategy,
-      token: {
-        name: position.token,
-        symbol: position.symbol,
-        ca: position.ca
-      },
-      intent: {
-        expectedExitPrice: latestPrice || position.lastPrice || 0,
-        tokenAmount: position.tokenAmountRaw || 0
-      },
-      note: reason || "close"
-    });
-  }
-
-  async runGMGNPartial(position, partial, latestPrice, runtimeConfig = this.runtime.activeConfig) {
-    if (!position?.walletId) return null;
-
-    return this.gmgnExecutionService.executePartial(runtimeConfig, {
-      walletId: position.walletId,
-      strategy: position.strategy,
-      token: {
-        name: position.token,
-        symbol: position.symbol,
-        ca: position.ca
-      },
-      soldFraction: safeNum(partial?.soldFraction, 0),
-      currentPrice: latestPrice || 0,
-      intent: {
-        tokenAmount: position.tokenAmountRaw || 0
-      },
-      note: `runner partial ${safeNum(partial?.targetPct, 0)}`
-    });
-  }
-
-  async tick(sendBridge) {
-    this.runtime.cycleCount += 1;
-    this.runtime.lastCycleAt = Date.now();
-    this.pruneRecentlyTraded();
-
-    const notificationService = new NotificationService({
-      send: sendBridge
-    });
-
-    await this.positionService.updateOpenPositions({
-      runtimeConfig: this.runtime.activeConfig,
-      notificationService,
-      recentlyTraded: this.recentlyTraded,
-      candidateProbeFn: async (ca) => {
-        const probe = await this.candidateService
-          .findBestCandidate({
-            runtime: this.runtime,
-            openPositions: [],
-            recentlyTraded: []
-          })
-          .catch(() => null);
-
-        const baseCandidate = probe?.candidate?.token?.ca === ca ? probe.candidate : null;
-        if (!baseCandidate) return null;
-
-        return this.enrichCandidateForCopytrade(baseCandidate);
-      }
-    });
-
-    if (this.runtime.stopRequested && getPositions().length === 0) {
-      await this.applyPendingIfPossible();
-      finishRuntime(this.runtime);
-      await this.persistSnapshot();
-      await notificationService.sendText("✅ Stop completed. No open positions left.");
-      return;
-    }
-
-    if (!canOpenNewPositions(this.runtime)) {
-      const portfolio = getPortfolio();
-      const shouldReport =
-        !this.runtime.lastStatusAt ||
-        Date.now() - this.runtime.lastStatusAt >= 15 * 60 * 1000;
-
-      if (shouldReport) {
-        this.runtime.lastStatusAt = Date.now();
-        const report = buildPeriodicReport(
-          this.runtime,
-          portfolio,
-          this.previousReportEquity
-        );
-        this.previousReportEquity = portfolio.equity;
-        await notificationService.sendText(report);
-      }
-
-      await this.persistSnapshot();
-      return;
-    }
-
-    const result = await this.candidateService.findBestCandidate({
-      runtime: this.runtime,
-      openPositions: getPositions(),
-      recentlyTraded: [...this.recentlyTraded.keys()]
-    });
-
-    if (!result) {
-      await notificationService.sendText("❌ No candidates found");
-      await this.persistSnapshot();
-      return;
-    }
-
-    let { candidate, plans, heroImage } = result;
-    candidate = await this.enrichCandidateForCopytrade(candidate);
-
-    await notificationService.sendPhotoOrText(
-      heroImage,
-      this.candidateService.buildHeroCaption(candidate)
+      tokenObj.ca,
+      side,
+      normalizedOperation
     );
-
-    await notificationService.sendText(
-      this.candidateService.buildAnalysisText(candidate, plans)
-    );
-
-    for (const rawPlan of plans) {
-      const alreadyOpenSameStrategy = getPositions().some(
-        (p) => p.strategy === rawPlan.strategyKey
-      );
-      if (alreadyOpenSameStrategy) continue;
-      if (candidate.corpse?.isCorpse && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.falseBounce?.rejected && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.developer?.verdict === "Bad" && rawPlan.strategyKey !== "copytrade") continue;
-      if (candidate.score < 85 && rawPlan.strategyKey !== "copytrade") continue;
-
-      let plan = clone(rawPlan);
-
-      if (plan.strategyKey === "copytrade") {
-        const followDelaySec = safeNum(candidate?.copytradeMeta?.followDelaySec, 0);
-        const priceExtensionPct = safeNum(
-          candidate?.copytradeMeta?.priceExtensionPct,
-          safeNum(candidate?.delta?.priceDeltaPct, 0)
-        );
-
-        const copyVerdict = this.copytradeService.canTradeCopy(
-          this.runtime.activeConfig,
-          candidate,
-          {
-            followDelaySec,
-            priceExtensionPct
-          }
-        );
-
-        if (!copyVerdict.allow) {
-          if (copyVerdict.leader?.address) {
-            this.copytradeService.registerRejectedTrap(
-              this.runtime.activeConfig,
-              copyVerdict.leader.address,
-              copyVerdict.mode === "reject" ? "hard" : "soft"
-            );
-          }
-
-          await notificationService.sendText(
-            `🚫 <b>COPYTRADE REJECTED</b>
-
-<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
-<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}
-<b>Details:</b>
-${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
-          );
-          await this.persistSnapshot();
-          continue;
-        }
-
-        plan = normalizePlanWithCopyVerdict(plan, copyVerdict);
-
-        if (copyVerdict.leader?.address) {
-          this.copytradeService.registerAcceptedQuality(
-            this.runtime.activeConfig,
-            copyVerdict.leader.address
-          );
-        }
-
-        if (copyVerdict.mode === "probe_only") {
-          await notificationService.sendText(
-            `⚠️ <b>COPYTRADE PROBE MODE</b>
-
-<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
-<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
-<b>Details:</b>
-${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
-          );
-        }
-      }
-
-      const walletId = this.gmgnWalletService.getPrimaryWalletId(
-        this.runtime.activeConfig,
-        plan.strategyKey
-      );
-
-      const walletCheck = this.gmgnWalletService.validateWalletForStrategy(
-        this.runtime.activeConfig,
-        walletId,
-        plan.strategyKey
-      );
-
-      if (!walletCheck.ok) continue;
-
-      const order = await this.runGMGNOpen(walletId, plan, candidate);
-      if (!order) continue;
-
-      const position = this.positionService.maybeOpenPosition({
-        plan,
-        candidate,
-        heroImage,
-        walletId
-      });
-
-      if (position) {
-        await notificationService.sendEntry(heroImage, position);
-      }
-    }
-
-    const portfolio = getPortfolio();
-    const shouldReport =
-      !this.runtime.lastStatusAt ||
-      Date.now() - this.runtime.lastStatusAt >= 15 * 60 * 1000;
-
-    if (shouldReport) {
-      this.runtime.lastStatusAt = Date.now();
-      const report = buildPeriodicReport(
-        this.runtime,
-        portfolio,
-        this.previousReportEquity
-      );
-      this.previousReportEquity = portfolio.equity;
-      await notificationService.sendText(report);
-    }
-
-    await this.persistSnapshot();
-  }
-
-  buildCopytradeStatusSummary() {
-    const leaders = this.runtime.activeConfig?.copytrade?.leaders || [];
-    if (!leaders.length) {
-      return `📋 <b>Copytrade status</b>
-leader: -
-state: -
-score: 0
-rejected traps: 0
-accepted good: 0
-open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
-    }
-
-    const sorted = [...leaders].sort(
-      (a, b) => safeNum(b?.score, 0) - safeNum(a?.score, 0)
-    );
-    const leader = sorted[0] || {};
-
-    return `📋 <b>Copytrade status</b>
-leader: ${escapeHtml(leader.address || "-")}
-state: ${escapeHtml(leader.state || "-")}
-score: ${safeNum(leader.score, 0)}
-rejected traps: ${safeNum(leader.rejectedTrapCount, 0)}
-accepted good: ${safeNum(leader.acceptedGoodCount, 0)}
-open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
-  }
-
-  buildExecutionModelSummary() {
-    const r = this.copytradeService?.rules || {};
-    return `🧠 <b>Execution model</b>
-entry by leader: ${r.entryUsesLeader ? "yes" : "no"}
-exit by bot strategy: yes
-leader sell mode: ${escapeHtml(String(r.exitUsesLeaderMode || "soft_only"))}
-leader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}
-leader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}
-own TP priority: ${r.ownTpPriority ? "yes" : "no"}
-own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
-  }
-
-  buildRecentGMGNEventsSummary(limit = 3) {
-    const rows = this.gmgnOrderStore.listRecentOrders(limit);
-
-    if (!rows.length) {
-      return `🕘 <b>Recent GMGN events</b>
-none`;
-    }
-
-    const lines = ["🕘 <b>Recent GMGN events</b>", ""];
-
-    for (const row of rows) {
-      lines.push(
-        `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}
-strategy: ${escapeHtml(row.strategy || "-")}
-token: ${escapeHtml(row?.token?.symbol || row?.token?.name || row?.token?.ca || "-")}
-note: ${escapeHtml(row.note || "-")}
-updated: ${escapeHtml(row.updatedAt || "-")}`
-      );
-      lines.push("");
-    }
-
-    return lines.join("\n");
-  }
-
-  buildStatusText() {
-    const base = buildDashboard(this.runtime, getPortfolio());
-    return `${base}
-
-${this.buildCopytradeStatusSummary()}
-
-${this.buildExecutionModelSummary()}
-
-${this.buildGMGNExecutionText()}
-
-${this.buildRecentGMGNEventsSummary()}`;
-  }
-
-  buildBalanceText() {
-    return buildBalanceText(getPortfolio());
-  }
-
-  buildWalletsText() {
-    return `${this.gmgnWalletService.buildWalletSummaryText(this.runtime.activeConfig)}
-
-${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}`;
-  }
-
-  buildCopytradeText() {
-    return this.copytradeService.buildCopytradeText(this.runtime.activeConfig);
-  }
-
-  buildBudgetText() {
-    const current =
-      this.runtime.activeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
-    const pending = this.runtime.pendingConfig?.strategyBudget || null;
-
-    return `🧮 <b>Budget</b>
-
-<b>Current</b>
-${formatBudgetLines(current)}
-
-<b>Pending</b>
-${pending ? formatBudgetLines(pending) : "none"}
-
-Send: <code>budget 25 25 25 25</code>`;
-  }
-
-  buildGmgnStatusText() {
-    return this.copytradeService.buildGmgnStatusText();
-  }
-
-  buildGMGNExecutionText() {
-    return this.gmgnExecutionService.buildExecutionSummaryText(
-      this.runtime.activeConfig
-    );
-  }
-
-  buildGMGNOrdersText(limit = 15) {
-    return this.gmgnExecutionService.buildOrdersText(limit);
-  }
-
-  async buildLeaderHealthText() {
-    return this.copytradeService.buildLeaderHealthText(
-      this.runtime.activeConfig
-    );
-  }
-
-  addLeader(address) {
-    const row = this.copytradeManager.addLeader(
-      this.runtime.activeConfig,
-      address,
-      "manual"
-    );
-    this.persistSnapshot();
-    return row;
-  }
-
-  setWalletSecretRef(walletId, secretRef) {
-    if (!this.runtime.activeConfig.wallets[walletId]) return false;
-    this.runtime.activeConfig.wallets[walletId].secretRef = secretRef;
-    this.persistSnapshot();
-    return true;
-  }
-
-  async fetchTokenByCA(ca) {
-    const DEX_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
-    const res = await fetch(`${DEX_TOKEN_API}/${encodeURIComponent(ca)}`);
-    if (!res.ok) {
-      throw new Error(`DexScreener HTTP ${res.status}`);
-    }
-
-    const json = await res.json();
-    const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
-    if (!pairs.length) return null;
-
-    const bestRaw = pairs.sort(
-      (a, b) =>
-        safeNum(b?.liquidity?.usd) - safeNum(a?.liquidity?.usd) ||
-        safeNum(b?.volume?.h24) - safeNum(a?.volume?.h24)
-    )[0];
-
-    const socials = Array.isArray(bestRaw?.info?.socials)
-      ? bestRaw.info.socials
-      : [];
-    const websites = Array.isArray(bestRaw?.info?.websites)
-      ? bestRaw.info.websites
-      : [];
-
-    const links = [
-      ...socials.map((x) => ({
-        type: x?.type || "",
-        label: x?.type || "",
-        url: x?.url || ""
-      })),
-      ...websites.map((x) => ({
-        type: "website",
-        label: "website",
-        url: x?.url || ""
-      }))
-    ];
 
     return {
-      name: bestRaw?.baseToken?.name || bestRaw?.baseToken?.symbol || "UNKNOWN",
-      symbol: bestRaw?.baseToken?.symbol || "",
-      ca: bestRaw?.baseToken?.address || "",
-      pairAddress: bestRaw?.pairAddress || "",
-      chainId: bestRaw?.chainId || "",
-      dexId: bestRaw?.dexId || "",
-      price: safeNum(bestRaw?.priceUsd),
-      liquidity: safeNum(bestRaw?.liquidity?.usd),
-      volume: safeNum(bestRaw?.volume?.h24),
-      buys: safeNum(bestRaw?.txns?.h24?.buys),
-      sells: safeNum(bestRaw?.txns?.h24?.sells),
-      txns:
-        safeNum(bestRaw?.txns?.h24?.buys) +
-        safeNum(bestRaw?.txns?.h24?.sells),
-      fdv: safeNum(bestRaw?.fdv),
-      pairCreatedAt: safeNum(bestRaw?.pairCreatedAt),
-      url: bestRaw?.url || "",
-      imageUrl: bestRaw?.info?.imageUrl || null,
-      description:
-        bestRaw?.info?.description || bestRaw?.info?.header || "",
-      links
+      orderId: "",
+      clientOrderId,
+      walletId,
+      gmgnWalletId: asText(profile.gmgnWalletId),
+      gmgnAccountId: asText(profile.gmgnAccountId),
+      strategy: asText(strategy),
+      operation: normalizedOperation,
+      side: this.normalizeSide(side),
+      status: "created",
+      token: {
+        name: asText(tokenObj.name),
+        symbol: asText(tokenObj.symbol),
+        ca: asText(tokenObj.ca),
+        chainId: asText(tokenObj.chainId),
+        dexId: asText(tokenObj.dexId),
+        url: asText(tokenObj.url)
+      },
+      size: this.estimateSizeFromIntent(
+        {
+          ...clone(intent),
+          strategy
+        },
+        normalizedOperation
+      ),
+      pricing: {
+        expectedEntryPrice: safeNum(intent.expectedEntryPrice ?? tokenObj.price, 0),
+        executedEntryPrice: 0,
+        expectedExitPrice: safeNum(intent.expectedExitPrice, 0),
+        executedExitPrice: 0,
+        slippagePct: safeNum(intent.slippagePct, this.defaultSlippagePct)
+      },
+      metrics: {
+        pnlHintPct: 0,
+        pnlHintSol: 0,
+        soldFraction: safeNum(intent.soldFraction, 0)
+      },
+      source: "gmgn",
+      mode: asText(profile.executionMode, this.defaultMode),
+      note: asText(note),
+      reason: "",
+      signature: "",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      history: [],
+      raw: {
+        walletProfile: profile,
+        intent: clone(intent)
+      }
     };
   }
 
-  async scanCA(ca, send) {
-    await send.text(`🧾 <b>Scanning CA</b>\n<code>${escapeHtml(ca)}</code>`);
+  buildPnlHint(order) {
+    const operation = this.normalizeOperation(order?.operation);
+    const expectedEntryPrice = safeNum(order?.pricing?.expectedEntryPrice, 0);
+    const expectedExitPrice = safeNum(order?.pricing?.expectedExitPrice, 0);
+    const amountSol = safeNum(order?.size?.amountSol, 0);
+    const soldFraction = safeNum(order?.metrics?.soldFraction, 0);
 
-    const result = await this.candidateService.scanCA({
-      runtime: this.runtime,
-      fetchTokenByCA: (value) => this.fetchTokenByCA(value),
-      ca
-    });
-
-    if (!result) {
-      await send.text("❌ Token not found by CA.");
-      return;
+    if (operation === "open") {
+      return {
+        pnlHintPct: 0,
+        pnlHintSol: 0,
+        soldFraction
+      };
     }
 
-    const enrichedAnalyzed = await this.enrichCandidateForCopytrade(result.analyzed);
+    if (expectedEntryPrice <= 0 || expectedExitPrice <= 0 || amountSol <= 0) {
+      return {
+        pnlHintPct: 0,
+        pnlHintSol: 0,
+        soldFraction
+      };
+    }
 
-    await send.photoOrText(
-      result.heroImage,
-      this.candidateService.buildHeroCaption(enrichedAnalyzed)
+    const pnlHintPct = ((expectedExitPrice - expectedEntryPrice) / expectedEntryPrice) * 100;
+    const pnlHintSol = amountSol * (pnlHintPct / 100);
+
+    return {
+      pnlHintPct,
+      pnlHintSol,
+      soldFraction
+    };
+  }
+
+  buildDryRunFillPatch(order) {
+    const operation = this.normalizeOperation(order?.operation);
+    const side = this.normalizeSide(order?.side);
+    const expectedEntryPrice = safeNum(order?.pricing?.expectedEntryPrice, 0);
+    const expectedExitPrice = safeNum(order?.pricing?.expectedExitPrice, 0);
+
+    const pricing = {
+      expectedEntryPrice,
+      executedEntryPrice: 0,
+      expectedExitPrice,
+      executedExitPrice: 0,
+      slippagePct: safeNum(order?.pricing?.slippagePct, this.defaultSlippagePct)
+    };
+
+    if (operation === "open" && side === "BUY") {
+      pricing.executedEntryPrice = expectedEntryPrice;
+    } else {
+      pricing.executedExitPrice = expectedExitPrice > 0 ? expectedExitPrice : expectedEntryPrice;
+    }
+
+    return {
+      operation,
+      note: `dry_run auto-filled (${operation})`,
+      pricing,
+      metrics: this.buildPnlHint({
+        ...order,
+        pricing
+      })
+    };
+  }
+
+  async createOrder(runtimeConfig, params) {
+    const payload = this.buildOrderPayload(runtimeConfig, params);
+    return this.orderStore.createOrder(payload);
+  }
+
+  async submitOrder(runtimeConfig, params) {
+    const order = await this.createOrder(runtimeConfig, params);
+    const mode = asText(order?.mode, this.defaultMode);
+
+    if (mode === "disabled") {
+      return this.orderStore.markFailed(
+        { clientOrderId: order.clientOrderId },
+        {
+          operation: order.operation,
+          reason: "execution_disabled",
+          note: "GMGN execution disabled"
+        }
+      );
+    }
+
+    const submitted = await this.orderStore.markSubmitted(
+      { clientOrderId: order.clientOrderId },
+      {
+        operation: order.operation,
+        metrics: {
+          soldFraction: safeNum(order?.metrics?.soldFraction, 0)
+        },
+        note:
+          mode === "external_manual"
+            ? "waiting for external GMGN wallet execution"
+            : `submitted (${mode})`
+      }
     );
 
-    await send.text(
-      this.candidateService.buildAnalysisText(enrichedAnalyzed, result.plans)
+    if (mode === "dry_run" && this.dryRunAutoFill) {
+      return this.orderStore.markFilled(
+        { clientOrderId: order.clientOrderId },
+        this.buildDryRunFillPatch(submitted || order)
+      );
+    }
+
+    if (mode === "external_manual" || mode === "dry_run") {
+      return this.orderStore.findOrder({ clientOrderId: order.clientOrderId });
+    }
+
+    return this.orderStore.markFailed(
+      { clientOrderId: order.clientOrderId },
+      {
+        operation: order.operation,
+        reason: "unsupported_execution_mode",
+        note: `mode=${mode}`
+      }
     );
   }
 
-  // compatibility with current bot-router
-  buildPendingIntentText(limit = 10) {
-    return this.buildGMGNOrdersText(limit);
+  async executeOpen(runtimeConfig, {
+    walletId,
+    strategy,
+    token,
+    intent = {},
+    note = ""
+  }) {
+    return this.submitOrder(runtimeConfig, {
+      walletId,
+      strategy,
+      operation: "open",
+      side: "BUY",
+      token,
+      intent,
+      note
+    });
   }
 
-  async markIntentSigned() {
-    return null;
+  async executeClose(runtimeConfig, {
+    walletId,
+    strategy,
+    token,
+    intent = {},
+    note = ""
+  }) {
+    return this.submitOrder(runtimeConfig, {
+      walletId,
+      strategy,
+      operation: "close",
+      side: "SELL",
+      token,
+      intent,
+      note
+    });
   }
 
-  async markIntentSubmitted() {
-    return null;
+  async executePartial(runtimeConfig, {
+    walletId,
+    strategy,
+    token,
+    soldFraction = 0,
+    currentPrice = 0,
+    intent = {},
+    note = ""
+  }) {
+    return this.submitOrder(runtimeConfig, {
+      walletId,
+      strategy,
+      operation: "partial",
+      side: "SELL",
+      token,
+      intent: {
+        ...clone(intent),
+        soldFraction: safeNum(soldFraction, 0),
+        expectedExitPrice: safeNum(currentPrice, 0)
+      },
+      note: note || `partial sell ${safeNum(soldFraction, 0)}`
+    });
   }
 
-  async markIntentConfirmed() {
-    return null;
+  async markOrderFilled(identifier, patch = {}) {
+    return this.orderStore.markFilled(identifier, patch);
   }
 
-  async markIntentFailed() {
-    return null;
+  async markOrderPartial(identifier, patch = {}) {
+    return this.orderStore.markPartial(identifier, patch);
+  }
+
+  async markOrderFailed(identifier, patch = {}) {
+    return this.orderStore.markFailed(identifier, patch);
+  }
+
+  async markOrderCancelled(identifier, patch = {}) {
+    return this.orderStore.markCancelled(identifier, patch);
+  }
+
+  getOrder(identifier = {}) {
+    return this.orderStore.findOrder(identifier);
+  }
+
+  listOpenOrders() {
+    return this.orderStore.listOpenOrders();
+  }
+
+  buildOrdersText(limit = 15) {
+    return this.orderStore.buildOrdersText(limit);
+  }
+
+  buildExecutionSummaryText(runtimeConfig) {
+    const openOrders = this.listOpenOrders();
+    const mode = asText(this.defaultMode, "dry_run");
+    const statusCounts = this.orderStore.countByStatus();
+    const opCounts = this.orderStore.countByOperation();
+
+    const strategyLines = ["scalp", "reversal", "runner", "copytrade"]
+      .map((strategy) => {
+        const walletId = this.walletService.getPrimaryWalletId(runtimeConfig, strategy);
+        return `• ${strategy}: ${asText(walletId, "-")}`;
+      })
+      .join("\n");
+
+    return `📦 <b>GMGN Execution</b>
+
+mode: ${mode}
+open orders: ${openOrders.length}
+default slippage pct: ${safeNum(this.defaultSlippagePct, 0)}
+
+<b>Status counters</b>
+created: ${safeNum(statusCounts.created)}
+submitted: ${safeNum(statusCounts.submitted)}
+filled: ${safeNum(statusCounts.filled)}
+partial: ${safeNum(statusCounts.partial)}
+failed: ${safeNum(statusCounts.failed)}
+cancelled: ${safeNum(statusCounts.cancelled)}
+
+<b>Operation counters</b>
+open: ${safeNum(opCounts.open)}
+close: ${safeNum(opCounts.close)}
+partial: ${safeNum(opCounts.partial)}
+
+<b>Primary wallets</b>
+${strategyLines}`;
   }
 }
