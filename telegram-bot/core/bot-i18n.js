@@ -110,8 +110,8 @@ export function buildKeyboard(t) {
       [t("menu_intents"), t("menu_scan_ca")],
       [t("menu_scan_market"), t("menu_balance")],
       [t("menu_wallets"), t("menu_budget")],
-      [t("menu_copytrade"), t("menu_leader_health")],
-      [t("menu_gmgn_status"), t("menu_sync_leaders")],
+      [t("menu_copytrade"), t("menu_gmgn_status")],
+      [t("menu_leader_health"), t("menu_sync_leaders")],
       [t("menu_language"), t("menu_export_csv")],
       [t("menu_export_json"), t("menu_export_xlsx")]
     ],
