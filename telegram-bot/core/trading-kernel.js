@@ -37,10 +37,9 @@ import PositionService from "./position-service.js";
 import CopytradeService from "./copytrade-service.js";
 import NotificationService from "./notification-service.js";
 
-import WalletOrchestrator from "../wallets/wallet-orchestrator.js";
-import ManualApprovalBridge from "../wallets/manual-approval-bridge.js";
-import JupiterQuoteService from "../jupiter/jupiter-quote-service.js";
-import TxLifecycleStore from "./tx-lifecycle-store.js";
+import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
+import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
+import GMGNExecutionService from "../gmgn/gmgn-execution-service.js";
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -83,9 +82,9 @@ export default class TradingKernel {
     copytradeManager,
     gmgnLeaderIntel,
     persistence,
-    txStore,
-    jupiterQuoteService,
-    manualApprovalBridge,
+    gmgnWalletService,
+    gmgnOrderStore,
+    gmgnExecutionService,
     initialConfig,
     logger = console
   }) {
@@ -116,31 +115,25 @@ export default class TradingKernel {
       )
     );
 
-    this.txStore =
-      txStore ||
-      new TxLifecycleStore({
+    this.gmgnWalletService =
+      gmgnWalletService ||
+      new GMGNWalletService({
         logger: this.logger
       });
 
-    this.jupiterQuoteService =
-      jupiterQuoteService ||
-      new JupiterQuoteService({
+    this.gmgnOrderStore =
+      gmgnOrderStore ||
+      new GMGNOrderStateStore({
         logger: this.logger
       });
 
-    this.manualApprovalBridge =
-      manualApprovalBridge ||
-      new ManualApprovalBridge({
+    this.gmgnExecutionService =
+      gmgnExecutionService ||
+      new GMGNExecutionService({
         logger: this.logger,
-        txStore: this.txStore,
-        jupiterQuoteService: this.jupiterQuoteService
+        walletService: this.gmgnWalletService,
+        orderStore: this.gmgnOrderStore
       });
-
-    this.walletOrchestrator = new WalletOrchestrator({
-      walletRouter: this.walletRouter,
-      manualApprovalBridge: this.manualApprovalBridge,
-      logger: this.logger
-    });
 
     this.candidateService = new CandidateService({
       logger: this.logger
@@ -148,7 +141,7 @@ export default class TradingKernel {
 
     this.positionService = new PositionService({
       logger: this.logger,
-      walletOrchestrator: this.walletOrchestrator
+      walletOrchestrator: null
     });
 
     this.copytradeService = new CopytradeService({
@@ -162,7 +155,7 @@ export default class TradingKernel {
   }
 
   async initialize() {
-    await this.txStore.load();
+    await this.gmgnOrderStore.load();
     await this.restoreIfAvailable();
     return true;
   }
@@ -234,30 +227,6 @@ export default class TradingKernel {
     return getClosedTrades();
   }
 
-  getPendingTxIntents() {
-    return this.txStore.listPendingIntents();
-  }
-
-  getTxIntent(intentId) {
-    return this.txStore.getIntent(intentId);
-  }
-
-  async markIntentSigned(intentId, signedTxBase64 = null) {
-    return this.manualApprovalBridge.markSigned(intentId, signedTxBase64);
-  }
-
-  async markIntentSubmitted(intentId, signature = null) {
-    return this.manualApprovalBridge.markSubmitted(intentId, signature);
-  }
-
-  async markIntentConfirmed(intentId, signature = null) {
-    return this.manualApprovalBridge.markConfirmed(intentId, signature);
-  }
-
-  async markIntentFailed(intentId, reason = "unknown") {
-    return this.manualApprovalBridge.markFailed(intentId, reason);
-  }
-
   setLanguage(lang) {
     this.runtime.activeConfig.language = lang === "en" ? "en" : "ru";
     this.persistSnapshot();
@@ -310,6 +279,25 @@ export default class TradingKernel {
       this.runtime.activeConfig,
       "KILL_SWITCH"
     );
+
+    for (const row of closed) {
+      if (row?.walletId) {
+        await this.gmgnExecutionService.executeClose(this.runtime.activeConfig, {
+          walletId: row.walletId,
+          strategy: row.strategy,
+          token: {
+            name: row.token,
+            symbol: row.symbol,
+            ca: row.ca
+          },
+          intent: {
+            expectedExitPrice: row.exitReferencePrice || row.lastPrice || 0,
+            tokenAmount: row.tokenAmountRaw || 0
+          },
+          note: "force close all"
+        });
+      }
+    }
 
     await this.applyPendingIfPossible();
     finishRuntime(this.runtime);
@@ -383,6 +371,56 @@ export default class TradingKernel {
     }
   }
 
+  async runGMGNOpen(walletId, plan, candidate) {
+    return this.gmgnExecutionService.executeOpen(this.runtime.activeConfig, {
+      walletId,
+      strategy: plan.strategyKey,
+      token: candidate.token,
+      intent: {
+        expectedEdgePct: plan.expectedEdgePct,
+        expectedEntryPrice: candidate?.token?.price || 0,
+        amountSol: 0,
+        slippagePct: 1
+      },
+      note: `${plan.strategyKey}:${plan.entryMode || "NORMAL"}`
+    });
+  }
+
+  async runGMGNClose(position, reason, latestPrice) {
+    return this.gmgnExecutionService.executeClose(this.runtime.activeConfig, {
+      walletId: position.walletId,
+      strategy: position.strategy,
+      token: {
+        name: position.token,
+        symbol: position.symbol,
+        ca: position.ca
+      },
+      intent: {
+        expectedExitPrice: latestPrice || position.lastPrice || 0,
+        tokenAmount: position.tokenAmountRaw || 0
+      },
+      note: reason || "close"
+    });
+  }
+
+  async runGMGNPartial(position, partial, latestPrice) {
+    return this.gmgnExecutionService.executePartial(this.runtime.activeConfig, {
+      walletId: position.walletId,
+      strategy: position.strategy,
+      token: {
+        name: position.token,
+        symbol: position.symbol,
+        ca: position.ca
+      },
+      soldFraction: safeNum(partial?.soldFraction, 0),
+      currentPrice: latestPrice || 0,
+      intent: {
+        tokenAmount: position.tokenAmountRaw || 0
+      },
+      note: `runner partial ${safeNum(partial?.targetPct, 0)}`
+    });
+  }
+
   async tick(sendBridge) {
     this.runtime.cycleCount += 1;
     this.runtime.lastCycleAt = Date.now();
@@ -416,9 +454,7 @@ export default class TradingKernel {
       await this.applyPendingIfPossible();
       finishRuntime(this.runtime);
       await this.persistSnapshot();
-      await notificationService.sendText(
-        "✅ Stop completed. No open positions left."
-      );
+      await notificationService.sendText("✅ Stop completed. No open positions left.");
       return;
     }
 
@@ -537,12 +573,12 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
         }
       }
 
-      const walletId = this.walletOrchestrator.getPrimaryWalletId(
+      const walletId = this.gmgnWalletService.getPrimaryWalletId(
         this.runtime.activeConfig,
         plan.strategyKey
       );
 
-      const walletCheck = this.walletOrchestrator.validateForStrategy(
+      const walletCheck = this.gmgnWalletService.validateWalletForStrategy(
         this.runtime.activeConfig,
         walletId,
         plan.strategyKey
@@ -550,15 +586,15 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
 
       if (!walletCheck.ok) continue;
 
-      const position = await this.positionService.orchestrateAndOpen(
-        this.runtime.activeConfig,
-        {
-          plan,
-          candidate,
-          heroImage,
-          walletId
-        }
-      );
+      const order = await this.runGMGNOpen(walletId, plan, candidate);
+      if (!order) continue;
+
+      const position = this.positionService.maybeOpenPosition({
+        plan,
+        candidate,
+        heroImage,
+        walletId
+      });
 
       if (position) {
         await notificationService.sendEntry(heroImage, position);
@@ -593,7 +629,7 @@ state: -
 score: 0
 rejected traps: 0
 accepted good: 0
-pending intents: ${this.txStore.listPendingIntents().length}`;
+open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
     }
 
     const sorted = [...leaders].sort(
@@ -607,7 +643,7 @@ state: ${escapeHtml(leader.state || "-")}
 score: ${safeNum(leader.score, 0)}
 rejected traps: ${safeNum(leader.rejectedTrapCount, 0)}
 accepted good: ${safeNum(leader.acceptedGoodCount, 0)}
-pending intents: ${this.txStore.listPendingIntents().length}`;
+open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
   }
 
   buildExecutionModelSummary() {
@@ -628,7 +664,9 @@ own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
 
 ${this.buildCopytradeStatusSummary()}
 
-${this.buildExecutionModelSummary()}`;
+${this.buildExecutionModelSummary()}
+
+${this.buildGMGNExecutionText()}`;
   }
 
   buildBalanceText() {
@@ -636,33 +674,9 @@ ${this.buildExecutionModelSummary()}`;
   }
 
   buildWalletsText() {
-    const lines = ["👛 <b>Wallets</b>", ""];
+    return `${this.gmgnWalletService.buildWalletSummaryText(this.runtime.activeConfig)}
 
-    for (const [walletId, w] of Object.entries(
-      this.runtime.activeConfig.wallets || {}
-    )) {
-      const validation = this.walletRouter.validateWalletForAnyUse(
-        this.runtime.activeConfig,
-        walletId
-      );
-
-      lines.push(
-        `• <b>${escapeHtml(walletId)}</b>
-label: ${escapeHtml(w.label || "-")}
-role: ${escapeHtml(w.role || "-")}
-enabled: ${w.enabled ? "yes" : "no"}
-mode: ${escapeHtml(w.executionMode || "dry_run")}
-publicKey: ${escapeHtml(w.publicKey || w.address || "-")}
-strategies: ${escapeHtml((w.allowedStrategies || []).join(", ") || "-")}
-secretRef: ${escapeHtml(w.secretRef || "-")}
-ready: ${validation.ok ? "yes" : "no"} (${escapeHtml(validation.reason || "ok")})`
-      );
-
-      lines.push("");
-    }
-
-    lines.push(`<code>/setsecret</code>`);
-    return lines.join("\n");
+${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}`;
   }
 
   buildCopytradeText() {
@@ -689,38 +703,20 @@ Send: <code>budget 25 25 25 25</code>`;
     return this.copytradeService.buildGmgnStatusText();
   }
 
-  async buildLeaderHealthText() {
-    return this.copytradeService.buildLeaderHealthText(
+  buildGMGNExecutionText() {
+    return this.gmgnExecutionService.buildExecutionSummaryText(
       this.runtime.activeConfig
     );
   }
 
-  buildPendingIntentText(limit = 10) {
-    const intents = this.txStore.listPendingIntents().slice(0, limit);
+  buildGMGNOrdersText(limit = 15) {
+    return this.gmgnExecutionService.buildOrdersText(limit);
+  }
 
-    if (!intents.length) {
-      return `🧾 <b>Pending Intents</b>
-
-none`;
-    }
-
-    const lines = ["🧾 <b>Pending Intents</b>", ""];
-
-    for (const row of intents) {
-      lines.push(
-        `• <b>${escapeHtml(row.intentId)}</b>
-status: ${escapeHtml(row.status || "-")}
-wallet: ${escapeHtml(row.walletId || "-")}
-strategy: ${escapeHtml(row.strategy || "-")}
-side: ${escapeHtml(row.side || "-")}
-token: ${escapeHtml(row.token?.name || row.token?.ca || "-")}
-publicKey: ${escapeHtml(row.publicKey || "-")}
-createdAt: ${escapeHtml(row.createdAt || "-")}`
-      );
-      lines.push("");
-    }
-
-    return lines.join("\n");
+  async buildLeaderHealthText() {
+    return this.copytradeService.buildLeaderHealthText(
+      this.runtime.activeConfig
+    );
   }
 
   addLeader(address) {
