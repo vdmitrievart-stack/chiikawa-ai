@@ -603,6 +603,15 @@ export default class TradingKernel {
     });
 
     if (!result) {
+      if (
+        this.runtime.strategyScope === "scalp" &&
+        this.canEmitNotice("scalp:no_candidate", 5 * 60 * 1000)
+      ) {
+        await notificationService.sendText(
+          "🫧 <b>SCALP</b>\nПока не вижу нормального кандидата. Фильтры активны, жду что-то живое."
+        );
+      }
+
       await this.persistSnapshot();
       return;
     }
@@ -634,10 +643,23 @@ export default class TradingKernel {
       if (candidate.corpse?.isCorpse && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
       if (candidate.falseBounce?.rejected && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
       if (candidate.developer?.verdict === "Bad" && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
+
+      const minScoreByStrategy = {
+        scalp: 68,
+        reversal: 78,
+        runner: 82,
+        copytrade: 0,
+        migration_survivor: 0
+      };
+
+      const minScore = minScoreByStrategy[rawPlan.strategyKey] ?? 85;
+
       if (
-        candidate.score < 85 &&
+        candidate.score < minScore &&
         !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)
-      ) continue;
+      ) {
+        continue;
+      }
 
       let plan = clone(rawPlan);
 
