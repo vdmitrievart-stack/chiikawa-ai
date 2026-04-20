@@ -21,7 +21,8 @@ import {
   openPosition,
   closePosition,
   markPosition,
-  maybeTakeRunnerPartial
+  maybeTakeRunnerPartial,
+  setStrategyConfig
 } from "./portfolio.js";
 
 import { buildStrategyPlans } from "./strategy-engine.js";
@@ -33,8 +34,15 @@ import {
   buildPositionUpdateText
 } from "./core/reporting-engine.js";
 
+import {
+  DEFAULT_STRATEGY_BUDGET,
+  validateBudgetPercents,
+  formatBudgetLines
+} from "./core/budget-manager.js";
+
 import WalletExecutionRouter from "./wallets/wallet-execution-router.js";
 import CopytradeManager from "./copytrade/copytrade-manager.js";
+import GMGNLeaderIntelService from "./gmgn/gmgn-leader-intel-service.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
@@ -52,6 +60,7 @@ const bot = new TelegramBot(TOKEN, { polling: false });
 
 const walletRouter = new WalletExecutionRouter({ logger: console });
 const copytradeManager = new CopytradeManager({ logger: console });
+const gmgnLeaderIntel = new GMGNLeaderIntelService({ logger: console });
 
 let loopId = null;
 let stopTimeoutId = null;
@@ -62,6 +71,8 @@ let activeUserId = null;
 let runtimeConfig = {
   language: "ru",
   dryRun: true,
+  strategyBudget: { ...DEFAULT_STRATEGY_BUDGET },
+  pendingConfig: null,
   wallets: {
     wallet_trader_main: {
       label: "Trader Main",
@@ -124,6 +135,10 @@ const I18N = {
     menu_balance: "💰 Balance",
     menu_wallets: "👛 Wallets",
     menu_copytrade: "📋 Copytrade",
+    menu_budget: "🧮 Budget",
+    menu_gmgn_status: "🛰 GMGN Status",
+    menu_leader_health: "🫀 Leader Health",
+    menu_sync_leaders: "🔄 Sync Leaders",
     menu_language: "🌐 Language",
     menu_export_csv: "📈 Export CSV",
     menu_export_json: "📦 Export JSON",
@@ -138,10 +153,17 @@ const I18N = {
     lang_set: "🌐 Язык переключен",
     wallets_title: "👛 <b>Кошельки</b>",
     copytrade_title: "📋 <b>Copytrade</b>",
+    budget_title: "🧮 <b>Budget</b>",
+    gmgn_title: "🛰 <b>GMGN Status</b>",
+    leader_title: "🫀 <b>Leader Health</b>",
     add_leader_prompt: "✍️ Отправь address лидера следующим сообщением.",
     add_secret_prompt: "🔐 Отправь в следующем сообщении строку вида:\n<code>wallet_id env:SECRET_NAME</code>",
+    budget_prompt: "Отправь: <code>budget 25 25 25 25</code>",
+    pending_budget_saved: "✅ Pending budget сохранен",
+    pending_applied: "✅ Pending config применен",
     leader_added: "✅ Лидер добавлен",
     secret_saved: "✅ Secret ref сохранен",
+    leaders_synced: "✅ Лидеры синхронизированы",
     unknown: "Используйте меню ниже."
   },
   en: {
@@ -154,6 +176,10 @@ const I18N = {
     menu_balance: "💰 Balance",
     menu_wallets: "👛 Wallets",
     menu_copytrade: "📋 Copytrade",
+    menu_budget: "🧮 Budget",
+    menu_gmgn_status: "🛰 GMGN Status",
+    menu_leader_health: "🫀 Leader Health",
+    menu_sync_leaders: "🔄 Sync Leaders",
     menu_language: "🌐 Language",
     menu_export_csv: "📈 Export CSV",
     menu_export_json: "📦 Export JSON",
@@ -168,10 +194,17 @@ const I18N = {
     lang_set: "🌐 Language switched",
     wallets_title: "👛 <b>Wallets</b>",
     copytrade_title: "📋 <b>Copytrade</b>",
+    budget_title: "🧮 <b>Budget</b>",
+    gmgn_title: "🛰 <b>GMGN Status</b>",
+    leader_title: "🫀 <b>Leader Health</b>",
     add_leader_prompt: "✍️ Send leader address in the next message.",
     add_secret_prompt: "🔐 Send a line in the next message like:\n<code>wallet_id env:SECRET_NAME</code>",
+    budget_prompt: "Send: <code>budget 25 25 25 25</code>",
+    pending_budget_saved: "✅ Pending budget saved",
+    pending_applied: "✅ Pending config applied",
     leader_added: "✅ Leader added",
     secret_saved: "✅ Secret ref saved",
+    leaders_synced: "✅ Leaders synced",
     unknown: "Use the menu below."
   }
 };
@@ -205,8 +238,10 @@ function keyboard() {
       [t("menu_run4h"), t("menu_runinf")],
       [t("menu_stop"), t("menu_status")],
       [t("menu_scan_market"), t("menu_scan_ca")],
-      [t("menu_balance"), t("menu_language")],
+      [t("menu_balance"), t("menu_budget")],
       [t("menu_wallets"), t("menu_copytrade")],
+      [t("menu_gmgn_status"), t("menu_leader_health")],
+      [t("menu_sync_leaders"), t("menu_language")],
       [t("menu_export_csv"), t("menu_export_json")],
       [t("menu_export_xlsx")]
     ],
@@ -242,8 +277,13 @@ function normalizeAction(text) {
   if (raw === "/language" || raw.includes("language")) return "language";
   if (raw === "/wallets" || raw.includes("wallets")) return "wallets";
   if (raw === "/copytrade" || raw.includes("copytrade")) return "copytrade";
+  if (raw === "/budget" || raw.includes("budget")) return "budget";
+  if (raw === "/gmgnstatus" || raw.includes("gmgn status")) return "gmgn_status";
+  if (raw === "/leaderhealth" || raw.includes("leader health")) return "leader_health";
+  if (raw === "/syncleaders" || raw.includes("sync leaders")) return "sync_leaders";
   if (raw === "/addleader") return "add_leader";
   if (raw === "/setsecret") return "set_secret";
+  if (raw === "/applypending") return "apply_pending";
   if (raw === "/exportcsv") return "exportcsv";
   if (raw === "/exportjson") return "exportjson";
   if (raw === "/exportxlsx") return "exportxlsx";
@@ -411,6 +451,84 @@ last sync: ${escapeHtml(leader.lastSyncAt || "-")}`
   return lines.join("\n");
 }
 
+function buildBudgetText() {
+  const current = runtimeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
+  const pending = runtimeConfig.pendingConfig?.strategyBudget || null;
+
+  return `${t("budget_title")}
+
+<b>Current</b>
+${formatBudgetLines(current)}
+
+<b>Pending</b>
+${pending ? formatBudgetLines(pending) : "none"}
+
+${t("budget_prompt")}`;
+}
+
+function buildGmgnStatusText() {
+  const h = gmgnLeaderIntel.getHealth();
+  return `${t("gmgn_title")}
+
+enabled: ${h.enabled ? "yes" : "no"}
+mode: ${escapeHtml(h.mode)}
+auto refresh sec: ${h.autoRefreshSec}
+min recent winrate: ${h.minRecentWinrate}
+min recent pnl pct: ${h.minRecentPnlPct}
+max drawdown pct: ${h.maxLeaderDrawdownPct}
+cooldown min: ${h.cooldownMin}
+cached leaders: ${h.cachedLeaders}`;
+}
+
+async function buildLeaderHealthText() {
+  const leaders = copytradeManager.listLeaders(runtimeConfig);
+  if (!leaders.length) {
+    return `${t("leader_title")}
+
+leaders: none`;
+  }
+
+  const intel = await gmgnLeaderIntel.refreshMany(leaders.map((x) => x.address));
+
+  const lines = [t("leader_title"), ""];
+  for (const row of intel) {
+    lines.push(
+      `• <b>${escapeHtml(row.address)}</b>
+state: ${escapeHtml(row.state)}
+score: ${safeNum(row.score)}
+recent winrate: ${safeNum(row.recentWinrate)}%
+recent pnl: ${safeNum(row.recentPnlPct)}%
+max drawdown: ${safeNum(row.maxDrawdownPct)}%
+source: ${escapeHtml(row.source)}
+last sync: ${escapeHtml(row.lastSyncAt)}`
+    );
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+function applyPendingConfigIfSafe() {
+  if (!runtimeConfig.pendingConfig) return false;
+  if (getPositions().length > 0) return false;
+
+  if (runtimeConfig.pendingConfig.strategyBudget) {
+    runtimeConfig.strategyBudget = runtimeConfig.pendingConfig.strategyBudget;
+    const cfg = getStrategyConfig();
+    const nextCfg = {
+      ...cfg,
+      scalp: { ...(cfg.scalp || {}), allocationPct: runtimeConfig.strategyBudget.scalp },
+      reversal: { ...(cfg.reversal || {}), allocationPct: runtimeConfig.strategyBudget.reversal },
+      runner: { ...(cfg.runner || {}), allocationPct: runtimeConfig.strategyBudget.runner },
+      copytrade: { ...(cfg.copytrade || {}), allocationPct: runtimeConfig.strategyBudget.copytrade }
+    };
+    setStrategyConfig(nextCfg);
+  }
+
+  runtimeConfig.pendingConfig = null;
+  return true;
+}
+
 function shouldClosePosition(position, analyzedNow) {
   const mark = position.lastMark;
   if (!mark) return { close: false, reason: "NO_MARK" };
@@ -571,6 +689,18 @@ function stopLoop() {
   runState.mode = "stopped";
 }
 
+async function syncLeaderScores() {
+  const leaders = copytradeManager.listLeaders(runtimeConfig);
+  if (!leaders.length) return [];
+
+  const intel = await gmgnLeaderIntel.refreshMany(leaders.map((x) => x.address));
+  for (const row of intel) {
+    copytradeManager.setLeaderScore(runtimeConfig, row.address, row.score);
+  }
+  copytradeManager.refreshLeaderStates(runtimeConfig);
+  return intel;
+}
+
 async function cycle(chatId, userId) {
   pruneRecentlyTraded();
 
@@ -679,6 +809,10 @@ async function cycle(chatId, userId) {
       await sendPhotoOrText(chatId, heroImage, buildEntryText(position));
     }
   }
+
+  if (applyPendingConfigIfSafe()) {
+    await sendMessage(chatId, t("pending_applied"), { reply_markup: keyboard() });
+  }
 }
 
 function startRun(chatId, userId, mode) {
@@ -694,7 +828,13 @@ function startRun(chatId, userId, mode) {
   };
 
   if (mode === "4h") {
-    resetPortfolio(1);
+    resetPortfolio(1, {
+      ...getStrategyConfig(),
+      scalp: { ...(getStrategyConfig().scalp || {}), allocationPct: runtimeConfig.strategyBudget.scalp },
+      reversal: { ...(getStrategyConfig().reversal || {}), allocationPct: runtimeConfig.strategyBudget.reversal },
+      runner: { ...(getStrategyConfig().runner || {}), allocationPct: runtimeConfig.strategyBudget.runner },
+      copytrade: { ...(getStrategyConfig().copytrade || {}), allocationPct: runtimeConfig.strategyBudget.copytrade }
+    });
   }
 
   loopId = setInterval(() => {
@@ -801,7 +941,9 @@ async function handleAction(chatId, userId, action) {
   }
 
   if (action === "runinfinite") {
-    if (!getPortfolio().startBalance) resetPortfolio(1);
+    if (!getPortfolio().startBalance) {
+      resetPortfolio(1);
+    }
     await sendMessage(chatId, "♾️ Starting infinite multi-strategy run", {
       reply_markup: keyboard()
     });
@@ -811,6 +953,9 @@ async function handleAction(chatId, userId, action) {
 
   if (action === "stop") {
     stopLoop();
+    if (applyPendingConfigIfSafe()) {
+      await sendMessage(chatId, t("pending_applied"), { reply_markup: keyboard() });
+    }
     await sendMessage(chatId, t("bot_stopped"), { reply_markup: keyboard() });
     await sendMessage(
       chatId,
@@ -875,6 +1020,28 @@ async function handleAction(chatId, userId, action) {
     return;
   }
 
+  if (action === "budget") {
+    await sendMessage(chatId, buildBudgetText(), { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "gmgn_status") {
+    await sendMessage(chatId, buildGmgnStatusText(), { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "leader_health") {
+    await sendMessage(chatId, await buildLeaderHealthText(), { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "sync_leaders") {
+    await syncLeaderScores();
+    await sendMessage(chatId, t("leaders_synced"), { reply_markup: keyboard() });
+    await sendMessage(chatId, await buildLeaderHealthText(), { reply_markup: keyboard() });
+    return;
+  }
+
   if (action === "add_leader") {
     setChatMode(chatId, "awaiting_leader_address");
     await sendMessage(chatId, t("add_leader_prompt"), { reply_markup: keyboard() });
@@ -884,6 +1051,17 @@ async function handleAction(chatId, userId, action) {
   if (action === "set_secret") {
     setChatMode(chatId, "awaiting_secret_ref");
     await sendMessage(chatId, t("add_secret_prompt"), { reply_markup: keyboard() });
+    return;
+  }
+
+  if (action === "apply_pending") {
+    if (applyPendingConfigIfSafe()) {
+      await sendMessage(chatId, t("pending_applied"), { reply_markup: keyboard() });
+    } else {
+      await sendMessage(chatId, "Pending config not applied yet. Stop the bot and close positions first.", {
+        reply_markup: keyboard()
+      });
+    }
     return;
   }
 
@@ -965,6 +1143,32 @@ bot.on("message", (msg) => {
     const action = normalizeAction(text);
 
     if (await processStatefulInput(chatId, text)) return;
+
+    const budgetMatch = text.match(/^budget\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/i);
+    if (budgetMatch) {
+      const values = budgetMatch.slice(1).map(Number);
+      const validated = validateBudgetPercents(values);
+
+      if (!validated.ok) {
+        await sendMessage(chatId, "❌ Budget invalid. Sum must be 100.", {
+          reply_markup: keyboard()
+        });
+        return;
+      }
+
+      runtimeConfig.pendingConfig = {
+        ...(runtimeConfig.pendingConfig || {}),
+        strategyBudget: validated.budget
+      };
+
+      await sendMessage(chatId, `${t("pending_budget_saved")}
+
+<b>Pending</b>
+${formatBudgetLines(validated.budget)}`, {
+        reply_markup: keyboard()
+      });
+      return;
+    }
 
     if (action) {
       await handleAction(chatId, userId, action);
