@@ -30,6 +30,40 @@ function isStrongNarrative(verdict) {
   return v === "strong" || v === "good" || v === "ok";
 }
 
+function isFiniteNumber(v) {
+  return Number.isFinite(Number(v));
+}
+
+function resolveConcentrationInfo(candidate) {
+  const holdersValueRaw = candidate?.holders?.concentration;
+  const walletValueRaw = candidate?.wallet?.concentration;
+
+  const hasHoldersValue = isFiniteNumber(holdersValueRaw);
+  const hasWalletValue = isFiniteNumber(walletValueRaw);
+
+  if (hasHoldersValue) {
+    return {
+      value: safeNum(holdersValueRaw, 0),
+      isProxy: false,
+      source: "holders"
+    };
+  }
+
+  if (hasWalletValue) {
+    return {
+      value: safeNum(walletValueRaw, 0),
+      isProxy: true,
+      source: "wallet_proxy"
+    };
+  }
+
+  return {
+    value: 0,
+    isProxy: true,
+    source: "unknown"
+  };
+}
+
 export default class CopytradeService {
   constructor(options = {}) {
     this.copytradeManager = options.copytradeManager;
@@ -43,7 +77,16 @@ export default class CopytradeService {
       maxPriceExtensionPct: safeNum(options.maxPriceExtensionPct, 18),
       maxRugRisk: safeNum(options.maxRugRisk, 45),
       minLiquidityUsd: safeNum(options.minLiquidityUsd, 12000),
-      maxHolderConcentration: safeNum(options.maxHolderConcentration, 42),
+
+      // было слишком жестко: 42 сразу hard reject
+      concentrationSafeMax: safeNum(options.concentrationSafeMax, 42),
+      concentrationProbeMax: safeNum(options.concentrationProbeMax, 70),
+      concentrationHardRejectAbove: safeNum(options.concentrationHardRejectAbove, 70),
+      proxyConcentrationHardRejectAbove: safeNum(
+        options.proxyConcentrationHardRejectAbove,
+        85
+      ),
+
       hardRejectBotActivity: safeNum(options.hardRejectBotActivity, 55),
       hardRejectCorpseScore: safeNum(options.hardRejectCorpseScore, 70),
       maxDistributionScore: safeNum(options.maxDistributionScore, 26),
@@ -159,9 +202,11 @@ export default class CopytradeService {
     const liquidityUsd =
       safeNum(candidate?.token?.liquidity, 0) ||
       safeNum(candidate?.liquidity?.usd, 0);
-    const concentration =
-      safeNum(candidate?.wallet?.concentration, 0) ||
-      safeNum(candidate?.holders?.concentration, 0);
+
+    const concentrationInfo = resolveConcentrationInfo(candidate);
+    const concentration = safeNum(concentrationInfo.value, 0);
+    const concentrationIsProxy = Boolean(concentrationInfo.isProxy);
+
     const botActivity = safeNum(candidate?.bots?.botActivity, 0);
     const distribution = safeNum(candidate?.distribution?.score, 0);
     const accumulation = safeNum(candidate?.accumulation?.score, 0);
@@ -194,25 +239,44 @@ export default class CopytradeService {
     }
 
     if (isCorpse || corpseScore >= rules.hardRejectCorpseScore) {
-      hardReasons.push(`corpse risk too high`);
+      hardReasons.push("corpse risk too high");
     }
 
     if (falseBounce) {
-      hardReasons.push(`false bounce rejected`);
+      hardReasons.push("false bounce rejected");
     }
 
     if (isBadDevVerdict(devVerdict)) {
-      hardReasons.push(`developer verdict is bad`);
+      hardReasons.push("developer verdict is bad");
     }
 
     if (liquidityUsd < rules.minLiquidityUsd) {
       softReasons.push(`liquidity ${liquidityUsd} < ${rules.minLiquidityUsd}`);
     }
 
-    if (concentration > rules.maxHolderConcentration) {
-      hardReasons.push(
-        `holder concentration ${concentration} > ${rules.maxHolderConcentration}`
-      );
+    // новая мягкая логика концентрации
+    if (concentration > 0) {
+      if (concentrationIsProxy) {
+        if (concentration > rules.proxyConcentrationHardRejectAbove) {
+          hardReasons.push(
+            `holder concentration proxy ${concentration} > ${rules.proxyConcentrationHardRejectAbove}`
+          );
+        } else if (concentration > rules.concentrationSafeMax) {
+          softReasons.push(
+            `holder concentration proxy ${concentration} > ${rules.concentrationSafeMax}`
+          );
+        }
+      } else {
+        if (concentration > rules.concentrationHardRejectAbove) {
+          hardReasons.push(
+            `holder concentration ${concentration} > ${rules.concentrationHardRejectAbove}`
+          );
+        } else if (concentration > rules.concentrationSafeMax) {
+          softReasons.push(
+            `holder concentration ${concentration} > ${rules.concentrationSafeMax}`
+          );
+        }
+      }
     }
 
     if (botActivity >= rules.hardRejectBotActivity) {
@@ -243,15 +307,15 @@ export default class CopytradeService {
       socialCount >= rules.minSocialCount || hasTwitter || hasTelegram || hasWebsite;
 
     if (!socialsOk) {
-      softReasons.push(`social layer too weak`);
+      softReasons.push("social layer too weak");
     }
 
     if (!isStrongNarrative(narrativeVerdict) && !socialsOk) {
-      softReasons.push(`narrative not strong`);
+      softReasons.push("narrative not strong");
     }
 
     if (accumulation <= 0 && absorption <= 0 && distribution >= 20) {
-      softReasons.push(`flow structure weak for follow`);
+      softReasons.push("flow structure weak for follow");
     }
 
     if (hardReasons.length) {
@@ -282,11 +346,11 @@ export default class CopytradeService {
     }
 
     reasons.push(
-      `leader accepted`,
-      `token score ok`,
-      `rug risk ok`,
-      `timing acceptable`,
-      `copytrade filter passed`
+      "leader accepted",
+      "token score ok",
+      "rug risk ok",
+      "timing acceptable",
+      "copytrade filter passed"
     );
 
     if (tokenType) reasons.push(`tokenType ${tokenType}`);
@@ -376,8 +440,10 @@ own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
     lines.push(`max extension pct: ${r.maxPriceExtensionPct}`);
     lines.push(`max rug risk: ${r.maxRugRisk}`);
     lines.push(`min liquidity usd: ${r.minLiquidityUsd}`);
-    lines.push(`max concentration: ${r.maxHolderConcentration}`);
-    lines.push(`hard stop pct: ${r.copytradeHardStopPct}`);
+    lines.push(`concentration safe max: ${r.concentrationSafeMax}`);
+    lines.push(`concentration probe max: ${r.concentrationProbeMax}`);
+    lines.push(`concentration hard reject above: ${r.concentrationHardRejectAbove}`);
+    lines.push(`copytrade hard stop pct: ${r.copytradeHardStopPct}`);
     lines.push("");
     lines.push(this.buildExecutionModeText());
     lines.push("");
