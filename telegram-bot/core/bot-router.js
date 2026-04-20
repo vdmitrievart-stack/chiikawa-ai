@@ -23,6 +23,7 @@ function normalizeAction(text) {
   if (raw === "/stop" || raw === "stop") return "stop";
   if (raw === "/kill" || raw === "kill") return "kill";
   if (raw === "/status" || raw.includes("status")) return "status";
+  if (raw === "/intents" || raw.includes("pending intents")) return "intents";
   if (raw === "/balance" || raw.includes("balance")) return "balance";
   if (raw === "/scanmarket" || raw.includes("scan market")) return "scan_market";
   if (raw === "/scanca" || raw === "/ca" || raw.includes("scan ca")) return "scan_ca";
@@ -36,7 +37,6 @@ function normalizeAction(text) {
   if (raw === "/addleader") return "add_leader";
   if (raw === "/setsecret") return "set_secret";
   if (raw === "/applypending") return "apply_pending";
-  if (raw === "/intents") return "intents";
   if (raw.startsWith("/intent_signed ")) return "intent_signed";
   if (raw.startsWith("/intent_submitted ")) return "intent_submitted";
   if (raw.startsWith("/intent_confirmed ")) return "intent_confirmed";
