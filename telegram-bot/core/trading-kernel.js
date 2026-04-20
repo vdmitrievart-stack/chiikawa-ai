@@ -365,6 +365,24 @@ export default class TradingKernel {
     return intel;
   }
 
+  async enrichCandidateForCopytrade(candidate) {
+    if (!candidate) return candidate;
+
+    if (!this.gmgnLeaderIntel?.enrichCandidateWithLeaderTrade) {
+      return candidate;
+    }
+
+    try {
+      return await this.gmgnLeaderIntel.enrichCandidateWithLeaderTrade(
+        this.runtime.activeConfig,
+        candidate
+      );
+    } catch (error) {
+      this.logger.log("copytrade enrich failed:", error.message);
+      return candidate;
+    }
+  }
+
   async tick(sendBridge) {
     this.runtime.cycleCount += 1;
     this.runtime.lastCycleAt = Date.now();
@@ -387,7 +405,10 @@ export default class TradingKernel {
           })
           .catch(() => null);
 
-        return probe?.candidate?.token?.ca === ca ? probe.candidate : null;
+        const baseCandidate = probe?.candidate?.token?.ca === ca ? probe.candidate : null;
+        if (!baseCandidate) return null;
+
+        return this.enrichCandidateForCopytrade(baseCandidate);
       }
     });
 
@@ -434,7 +455,8 @@ export default class TradingKernel {
       return;
     }
 
-    const { candidate, plans, heroImage } = result;
+    let { candidate, plans, heroImage } = result;
+    candidate = await this.enrichCandidateForCopytrade(candidate);
 
     await notificationService.sendPhotoOrText(
       heroImage,
@@ -751,13 +773,15 @@ createdAt: ${escapeHtml(row.createdAt || "-")}`
       return;
     }
 
+    const enrichedAnalyzed = await this.enrichCandidateForCopytrade(result.analyzed);
+
     await send.photoOrText(
       result.heroImage,
-      this.candidateService.buildHeroCaption(result.analyzed)
+      this.candidateService.buildHeroCaption(enrichedAnalyzed)
     );
 
     await send.text(
-      this.candidateService.buildAnalysisText(result.analyzed, result.plans)
+      this.candidateService.buildAnalysisText(enrichedAnalyzed, result.plans)
     );
   }
 }
