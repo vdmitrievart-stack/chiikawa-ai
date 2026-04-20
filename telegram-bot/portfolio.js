@@ -1,8 +1,9 @@
 const DEFAULT_STRATEGY_CONFIG = {
-  scalp: { label: "SCALP", allocationPct: 0.25 },
-  reversal: { label: "REVERSAL", allocationPct: 0.25 },
-  runner: { label: "RUNNER", allocationPct: 0.25 },
-  copytrade: { label: "COPYTRADE", allocationPct: 0.25 }
+  scalp: { label: "SCALP", allocationPct: 0.2 },
+  reversal: { label: "REVERSAL", allocationPct: 0.2 },
+  runner: { label: "RUNNER", allocationPct: 0.2 },
+  copytrade: { label: "COPYTRADE", allocationPct: 0.2 },
+  migration_survivor: { label: "MIGRATION_SURVIVOR", allocationPct: 0.2 }
 };
 
 const ENTRY_MODE_MULTIPLIERS = {
@@ -18,9 +19,9 @@ const EXIT_SLIPPAGE_PCT = 0.6;
 const PRIORITY_FEE_SOL = 0.00001;
 
 let strategyConfig = cloneConfig(DEFAULT_STRATEGY_CONFIG);
-let state = createFreshState(1);
+let state = createFreshState(10);
 
-function createFreshState(startBalance = 1) {
+function createFreshState(startBalance = 10) {
   return {
     startBalance,
     cash: startBalance,
@@ -46,6 +47,10 @@ function pctToFrac(pct) {
 
 function cloneConfig(input) {
   return JSON.parse(JSON.stringify(input || DEFAULT_STRATEGY_CONFIG));
+}
+
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
 function normalizeEntryMode(mode) {
@@ -80,6 +85,75 @@ function getExitCosts(grossValueSol) {
   };
 }
 
+function normalizePersistedPositions(rows = []) {
+  return clone(Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    strategy: String(row?.strategy || "").trim(),
+    runnerTargetsPct: Array.isArray(row?.runnerTargetsPct) ? row.runnerTargetsPct : [],
+    runnerTargetIndex: safeNum(row?.runnerTargetIndex, 0),
+    partialRealizedSol: safeNum(row?.partialRealizedSol, 0),
+    amountSol: safeNum(row?.amountSol, 0),
+    tokenAmount: safeNum(row?.tokenAmount, 0),
+    entryReferencePrice: safeNum(row?.entryReferencePrice, 0),
+    entryEffectivePrice: safeNum(row?.entryEffectivePrice, 0),
+    stopLossPct: safeNum(row?.stopLossPct, 0),
+    takeProfitPct: safeNum(row?.takeProfitPct, 0),
+    openedAt: safeNum(row?.openedAt, Date.now()),
+    highestPrice: safeNum(row?.highestPrice, row?.entryReferencePrice || 0),
+    lowestPrice: safeNum(row?.lowestPrice, row?.entryReferencePrice || 0),
+    lastPrice: safeNum(row?.lastPrice, row?.entryReferencePrice || 0),
+    entryCosts: {
+      feeSol: safeNum(row?.entryCosts?.feeSol, 0),
+      slippageSol: safeNum(row?.entryCosts?.slippageSol, 0),
+      prioritySol: safeNum(row?.entryCosts?.prioritySol, PRIORITY_FEE_SOL),
+      totalSol: safeNum(row?.entryCosts?.totalSol, 0)
+    },
+    lastMark: row?.lastMark
+      ? {
+          currentPrice: safeNum(row.lastMark.currentPrice, 0),
+          grossValueSol: safeNum(row.lastMark.grossValueSol, 0),
+          netValueSol: safeNum(row.lastMark.netValueSol, 0),
+          grossPnlSol: safeNum(row.lastMark.grossPnlSol, 0),
+          grossPnlPct: safeNum(row.lastMark.grossPnlPct, 0),
+          netPnlSol: safeNum(row.lastMark.netPnlSol, 0),
+          netPnlPct: safeNum(row.lastMark.netPnlPct, 0),
+          ageMs: safeNum(row.lastMark.ageMs, 0)
+        }
+      : null
+  }));
+}
+
+function normalizePersistedClosedTrades(rows = []) {
+  return clone(Array.isArray(rows) ? rows : []).map((row) => ({
+    ...row,
+    strategy: String(row?.strategy || "").trim(),
+    amountSol: safeNum(row?.amountSol, 0),
+    entryReferencePrice: safeNum(row?.entryReferencePrice, 0),
+    entryEffectivePrice: safeNum(row?.entryEffectivePrice, 0),
+    exitReferencePrice: safeNum(row?.exitReferencePrice, 0),
+    partialRealizedSol: safeNum(row?.partialRealizedSol, 0),
+    netValueSol: safeNum(row?.netValueSol, 0),
+    netPnlSol: safeNum(row?.netPnlSol, 0),
+    netPnlPct: safeNum(row?.netPnlPct, 0),
+    durationMs: safeNum(row?.durationMs, 0),
+    openedAt: safeNum(row?.openedAt, 0),
+    closedAt: safeNum(row?.closedAt, 0),
+    balanceAfter: safeNum(row?.balanceAfter, 0),
+    entryCosts: {
+      feeSol: safeNum(row?.entryCosts?.feeSol, 0),
+      slippageSol: safeNum(row?.entryCosts?.slippageSol, 0),
+      prioritySol: safeNum(row?.entryCosts?.prioritySol, PRIORITY_FEE_SOL),
+      totalSol: safeNum(row?.entryCosts?.totalSol, 0)
+    },
+    exitCosts: {
+      feeSol: safeNum(row?.exitCosts?.feeSol, 0),
+      slippageSol: safeNum(row?.exitCosts?.slippageSol, 0),
+      prioritySol: safeNum(row?.exitCosts?.prioritySol, PRIORITY_FEE_SOL),
+      totalSol: safeNum(row?.exitCosts?.totalSol, 0)
+    }
+  }));
+}
+
 export function estimateRoundTripCostPct() {
   return ENTRY_FEE_PCT + EXIT_FEE_PCT + ENTRY_SLIPPAGE_PCT + EXIT_SLIPPAGE_PCT;
 }
@@ -93,9 +167,33 @@ export function getStrategyConfig() {
   return cloneConfig(strategyConfig);
 }
 
-export function resetPortfolio(startBalance = 1, nextConfig = strategyConfig) {
+export function resetPortfolio(startBalance = 10, nextConfig = strategyConfig) {
   strategyConfig = cloneConfig(nextConfig);
   state = createFreshState(startBalance);
+  return getPortfolio();
+}
+
+export function hydratePortfolioSnapshot(
+  savedSnapshot = {},
+  nextConfig = strategyConfig,
+  fallbackStartBalance = 10
+) {
+  const portfolio = savedSnapshot?.portfolio || savedSnapshot || {};
+
+  strategyConfig = cloneConfig(nextConfig || DEFAULT_STRATEGY_CONFIG);
+
+  const startBalance = safeNum(portfolio?.startBalance, fallbackStartBalance);
+  const cash = safeNum(portfolio?.cash, startBalance);
+
+  state = {
+    startBalance,
+    cash,
+    positions: normalizePersistedPositions(portfolio?.positions || []),
+    closedTrades: normalizePersistedClosedTrades(portfolio?.closedTrades || []),
+    runStartedAt: safeNum(portfolio?.runStartedAt, Date.now())
+  };
+
+  return getPortfolio();
 }
 
 export function getPositions() {
@@ -119,7 +217,7 @@ function getCurrentlyUsedCapital(strategy) {
   return round(
     state.positions
       .filter((p) => p.strategy === strategy)
-      .reduce((sum, p) => sum + p.amountSol + p.entryCosts.totalSol, 0),
+      .reduce((sum, p) => sum + p.amountSol + safeNum(p.entryCosts?.totalSol, 0), 0),
     8
   );
 }
@@ -153,6 +251,12 @@ function getMinimumTradeSize(strategy, entryMode) {
     return 0.08;
   }
 
+  if (strategy === "migration_survivor") {
+    if (mode === "PROBE") return 0.03;
+    if (mode === "SCALED") return 0.06;
+    return 0.1;
+  }
+
   if (mode === "PROBE") return 0.015;
   if (mode === "SCALED") return 0.035;
   return 0.06;
@@ -171,6 +275,12 @@ function getMaximumTradeSize(strategy, entryMode) {
     if (mode === "PROBE") return 0.1;
     if (mode === "SCALED") return 0.2;
     return 0.35;
+  }
+
+  if (strategy === "migration_survivor") {
+    if (mode === "PROBE") return 0.12;
+    if (mode === "SCALED") return 0.22;
+    return 0.4;
   }
 
   if (mode === "PROBE") return 0.07;
@@ -251,7 +361,8 @@ export function openPosition({
   walletId = null,
   entryMode = "SCALED",
   planName = "",
-  planObjective = ""
+  planObjective = "",
+  copytradeExitState = null
 }) {
   if (!token?.ca || !token?.name || !safeNum(token.price)) return null;
   if (!strategyConfig[strategy]) return null;
@@ -301,7 +412,8 @@ export function openPosition({
     lowestPrice: round(token.price, 12),
     lastPrice: round(token.price, 12),
     lastMark: null,
-    partialRealizedSol: 0
+    partialRealizedSol: 0,
+    copytradeExitState: copytradeExitState ? clone(copytradeExitState) : null
   };
 
   state.cash = round(state.cash - debit, 8);
@@ -328,9 +440,10 @@ export function markPosition(position, currentPrice) {
   const netPnlPct = totalCapitalUsed > 0 ? (netPnlSol / totalCapitalUsed) * 100 : 0;
 
   const grossPnlSol = grossValueSol - safeNum(position.amountSol);
-  const grossPnlPct = safeNum(position.amountSol) > 0
-    ? (grossPnlSol / safeNum(position.amountSol)) * 100
-    : 0;
+  const grossPnlPct =
+    safeNum(position.amountSol) > 0
+      ? (grossPnlSol / safeNum(position.amountSol)) * 100
+      : 0;
 
   position.lastMark = {
     currentPrice: round(px, 12),
@@ -347,7 +460,8 @@ export function markPosition(position, currentPrice) {
 }
 
 export function maybeTakeRunnerPartial(position, currentPrice) {
-  if (!position || position.strategy !== "runner") return null;
+  if (!position) return null;
+  if (!["runner", "migration_survivor"].includes(String(position.strategy || ""))) return null;
   if (!Array.isArray(position.runnerTargetsPct) || !position.runnerTargetsPct.length) return null;
 
   const mark = markPosition(position, currentPrice);
@@ -378,6 +492,7 @@ export function maybeTakeRunnerPartial(position, currentPrice) {
     targetPct: target,
     soldFraction: fraction,
     netValueSol: round(netValueSol, 8),
+    realizedPct: round(mark.grossPnlPct, 4),
     remainingTokenAmount: position.tokenAmount
   };
 }
