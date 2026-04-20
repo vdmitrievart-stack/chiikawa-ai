@@ -1,10 +1,4 @@
 import {
-  getLatestTokenPrice,
-  recordTradeOutcomeFromSignalContext,
-  analyzeToken
-} from "../scan-engine.js";
-
-import {
   getPortfolio,
   getPositions,
   getStrategyConfig,
@@ -35,7 +29,6 @@ import {
   queuePendingConfig,
   canApplyPendingConfig,
   applyPendingConfig,
-  isStrategyAllowed,
   canOpenNewPositions
 } from "./trading-runtime.js";
 
@@ -43,8 +36,7 @@ import CandidateService from "./candidate-service.js";
 import PositionService from "./position-service.js";
 import CopytradeService from "./copytrade-service.js";
 import NotificationService from "./notification-service.js";
-
-const DEX_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
+import WalletOrchestrator from "../wallets/wallet-orchestrator.js";
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -94,8 +86,16 @@ export default class TradingKernel {
       )
     );
 
+    this.walletOrchestrator = new WalletOrchestrator({
+      walletRouter: this.walletRouter,
+      logger: this.logger
+    });
+
     this.candidateService = new CandidateService({ logger: this.logger });
-    this.positionService = new PositionService({ logger: this.logger });
+    this.positionService = new PositionService({
+      logger: this.logger,
+      walletOrchestrator: this.walletOrchestrator
+    });
     this.copytradeService = new CopytradeService({
       copytradeManager: this.copytradeManager,
       gmgnLeaderIntel: this.gmgnLeaderIntel,
@@ -191,11 +191,7 @@ export default class TradingKernel {
 
   async requestHardKill() {
     requestKill(this.runtime);
-    const closed = await this.positionService.forceCloseAll("KILL_SWITCH");
-    for (const row of closed) {
-      this.recentlyTraded.set(row.ca, Date.now());
-      await recordTradeOutcomeFromSignalContext(row.signalContext, row.netPnlPct);
-    }
+    const closed = await this.positionService.forceCloseAll(this.runtime.activeConfig, "KILL_SWITCH");
     await this.applyPendingIfPossible();
     finishRuntime(this.runtime);
     await this.persistSnapshot();
@@ -239,6 +235,7 @@ export default class TradingKernel {
     const notificationService = new NotificationService({ send: sendBridge });
 
     await this.positionService.updateOpenPositions({
+      runtimeConfig: this.runtime.activeConfig,
       notificationService,
       recentlyTraded: this.recentlyTraded,
       candidateProbeFn: async (ca) => {
@@ -307,20 +304,28 @@ export default class TradingKernel {
         if (!this.copytradeService.canTradeCopy(this.runtime.activeConfig)) continue;
       }
 
-      const walletId = this.walletRouter.getPrimaryWalletId(this.runtime.activeConfig, plan.strategyKey);
-      const walletCheck = this.walletRouter.validateWalletForStrategy(
+      const walletId = this.walletOrchestrator.getPrimaryWalletId(
+        this.runtime.activeConfig,
+        plan.strategyKey
+      );
+
+      const walletCheck = this.walletOrchestrator.validateForStrategy(
         this.runtime.activeConfig,
         walletId,
         plan.strategyKey
       );
+
       if (!walletCheck.ok) continue;
 
-      const position = this.positionService.maybeOpenPosition({
-        plan,
-        candidate,
-        heroImage,
-        walletId
-      });
+      const position = await this.positionService.orchestrateAndOpen(
+        this.runtime.activeConfig,
+        {
+          plan,
+          candidate,
+          heroImage,
+          walletId
+        }
+      );
 
       if (position) {
         await notificationService.sendEntry(heroImage, position);
@@ -408,6 +413,7 @@ Send: <code>budget 25 25 25 25</code>`;
   }
 
   async fetchTokenByCA(ca) {
+    const DEX_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
     const res = await fetch(`${DEX_TOKEN_API}/${encodeURIComponent(ca)}`);
     if (!res.ok) throw new Error(`DexScreener HTTP ${res.status}`);
 
