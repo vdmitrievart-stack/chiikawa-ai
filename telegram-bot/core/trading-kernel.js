@@ -385,6 +385,10 @@ export default class TradingKernel {
         ca: position.ca
       },
       intent: {
+        amountSol: safeNum(position.amountSol, 0),
+        expectedEntryPrice:
+          safeNum(position.entryEffectivePrice, 0) ||
+          safeNum(position.entryReferencePrice, 0),
         expectedExitPrice: latestPrice || position.lastPrice || 0,
         tokenAmount: position.tokenAmountRaw || 0
       },
@@ -395,6 +399,9 @@ export default class TradingKernel {
   async runGMGNPartial(position, partial, latestPrice, runtimeConfig = this.runtime.activeConfig) {
     if (!position?.walletId) return null;
 
+    const soldFraction = safeNum(partial?.soldFraction, 0);
+    const baseAmountSol = safeNum(position.amountSol, 0);
+
     return this.gmgnExecutionService.executePartial(runtimeConfig, {
       walletId: position.walletId,
       strategy: position.strategy,
@@ -403,9 +410,14 @@ export default class TradingKernel {
         symbol: position.symbol,
         ca: position.ca
       },
-      soldFraction: safeNum(partial?.soldFraction, 0),
+      soldFraction,
       currentPrice: latestPrice || 0,
       intent: {
+        amountSol: baseAmountSol > 0 ? baseAmountSol * soldFraction : 0,
+        expectedEntryPrice:
+          safeNum(position.entryEffectivePrice, 0) ||
+          safeNum(position.entryReferencePrice, 0),
+        expectedExitPrice: latestPrice || 0,
         tokenAmount: position.tokenAmountRaw || 0
       },
       note: `runner partial ${safeNum(partial?.targetPct, 0)}`
@@ -841,7 +853,6 @@ Send: <code>budget 25 25 25 25</code>`;
     );
   }
 
-  // compatibility with current bot-router
   buildPendingIntentText(limit = 10) {
     return this.buildGMGNOrdersText(limit);
   }
