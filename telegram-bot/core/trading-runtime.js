@@ -7,21 +7,32 @@ function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+const DEFAULT_STRATEGY_KEYS = [
+  "scalp",
+  "reversal",
+  "runner",
+  "copytrade",
+  "migration_survivor"
+];
+
 export function buildDefaultRuntimeConfig(overrides = {}) {
   return {
     language: overrides.language || "ru",
     dryRun: overrides.dryRun !== false,
+    startBalanceSol: safeNum(overrides.startBalanceSol, 10),
     strategyBudget: {
-      scalp: safeNum(overrides.strategyBudget?.scalp, 0.25),
-      reversal: safeNum(overrides.strategyBudget?.reversal, 0.25),
-      runner: safeNum(overrides.strategyBudget?.runner, 0.25),
-      copytrade: safeNum(overrides.strategyBudget?.copytrade, 0.25)
+      scalp: safeNum(overrides.strategyBudget?.scalp, 0.2),
+      reversal: safeNum(overrides.strategyBudget?.reversal, 0.2),
+      runner: safeNum(overrides.strategyBudget?.runner, 0.2),
+      copytrade: safeNum(overrides.strategyBudget?.copytrade, 0.2),
+      migration_survivor: safeNum(overrides.strategyBudget?.migration_survivor, 0.2)
     },
     strategyEnabled: {
       scalp: overrides.strategyEnabled?.scalp !== false,
       reversal: overrides.strategyEnabled?.reversal !== false,
       runner: overrides.strategyEnabled?.runner !== false,
-      copytrade: overrides.strategyEnabled?.copytrade !== false
+      copytrade: overrides.strategyEnabled?.copytrade !== false,
+      migration_survivor: overrides.strategyEnabled?.migration_survivor !== false
     },
     wallets: clone(overrides.wallets || {}),
     strategyRouting: clone(overrides.strategyRouting || {}),
@@ -129,8 +140,7 @@ export function isStrategyAllowed(runtime, strategyKey) {
 }
 
 export function listAllowedStrategies(runtime) {
-  const keys = ["scalp", "reversal", "runner", "copytrade"];
-  return keys.filter((key) => isStrategyAllowed(runtime, key));
+  return DEFAULT_STRATEGY_KEYS.filter((key) => isStrategyAllowed(runtime, key));
 }
 
 export function canOpenNewPositions(runtime) {
