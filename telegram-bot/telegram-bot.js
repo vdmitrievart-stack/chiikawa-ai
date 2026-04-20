@@ -148,7 +148,11 @@ const webhookServer = new WebhookServer({
 
 async function main() {
   try {
-    await kernel.initialize();
+    if (typeof kernel.initialize === "function") {
+      await kernel.initialize();
+    } else {
+      console.log("kernel.initialize not found, skipping bootstrap init");
+    }
 
     bot.on("message", (msg) => {
       router.handleMessage(msg).catch((err) => {
@@ -156,7 +160,11 @@ async function main() {
       });
     });
 
-    webhookServer.start();
+    if (typeof webhookServer.start === "function") {
+      webhookServer.start();
+    } else {
+      console.log("webhookServer.start not found");
+    }
 
     console.log("Chiikawa trading bot bootstrap initialized");
     console.log(`Webhook path: ${WEBHOOK_PATH}`);
