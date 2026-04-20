@@ -48,8 +48,6 @@ import {
   canOpenNewPositions
 } from "./trading-runtime.js";
 
-const DEX_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
-
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -153,6 +151,7 @@ export default class TradingKernel {
     walletRouter,
     copytradeManager,
     gmgnLeaderIntel,
+    persistence,
     initialConfig,
     logger = console
   }) {
@@ -160,6 +159,7 @@ export default class TradingKernel {
     this.walletRouter = walletRouter;
     this.copytradeManager = copytradeManager;
     this.gmgnLeaderIntel = gmgnLeaderIntel;
+    this.persistence = persistence || null;
     this.startBalanceSol = safeNum(initialConfig?.startBalanceSol, 10);
 
     this.runtime = createTradingRuntime(
@@ -183,7 +183,40 @@ export default class TradingKernel {
 
     this.recentlyTraded = new Map();
     this.previousReportEquity = null;
-    this.lastStatusText = "";
+  }
+
+  async restoreIfAvailable() {
+    if (!this.persistence) return false;
+    const snapshot = await this.persistence.loadSnapshot();
+    if (!snapshot) return false;
+
+    if (snapshot?.runtime?.activeConfig) {
+      this.runtime.activeConfig = snapshot.runtime.activeConfig;
+      this.runtime.pendingConfig = snapshot.runtime.pendingConfig || null;
+      this.runtime.pendingReason = snapshot.runtime.pendingReason || null;
+      this.runtime.pendingQueuedAt = snapshot.runtime.pendingQueuedAt || null;
+      this.runtime.mode = "stopped";
+      this.runtime.strategyScope = "all";
+      this.runtime.stopRequested = false;
+      this.runtime.killRequested = false;
+      this.startBalanceSol = safeNum(snapshot.runtime.startBalanceSol, this.startBalanceSol);
+      this.syncPortfolioStrategyBudget();
+    }
+
+    return true;
+  }
+
+  async persistSnapshot() {
+    if (!this.persistence) return false;
+    return this.persistence.saveSnapshot({
+      runtime: {
+        activeConfig: this.runtime.activeConfig,
+        pendingConfig: this.runtime.pendingConfig,
+        pendingReason: this.runtime.pendingReason,
+        pendingQueuedAt: this.runtime.pendingQueuedAt,
+        startBalanceSol: this.startBalanceSol
+      }
+    });
   }
 
   getRuntime() {
@@ -204,6 +237,7 @@ export default class TradingKernel {
 
   setLanguage(lang) {
     this.runtime.activeConfig.language = lang === "en" ? "en" : "ru";
+    this.persistSnapshot();
     return this.runtime.activeConfig.language;
   }
 
@@ -224,11 +258,13 @@ export default class TradingKernel {
     this.previousReportEquity = null;
     this.syncPortfolioStrategyBudget();
     resetPortfolio(this.startBalanceSol, getStrategyConfig());
+    this.persistSnapshot();
     return this.runtime;
   }
 
   requestSoftStop() {
     requestStop(this.runtime);
+    this.persistSnapshot();
     return this.runtime;
   }
 
@@ -237,6 +273,7 @@ export default class TradingKernel {
     const closed = await this.forceCloseAllPositions("KILL_SWITCH");
     await this.applyPendingIfPossible();
     finishRuntime(this.runtime);
+    await this.persistSnapshot();
     return closed;
   }
 
@@ -258,6 +295,7 @@ export default class TradingKernel {
     const validated = validateBudgetPercents(values);
     if (!validated.ok) return validated;
     queuePendingConfig(this.runtime, { strategyBudget: validated.budget }, "budget_update");
+    this.persistSnapshot();
     return { ok: true, budget: validated.budget };
   }
 
@@ -265,6 +303,7 @@ export default class TradingKernel {
     if (!canApplyPendingConfig(this.runtime, getPositions().length)) return false;
     applyPendingConfig(this.runtime);
     this.syncPortfolioStrategyBudget();
+    await this.persistSnapshot();
     return true;
   }
 
@@ -327,6 +366,7 @@ export default class TradingKernel {
       this.copytradeManager.setLeaderScore(this.runtime.activeConfig, row.address, row.score);
     }
     this.copytradeManager.refreshLeaderStates(this.runtime.activeConfig);
+    await this.persistSnapshot();
     return intel;
   }
 
@@ -375,6 +415,7 @@ export default class TradingKernel {
     if (this.runtime.stopRequested && getPositions().length === 0) {
       await this.applyPendingIfPossible();
       finishRuntime(this.runtime);
+      await this.persistSnapshot();
       await send.text("✅ Stop completed. No open positions left.");
       return;
     }
@@ -560,7 +601,7 @@ mode: ${escapeHtml(h.mode)}
 auto refresh sec: ${h.autoRefreshSec}
 min recent winrate: ${h.minRecentWinrate}
 min recent pnl pct: ${h.minRecentPnlPct}
-max drawdown pct: ${h.maxLeaderDrawdownPct}
+max drawdown pct: ${h.maxDrawdownPct}
 cooldown min: ${h.cooldownMin}
 cached leaders: ${h.cachedLeaders}`;
   }
@@ -592,16 +633,20 @@ last sync: ${escapeHtml(row.lastSyncAt)}`
   }
 
   addLeader(address) {
-    return this.copytradeManager.addLeader(this.runtime.activeConfig, address, "manual");
+    const row = this.copytradeManager.addLeader(this.runtime.activeConfig, address, "manual");
+    this.persistSnapshot();
+    return row;
   }
 
   setWalletSecretRef(walletId, secretRef) {
     if (!this.runtime.activeConfig.wallets[walletId]) return false;
     this.runtime.activeConfig.wallets[walletId].secretRef = secretRef;
+    this.persistSnapshot();
     return true;
   }
 
   async fetchTokenByCA(ca) {
+    const DEX_TOKEN_API = "https://api.dexscreener.com/latest/dex/tokens";
     const res = await fetch(`${DEX_TOKEN_API}/${encodeURIComponent(ca)}`);
     if (!res.ok) throw new Error(`DexScreener HTTP ${res.status}`);
 
