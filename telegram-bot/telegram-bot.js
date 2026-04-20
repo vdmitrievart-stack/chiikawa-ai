@@ -61,10 +61,11 @@ const kernel = new TradingKernel({
     dryRun: true,
     startBalanceSol: 10,
     strategyBudget: {
-      scalp: 0.25,
-      reversal: 0.25,
-      runner: 0.25,
-      copytrade: 0.25
+      scalp: 0.2,
+      reversal: 0.2,
+      runner: 0.2,
+      copytrade: 0.2,
+      migration_survivor: 0.2
     },
     wallets: {
       wallet_scalp_main: {
@@ -114,13 +115,26 @@ const kernel = new TradingKernel({
         gmgnAccountId: process.env.GMGN_ACCOUNT_ID || "",
         publicKey: process.env.GMGN_WALLET_COPYTRADE_PUBLIC_KEY || "",
         secretRef: ""
+      },
+      wallet_migration_main: {
+        label: "GMGN Migration Main",
+        role: "trader",
+        enabled: true,
+        executionBackend: "gmgn",
+        executionMode: process.env.GMGN_EXECUTION_MODE || "dry_run",
+        allowedStrategies: ["migration_survivor"],
+        gmgnWalletId: process.env.GMGN_WALLET_MIGRATION_ID || "",
+        gmgnAccountId: process.env.GMGN_ACCOUNT_ID || "",
+        publicKey: process.env.GMGN_WALLET_MIGRATION_PUBLIC_KEY || "",
+        secretRef: ""
       }
     },
     strategyRouting: {
       scalp: ["wallet_scalp_main"],
       reversal: ["wallet_reversal_main"],
       runner: ["wallet_runner_main"],
-      copytrade: ["wallet_copytrade_main"]
+      copytrade: ["wallet_copytrade_main"],
+      migration_survivor: ["wallet_migration_main"]
     },
     copytrade: {
       enabled: true,
@@ -146,6 +160,23 @@ const webhookServer = new WebhookServer({
   logger: console
 });
 
+function shortErrorMessage(error) {
+  const message = error?.stack || error?.message || String(error);
+  return String(message).slice(0, 700);
+}
+
+async function safeReplyError(chatId, error) {
+  try {
+    await bot.sendMessage(
+      chatId,
+      `❌ Bot handler error\n\n<code>${shortErrorMessage(error)}</code>`,
+      { parse_mode: "HTML" }
+    );
+  } catch (sendError) {
+    console.log("failed to send error to chat:", sendError.message);
+  }
+}
+
 async function main() {
   try {
     if (typeof kernel.initialize === "function") {
@@ -154,10 +185,13 @@ async function main() {
       console.log("kernel.initialize not found, skipping bootstrap init");
     }
 
-    bot.on("message", (msg) => {
-      router.handleMessage(msg).catch((err) => {
-        console.log("message error:", err.message);
-      });
+    bot.on("message", async (msg) => {
+      try {
+        await router.handleMessage(msg);
+      } catch (err) {
+        console.log("message error:", err);
+        await safeReplyError(msg.chat.id, err);
+      }
     });
 
     if (typeof webhookServer.start === "function") {
