@@ -14,37 +14,44 @@ function normalizeAction(text) {
   const raw = String(text || "").toLowerCase().trim();
   if (!raw) return null;
 
-  if (raw === "/start" || raw === "/menu") return "start";
-  if (raw === "/runmulti" || raw.includes("run multi")) return "run_multi";
-  if (raw === "/runscalp" || raw.includes("run scalp")) return "run_scalp";
-  if (raw === "/runreversal" || raw.includes("run reversal")) return "run_reversal";
-  if (raw === "/runrunner" || raw.includes("run runner")) return "run_runner";
-  if (raw === "/runcopytrade" || raw.includes("run copytrade")) return "run_copytrade";
-  if (raw === "/runmigration" || raw.includes("run migration")) return "run_migration";
-  if (raw === "/stop" || raw === "stop") return "stop";
-  if (raw === "/kill" || raw === "kill") return "kill";
-  if (raw === "/status" || raw.includes("status")) return "status";
-  if (raw === "/intents" || raw.includes("pending intents")) return "intents";
-  if (raw === "/gmgnexecution" || raw.includes("gmgn execution")) return "gmgn_execution";
-  if (raw === "/gmgnorders" || raw.includes("gmgn orders")) return "gmgn_orders";
-  if (raw === "/balance" || raw.includes("balance")) return "balance";
-  if (raw === "/scanmarket" || raw.includes("scan market")) return "scan_market";
-  if (raw === "/scanca" || raw === "/ca" || raw.includes("scan ca")) return "scan_ca";
-  if (raw === "/language" || raw.includes("language")) return "language";
-  if (raw === "/wallets" || raw.includes("wallets")) return "wallets";
-  if (raw === "/copytrade" || raw.includes("copytrade")) return "copytrade";
-  if (raw === "/budget" || raw.includes("budget")) return "budget";
-  if (raw === "/gmgnstatus" || raw.includes("gmgn status")) return "gmgn_status";
-  if (raw === "/leaderhealth" || raw.includes("leader health")) return "leader_health";
-  if (raw === "/syncleaders" || raw.includes("sync leaders")) return "sync_leaders";
-  if (raw === "/addleader") return "add_leader";
-  if (raw === "/setsecret") return "set_secret";
-  if (raw === "/applypending") return "apply_pending";
-  if (raw === "/exportcsv") return "exportcsv";
-  if (raw === "/exportjson") return "exportjson";
-  if (raw === "/exportxlsx") return "exportxlsx";
-  if (raw === "lang ru") return "lang_ru";
-  if (raw === "lang en") return "lang_en";
+  const normalized = raw
+    .replace(/[^\p{L}\p{N}\/\s_:-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (normalized === "/start" || normalized === "/menu") return "start";
+  if (normalized === "/runmulti" || normalized.includes("run multi")) return "run_multi";
+  if (normalized === "/runscalp" || normalized.includes("run scalp")) return "run_scalp";
+  if (normalized === "/runreversal" || normalized.includes("run reversal")) return "run_reversal";
+  if (normalized === "/runrunner" || normalized.includes("run runner")) return "run_runner";
+  if (normalized === "/runcopytrade" || normalized.includes("run copytrade")) return "run_copytrade";
+  if (normalized === "/runmigration" || normalized.includes("run migration")) return "run_migration";
+
+  if (normalized === "/stop" || normalized === "stop" || normalized.includes(" stop")) return "stop";
+  if (normalized === "/kill" || normalized === "kill" || normalized.includes(" kill")) return "kill";
+
+  if (normalized === "/status" || normalized.includes("status")) return "status";
+  if (normalized === "/intents" || normalized.includes("pending intents")) return "intents";
+  if (normalized === "/gmgnexecution" || normalized.includes("gmgn execution")) return "gmgn_execution";
+  if (normalized === "/gmgnorders" || normalized.includes("gmgn orders")) return "gmgn_orders";
+  if (normalized === "/balance" || normalized.includes("balance")) return "balance";
+  if (normalized === "/scanmarket" || normalized.includes("scan market")) return "scan_market";
+  if (normalized === "/scanca" || normalized === "/ca" || normalized.includes("scan ca")) return "scan_ca";
+  if (normalized === "/language" || normalized.includes("language")) return "language";
+  if (normalized === "/wallets" || normalized.includes("wallets")) return "wallets";
+  if (normalized === "/copytrade" || normalized.includes("copytrade")) return "copytrade";
+  if (normalized === "/budget" || normalized.includes("budget")) return "budget";
+  if (normalized === "/gmgnstatus" || normalized.includes("gmgn status")) return "gmgn_status";
+  if (normalized === "/leaderhealth" || normalized.includes("leader health")) return "leader_health";
+  if (normalized === "/syncleaders" || normalized.includes("sync leaders")) return "sync_leaders";
+  if (normalized === "/addleader") return "add_leader";
+  if (normalized === "/setsecret") return "set_secret";
+  if (normalized === "/applypending") return "apply_pending";
+  if (normalized === "/exportcsv") return "exportcsv";
+  if (normalized === "/exportjson") return "exportjson";
+  if (normalized === "/exportxlsx") return "exportxlsx";
+  if (normalized === "lang ru") return "lang_ru";
+  if (normalized === "lang en") return "lang_en";
 
   return null;
 }
