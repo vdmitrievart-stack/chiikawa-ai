@@ -5,7 +5,8 @@ import {
   markPosition as portfolioMarkPosition,
   maybeTakeRunnerPartial as portfolioMaybeTakeRunnerPartial
 } from "../portfolio.js";
-import { getLatestTokenPrice, recordTradeOutcomeFromSignalContext } from "../scan-engine.js";
+import { getLatestTokenPrice } from "../scan-engine.js";
+import { recordTradeOutcomeFromSignalContext } from "../scan-engine.js";
 
 export default class PositionService {
   constructor(options = {}) {
@@ -24,65 +25,37 @@ export default class PositionService {
     const ageMs = mark.ageMs;
 
     if (position.strategy === "scalp") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
-        return { close: true, reason: "SCALP_STOP" };
-      }
-      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) {
-        return { close: true, reason: "SCALP_TP" };
-      }
-      if (ageMs >= position.plannedHoldMs) {
-        return { close: true, reason: "SCALP_TIME_EXIT" };
-      }
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "SCALP_STOP" };
+      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "SCALP_TP" };
+      if (ageMs >= position.plannedHoldMs) return { close: true, reason: "SCALP_TIME_EXIT" };
       return { close: false, reason: "SCALP_HOLD" };
     }
 
     if (position.strategy === "reversal") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
-        return { close: true, reason: "REVERSAL_STOP" };
-      }
-      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) {
-        return { close: true, reason: "REVERSAL_TP" };
-      }
-      if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 8) {
-        return { close: true, reason: "REVERSAL_TIME_EXIT" };
-      }
-      if (analyzedNow?.corpse?.isCorpse) {
-        return { close: true, reason: "REVERSAL_CORPSE_EXIT" };
-      }
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "REVERSAL_STOP" };
+      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "REVERSAL_TP" };
+      if (ageMs >= position.plannedHoldMs && mark.netPnlPct < 8) return { close: true, reason: "REVERSAL_TIME_EXIT" };
+      if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "REVERSAL_CORPSE_EXIT" };
       return { close: false, reason: "REVERSAL_HOLD" };
     }
 
     if (position.strategy === "runner") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
-        return { close: true, reason: "RUNNER_STOP" };
-      }
-
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "RUNNER_STOP" };
       const pullbackFromHighPct =
         position.highestPrice > 0
           ? ((position.highestPrice - mark.currentPrice) / position.highestPrice) * 100
           : 0;
-
       if (mark.grossPnlPct > 25 && pullbackFromHighPct > 12) {
         return { close: true, reason: "RUNNER_TRAIL_EXIT" };
       }
-
-      if (analyzedNow?.corpse?.isCorpse) {
-        return { close: true, reason: "RUNNER_CORPSE_EXIT" };
-      }
-
+      if (analyzedNow?.corpse?.isCorpse) return { close: true, reason: "RUNNER_CORPSE_EXIT" };
       return { close: false, reason: "RUNNER_HOLD" };
     }
 
     if (position.strategy === "copytrade") {
-      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) {
-        return { close: true, reason: "COPY_STOP" };
-      }
-      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) {
-        return { close: true, reason: "COPY_TP" };
-      }
-      if (ageMs >= position.plannedHoldMs) {
-        return { close: true, reason: "COPY_TIME_EXIT" };
-      }
+      if (mark.netPnlPct <= -Math.abs(position.stopLossPct)) return { close: true, reason: "COPY_STOP" };
+      if (mark.netPnlPct >= Math.abs(position.takeProfitPct)) return { close: true, reason: "COPY_TP" };
+      if (ageMs >= position.plannedHoldMs) return { close: true, reason: "COPY_TIME_EXIT" };
       return { close: false, reason: "COPY_HOLD" };
     }
 
@@ -115,7 +88,6 @@ export default class PositionService {
             currentPrice: latest.price
           });
         }
-
         await notificationService.sendRunnerPartial(p, partial);
       }
 
@@ -137,15 +109,9 @@ export default class PositionService {
         const closed = portfolioClosePosition(p.id, latest.price, verdict.reason);
         if (closed) {
           recentlyTraded.set(closed.ca, Date.now());
-          await recordTradeOutcomeFromSignalContext(
-            closed.signalContext,
-            closed.netPnlPct
-          );
+          await recordTradeOutcomeFromSignalContext(closed.signalContext, closed.netPnlPct);
           closedRows.push(closed);
-          await notificationService.sendExit(
-            closed.signalContext?.imageUrl || null,
-            closed
-          );
+          await notificationService.sendExit(closed.signalContext?.imageUrl || null, closed);
         }
       }
     }
@@ -206,7 +172,6 @@ export default class PositionService {
 
   async forceCloseAll(runtimeConfig, reason = "KILL_SWITCH") {
     const closed = [];
-
     for (const p of [...portfolioGetPositions()]) {
       const price = p.lastPrice || p.entryReferencePrice;
 
@@ -220,11 +185,8 @@ export default class PositionService {
       }
 
       const row = portfolioClosePosition(p.id, price, reason);
-      if (row) {
-        closed.push(row);
-      }
+      if (row) closed.push(row);
     }
-
     return closed;
   }
 }
