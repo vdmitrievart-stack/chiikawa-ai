@@ -47,24 +47,20 @@ function buildDexText(token) {
 }
 
 function derivePriceExtensionPct(candidate) {
-  const explicit =
-    safeNum(candidate?.copytradeMeta?.priceExtensionPct, NaN);
+  const explicit = safeNum(candidate?.copytradeMeta?.priceExtensionPct, NaN);
   if (Number.isFinite(explicit)) return explicit;
 
-  const deltaPct =
-    safeNum(candidate?.delta?.priceDeltaPct, NaN);
+  const deltaPct = safeNum(candidate?.delta?.priceDeltaPct, NaN);
   if (Number.isFinite(deltaPct)) return Math.max(0, deltaPct);
 
-  const momentumPct =
-    safeNum(candidate?.momentum?.priceExtensionPct, NaN);
+  const momentumPct = safeNum(candidate?.momentum?.priceExtensionPct, NaN);
   if (Number.isFinite(momentumPct)) return Math.max(0, momentumPct);
 
   return 0;
 }
 
 function deriveFollowDelaySec(candidate) {
-  const explicit =
-    safeNum(candidate?.copytradeMeta?.followDelaySec, NaN);
+  const explicit = safeNum(candidate?.copytradeMeta?.followDelaySec, NaN);
   if (Number.isFinite(explicit)) return explicit;
 
   const leaderBuyTs =
@@ -224,10 +220,57 @@ function buildCopytradeMeta(candidate) {
   };
 }
 
+function buildFollowQuality(candidate) {
+  const cm = candidate?.copytradeMeta || {};
+  const leader = candidate?.leaderTrade || {};
+
+  const reasons = [];
+  let grade = "N/A";
+
+  if (!leader.address) {
+    return {
+      grade,
+      reasons: ["No matched leader trade"],
+      hasLeaderEvent: false
+    };
+  }
+
+  if (cm.isLateFollow) reasons.push("late follow");
+  if (cm.isOverextended) reasons.push("price overextended");
+  if (cm.borderline) reasons.push("borderline setup");
+
+  if (!cm.isLateFollow && !cm.isOverextended && !cm.borderline) {
+    grade = "GOOD";
+    reasons.push("timing acceptable");
+    reasons.push("extension acceptable");
+  } else if (!cm.isOverextended && (cm.isLateFollow || cm.borderline)) {
+    grade = "BORDERLINE";
+  } else {
+    grade = "BAD";
+  }
+
+  return {
+    grade,
+    reasons,
+    hasLeaderEvent: true
+  };
+}
+
 function normalizeCandidate(candidate) {
   const next = clone(candidate || {});
   next.copytradeMeta = buildCopytradeMeta(next);
+  next.followQuality = buildFollowQuality(next);
   return next;
+}
+
+function formatLeaderBuyTs(ts) {
+  const n = safeNum(ts, 0);
+  if (!n) return "-";
+  try {
+    return new Date(n).toISOString();
+  } catch {
+    return "-";
+  }
 }
 
 export default class CandidateService {
@@ -317,6 +360,8 @@ export default class CandidateService {
       : "• none";
 
     const cm = analyzed.copytradeMeta || {};
+    const lq = analyzed.followQuality || {};
+    const lt = analyzed.leaderTrade || {};
 
     return `🔎 <b>ANALYSIS</b>
 
@@ -340,12 +385,20 @@ export default class CandidateService {
 <b>Narrative:</b> ${escapeHtml(analyzed.narrative?.verdict || "Unknown")}
 <b>Links:</b> ${buildLinksText(analyzed.socials?.links || {})}
 
-<b>Copytrade meta</b>
+<b>Leader follow quality</b>
+leader: ${escapeHtml(lt.address || "-")}
+leader score: ${safeNum(lt.leaderScore, 0)}
+leader state: ${escapeHtml(lt.leaderState || "-")}
+leader buy ts: ${escapeHtml(formatLeaderBuyTs(lt.buyTs))}
+leader buy price: ${safeNum(lt.buyPriceUsd, 0)}
 delay: ${safeNum(cm.followDelaySec)}s
 extension: ${round(cm.priceExtensionPct, 2)}%
 late follow: ${safeBool(cm.isLateFollow) ? "yes" : "no"}
 overextended: ${safeBool(cm.isOverextended) ? "yes" : "no"}
 borderline: ${safeBool(cm.borderline) ? "yes" : "no"}
+grade: ${escapeHtml(lq.grade || "N/A")}
+details:
+${(lq.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• none"}
 
 <b>Available plans</b>
 ${plansText}
