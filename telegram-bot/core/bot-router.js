@@ -24,6 +24,7 @@ function normalizeAction(text) {
   if (raw === "/kill" || raw === "kill") return "kill";
   if (raw === "/status" || raw.includes("status")) return "status";
   if (raw === "/intents" || raw.includes("pending intents")) return "intents";
+  if (raw === "/gmgnexecution" || raw.includes("gmgn execution")) return "gmgn_execution";
   if (raw === "/gmgnorders" || raw.includes("gmgn orders")) return "gmgn_orders";
   if (raw === "/balance" || raw.includes("balance")) return "balance";
   if (raw === "/scanmarket" || raw.includes("scan market")) return "scan_market";
@@ -344,8 +345,8 @@ export default class BotRouter {
       await this.sendMessage(
         chatId,
         row
-          ? `✅ intent signed\n<code>${intentId}</code>\nstatus: <b>${row.status}</b>`
-          : `❌ intent not found\n<code>${intentId}</code>`,
+          ? `✅ intent signed\n<code>${intentId}</code>`
+          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
         { reply_markup: this.keyboard() }
       );
       return true;
@@ -366,8 +367,8 @@ export default class BotRouter {
       await this.sendMessage(
         chatId,
         row
-          ? `✅ intent submitted\n<code>${intentId}</code>\nstatus: <b>${row.status}</b>`
-          : `❌ intent not found\n<code>${intentId}</code>`,
+          ? `✅ intent submitted\n<code>${intentId}</code>`
+          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
         { reply_markup: this.keyboard() }
       );
       return true;
@@ -388,8 +389,8 @@ export default class BotRouter {
       await this.sendMessage(
         chatId,
         row
-          ? `✅ intent confirmed\n<code>${intentId}</code>\nstatus: <b>${row.status}</b>`
-          : `❌ intent not found\n<code>${intentId}</code>`,
+          ? `✅ intent confirmed\n<code>${intentId}</code>`
+          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
         { reply_markup: this.keyboard() }
       );
       return true;
@@ -404,14 +405,14 @@ export default class BotRouter {
         return true;
       }
 
-      const [, intentId, reason] = match;
-      const row = await this.kernel.markIntentFailed(intentId, reason);
+      const [, intentId] = match;
+      const row = await this.kernel.markIntentFailed(intentId);
 
       await this.sendMessage(
         chatId,
         row
-          ? `✅ intent failed\n<code>${intentId}</code>\nstatus: <b>${row.status}</b>\nreason: ${reason}`
-          : `❌ intent not found\n<code>${intentId}</code>`,
+          ? `✅ intent failed\n<code>${intentId}</code>`
+          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
         { reply_markup: this.keyboard() }
       );
       return true;
@@ -505,6 +506,13 @@ export default class BotRouter {
 
     if (action === "status") {
       await this.sendMessage(chatId, this.kernel.buildStatusText(), {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
+
+    if (action === "gmgn_execution") {
+      await this.sendMessage(chatId, this.kernel.buildGMGNExecutionText(), {
         reply_markup: this.keyboard()
       });
       return;
