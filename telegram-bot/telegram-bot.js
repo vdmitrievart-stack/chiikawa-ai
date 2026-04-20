@@ -1,11 +1,17 @@
-import http from "node:http";
 import TelegramBot from "node-telegram-bot-api";
 
 import WalletExecutionRouter from "./wallets/wallet-execution-router.js";
 import CopytradeManager from "./copytrade/copytrade-manager.js";
 import GMGNLeaderIntelService from "./gmgn/gmgn-leader-intel-service.js";
+
 import TradingKernel from "./core/trading-kernel.js";
 import BotRouter from "./core/bot-router.js";
+import RuntimePersistence from "./core/runtime-persistence.js";
+import TxLifecycleStore from "./core/tx-lifecycle-store.js";
+import WebhookServer from "./core/webhook-server.js";
+
+import JupiterQuoteService from "./jupiter/jupiter-quote-service.js";
+import ManualApprovalBridge from "./wallets/manual-approval-bridge.js";
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
@@ -23,10 +29,32 @@ const walletRouter = new WalletExecutionRouter({ logger: console });
 const copytradeManager = new CopytradeManager({ logger: console });
 const gmgnLeaderIntel = new GMGNLeaderIntelService({ logger: console });
 
+const persistence = new RuntimePersistence({
+  logger: console
+});
+
+const txStore = new TxLifecycleStore({
+  logger: console
+});
+
+const jupiterQuoteService = new JupiterQuoteService({
+  logger: console
+});
+
+const manualApprovalBridge = new ManualApprovalBridge({
+  logger: console,
+  txStore,
+  jupiterQuoteService
+});
+
 const kernel = new TradingKernel({
   walletRouter,
   copytradeManager,
   gmgnLeaderIntel,
+  persistence,
+  txStore,
+  jupiterQuoteService,
+  manualApprovalBridge,
   logger: console,
   initialConfig: {
     language: "ru",
@@ -45,23 +73,26 @@ const kernel = new TradingKernel({
         enabled: true,
         executionMode: "dry_run",
         allowedStrategies: ["scalp", "reversal"],
-        secretRef: ""
+        secretRef: "",
+        publicKey: process.env.WALLET_TRADER_MAIN_PUBLIC_KEY || ""
       },
       wallet_runner_main: {
         label: "Runner Main",
         role: "trader",
         enabled: true,
-        executionMode: "dry_run",
+        executionMode: "manual_approval",
         allowedStrategies: ["runner"],
-        secretRef: ""
+        secretRef: "",
+        publicKey: process.env.WALLET_RUNNER_MAIN_PUBLIC_KEY || ""
       },
       wallet_copy_1: {
         label: "Copy Follower 1",
         role: "follower",
         enabled: true,
-        executionMode: "dry_run",
+        executionMode: "manual_approval",
         allowedStrategies: ["copytrade"],
-        secretRef: ""
+        secretRef: "",
+        publicKey: process.env.WALLET_COPY_1_PUBLIC_KEY || ""
       }
     },
     strategyRouting: {
@@ -86,42 +117,33 @@ const router = new BotRouter({
   logger: console
 });
 
-bot.on("message", (msg) => {
-  router.handleMessage(msg).catch((err) => {
-    console.log("message error:", err.message);
-  });
+const webhookServer = new WebhookServer({
+  bot,
+  port: PORT,
+  webhookSecret: WEBHOOK_SECRET,
+  webhookPath: WEBHOOK_PATH,
+  logger: console
 });
 
-const server = http.createServer(async (req, res) => {
-  if (req.method === "POST" && req.url === WEBHOOK_PATH) {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk;
+async function main() {
+  try {
+    await kernel.initialize();
+
+    bot.on("message", (msg) => {
+      router.handleMessage(msg).catch((err) => {
+        console.log("message error:", err.message);
+      });
     });
-    req.on("end", async () => {
-      try {
-        const update = JSON.parse(body);
-        bot.processUpdate(update);
-        res.writeHead(200);
-        res.end("ok");
-      } catch (error) {
-        res.writeHead(500);
-        res.end(error.message);
-      }
-    });
-    return;
+
+    webhookServer.start();
+
+    console.log("Chiikawa trading bot bootstrap initialized");
+    console.log(`Webhook path: ${WEBHOOK_PATH}`);
+    console.log(`Port: ${PORT}`);
+  } catch (error) {
+    console.error("Bootstrap failed:", error);
+    process.exit(1);
   }
+}
 
-  if (req.method === "GET" && req.url === "/healthz") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
-    return;
-  }
-
-  res.writeHead(404);
-  res.end("not found");
-});
-
-server.listen(PORT, async () => {
-  console.log(`Telegram bot server listening on port ${PORT}`);
-});
+main();
