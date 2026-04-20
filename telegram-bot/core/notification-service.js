@@ -1,17 +1,12 @@
+import GroupMessageFormatter from "./group-message-formatter.js";
 import {
-  buildEntryText,
-  buildExitText,
-  buildPositionUpdateText
-} from "./reporting-engine.js";
+  isPublicEntry,
+  isPublicExit
+} from "./public-group-policy.js";
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
-}
-
-function round(v, d = 4) {
-  const p = 10 ** d;
-  return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
 }
 
 function escapeHtml(input) {
@@ -22,39 +17,126 @@ function escapeHtml(input) {
     .replace(/"/g, "&quot;");
 }
 
+function pctText(value) {
+  const n = safeNum(value, 0);
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(2)}%`;
+}
+
 export default class NotificationService {
   constructor(options = {}) {
     this.send = options.send;
+    this.groupFormatter =
+      options.groupFormatter || new GroupMessageFormatter();
+    this.enableDebugPositionUpdates =
+      String(process.env.ENABLE_POSITION_UPDATES || "0") === "1";
   }
 
-  async sendText(text) {
-    await this.send.text(text);
-  }
-
-  async sendPhotoOrText(imageUrl, caption) {
-    await this.send.photoOrText(imageUrl, caption);
+  async sendText(text, extra = {}) {
+    if (!this.send?.text) return null;
+    return this.send.text(text, extra);
   }
 
   async sendEntry(heroImage, position) {
-    await this.send.photoOrText(heroImage, buildEntryText(position));
+    if (this.send?.photoOrText) {
+      await this.send.photoOrText(
+        heroImage,
+        this.buildControlEntryText(position)
+      );
+    }
+
+    if (isPublicEntry(position) && this.send?.publicPhotoOrText) {
+      const sent = await this.send.publicPhotoOrText(
+        heroImage,
+        this.groupFormatter.buildEntryPost(position)
+      );
+
+      if (sent && this.send?.pinPublicMessage) {
+        await this.send.pinPublicMessage(sent);
+      }
+    }
+
+    return true;
   }
 
-  async sendExit(heroImage, trade) {
-    await this.send.photoOrText(heroImage, buildExitText(trade));
-  }
+  async sendExit(imageUrl, closedTrade) {
+    if (this.send?.photoOrText) {
+      await this.send.photoOrText(
+        imageUrl,
+        this.buildControlExitText(closedTrade)
+      );
+    }
 
-  async sendPositionUpdate(position, mark, reason) {
-    await this.send.text(buildPositionUpdateText(position, mark, reason));
+    if (isPublicExit(closedTrade) && this.send?.publicPhotoOrText) {
+      const sent = await this.send.publicPhotoOrText(
+        imageUrl,
+        this.groupFormatter.buildExitPost(closedTrade)
+      );
+
+      if (sent && this.send?.pinPublicMessage) {
+        await this.send.pinPublicMessage(sent);
+      }
+    }
+
+    return true;
   }
 
   async sendRunnerPartial(position, partial) {
-    await this.send.text(
-      `🎯 <b>RUNNER PARTIAL</b>
+    if (!this.send?.text) return null;
 
-<b>Token:</b> ${escapeHtml(position.token)}
-<b>Target:</b> ${partial.targetPct}%
-<b>Sold fraction:</b> ${round(partial.soldFraction * 100, 0)}%
-<b>Cash added:</b> ${round(partial.netValueSol, 4)} SOL`
+    return this.send.text(
+      `🪜 <b>PARTIAL</b>
+
+<b>Token:</b> ${escapeHtml(position?.token || position?.symbol || "-")}
+<b>Strategy:</b> ${escapeHtml(position?.strategy || "-")}
+<b>Target:</b> ${safeNum(partial?.targetPct, 0)}%
+<b>Sold fraction:</b> ${safeNum(partial?.soldFraction, 0)}
+<b>Realized pct:</b> ${pctText(partial?.realizedPct)}`
     );
+  }
+
+  async sendPositionUpdate(position, mark, reason) {
+    if (!this.enableDebugPositionUpdates || !this.send?.text) return null;
+
+    return this.send.text(
+      `📍 <b>POSITION UPDATE</b>
+
+<b>Token:</b> ${escapeHtml(position?.token || position?.symbol || "-")}
+<b>Strategy:</b> ${escapeHtml(position?.strategy || "-")}
+<b>PnL:</b> ${pctText(mark?.netPnlPct)}
+<b>Reason:</b> ${escapeHtml(reason || "-")}`
+    );
+  }
+
+  buildControlEntryText(position) {
+    const tokenName = position?.token || position?.symbol || "UNKNOWN";
+    const tokenCa = position?.ca || "-";
+    const planName = position?.planName || position?.strategy || "-";
+
+    return `🧠 <b>ENTRY</b>
+
+<b>Token:</b> ${escapeHtml(tokenName)}
+<b>Strategy:</b> ${escapeHtml(position?.strategy || "-")}
+<b>Plan:</b> ${escapeHtml(planName)}
+<b>CA:</b> <code>${escapeHtml(tokenCa)}</code>
+<b>Amount SOL:</b> ${safeNum(position?.amountSol, 0)}
+<b>Entry reference:</b> ${safeNum(position?.entryReferencePrice, 0)}
+<b>Stop:</b> ${safeNum(position?.stopLossPct, 0)}%
+<b>TP:</b> ${safeNum(position?.takeProfitPct, 0)}%`;
+  }
+
+  buildControlExitText(closedTrade) {
+    const tokenName = closedTrade?.token || closedTrade?.symbol || "UNKNOWN";
+    const tokenCa = closedTrade?.ca || "-";
+
+    return `🏁 <b>EXIT</b>
+
+<b>Token:</b> ${escapeHtml(tokenName)}
+<b>Strategy:</b> ${escapeHtml(closedTrade?.strategy || "-")}
+<b>CA:</b> <code>${escapeHtml(tokenCa)}</code>
+<b>PnL:</b> ${pctText(closedTrade?.netPnlPct)}
+<b>PnL SOL:</b> ${safeNum(closedTrade?.netPnlSol, 0).toFixed(4)}
+<b>Reason:</b> ${escapeHtml(closedTrade?.reason || "-")}
+<b>Duration min:</b> ${(safeNum(closedTrade?.durationMs, 0) / 60000).toFixed(1)}`;
   }
 }
