@@ -24,6 +24,7 @@ function normalizeAction(text) {
   if (raw === "/kill" || raw === "kill") return "kill";
   if (raw === "/status" || raw.includes("status")) return "status";
   if (raw === "/intents" || raw.includes("pending intents")) return "intents";
+  if (raw === "/gmgnorders" || raw.includes("gmgn orders")) return "gmgn_orders";
   if (raw === "/balance" || raw.includes("balance")) return "balance";
   if (raw === "/scanmarket" || raw.includes("scan market")) return "scan_market";
   if (raw === "/scanca" || raw === "/ca" || raw.includes("scan ca")) return "scan_ca";
@@ -504,6 +505,13 @@ export default class BotRouter {
 
     if (action === "status") {
       await this.sendMessage(chatId, this.kernel.buildStatusText(), {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
+
+    if (action === "gmgn_orders") {
+      await this.sendMessage(chatId, this.kernel.buildGMGNOrdersText(), {
         reply_markup: this.keyboard()
       });
       return;
