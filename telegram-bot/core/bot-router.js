@@ -20,6 +20,7 @@ function normalizeAction(text) {
   if (raw === "/runreversal" || raw.includes("run reversal")) return "run_reversal";
   if (raw === "/runrunner" || raw.includes("run runner")) return "run_runner";
   if (raw === "/runcopytrade" || raw.includes("run copytrade")) return "run_copytrade";
+  if (raw === "/runmigration" || raw.includes("run migration")) return "run_migration";
   if (raw === "/stop" || raw === "stop") return "stop";
   if (raw === "/kill" || raw === "kill") return "kill";
   if (raw === "/status" || raw.includes("status")) return "status";
@@ -39,10 +40,6 @@ function normalizeAction(text) {
   if (raw === "/addleader") return "add_leader";
   if (raw === "/setsecret") return "set_secret";
   if (raw === "/applypending") return "apply_pending";
-  if (raw.startsWith("/intent_signed ")) return "intent_signed";
-  if (raw.startsWith("/intent_submitted ")) return "intent_submitted";
-  if (raw.startsWith("/intent_confirmed ")) return "intent_confirmed";
-  if (raw.startsWith("/intent_failed ")) return "intent_failed";
   if (raw === "/exportcsv") return "exportcsv";
   if (raw === "/exportjson") return "exportjson";
   if (raw === "/exportxlsx") return "exportxlsx";
@@ -126,15 +123,6 @@ export default class BotRouter {
         this.logger.log("tick error:", err.message);
       });
     }, this.AUTO_INTERVAL_MS);
-
-    if (this.kernel.getRuntime().mode === "4h") {
-      this.stopTimeoutId = setTimeout(async () => {
-        this.kernel.requestSoftStop();
-        await this.sendMessage(chatId, this.t("soft_stop"), {
-          reply_markup: this.keyboard()
-        });
-      }, 4 * 60 * 60 * 1000);
-    }
   }
 
   stopLoop() {
@@ -322,116 +310,7 @@ export default class BotRouter {
     return false;
   }
 
-  async handleIntentCommand(chatId, text, action) {
-    if (action === "intents") {
-      await this.sendMessage(chatId, this.kernel.buildPendingIntentText(), {
-        reply_markup: this.keyboard()
-      });
-      return true;
-    }
-
-    if (action === "intent_signed") {
-      const match = text.match(/^\/intent_signed\s+(\S+)(?:\s+(.+))?$/i);
-      if (!match) {
-        await this.sendMessage(chatId, "Usage: <code>/intent_signed &lt;id&gt; [signedTxBase64]</code>", {
-          reply_markup: this.keyboard()
-        });
-        return true;
-      }
-
-      const [, intentId, signedTxBase64] = match;
-      const row = await this.kernel.markIntentSigned(intentId, signedTxBase64 || null);
-
-      await this.sendMessage(
-        chatId,
-        row
-          ? `✅ intent signed\n<code>${intentId}</code>`
-          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
-        { reply_markup: this.keyboard() }
-      );
-      return true;
-    }
-
-    if (action === "intent_submitted") {
-      const match = text.match(/^\/intent_submitted\s+(\S+)(?:\s+(\S+))?$/i);
-      if (!match) {
-        await this.sendMessage(chatId, "Usage: <code>/intent_submitted &lt;id&gt; [signature]</code>", {
-          reply_markup: this.keyboard()
-        });
-        return true;
-      }
-
-      const [, intentId, signature] = match;
-      const row = await this.kernel.markIntentSubmitted(intentId, signature || null);
-
-      await this.sendMessage(
-        chatId,
-        row
-          ? `✅ intent submitted\n<code>${intentId}</code>`
-          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
-        { reply_markup: this.keyboard() }
-      );
-      return true;
-    }
-
-    if (action === "intent_confirmed") {
-      const match = text.match(/^\/intent_confirmed\s+(\S+)(?:\s+(\S+))?$/i);
-      if (!match) {
-        await this.sendMessage(chatId, "Usage: <code>/intent_confirmed &lt;id&gt; [signature]</code>", {
-          reply_markup: this.keyboard()
-        });
-        return true;
-      }
-
-      const [, intentId, signature] = match;
-      const row = await this.kernel.markIntentConfirmed(intentId, signature || null);
-
-      await this.sendMessage(
-        chatId,
-        row
-          ? `✅ intent confirmed\n<code>${intentId}</code>`
-          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
-        { reply_markup: this.keyboard() }
-      );
-      return true;
-    }
-
-    if (action === "intent_failed") {
-      const match = text.match(/^\/intent_failed\s+(\S+)\s+(.+)$/i);
-      if (!match) {
-        await this.sendMessage(chatId, "Usage: <code>/intent_failed &lt;id&gt; &lt;reason&gt;</code>", {
-          reply_markup: this.keyboard()
-        });
-        return true;
-      }
-
-      const [, intentId] = match;
-      const row = await this.kernel.markIntentFailed(intentId);
-
-      await this.sendMessage(
-        chatId,
-        row
-          ? `✅ intent failed\n<code>${intentId}</code>`
-          : `ℹ️ not supported in GMGN mode\n<code>${intentId}</code>`,
-        { reply_markup: this.keyboard() }
-      );
-      return true;
-    }
-
-    return false;
-  }
-
-  async handleAction(chatId, userId, action, rawText = "") {
-    if (
-      action === "intents" ||
-      action === "intent_signed" ||
-      action === "intent_submitted" ||
-      action === "intent_confirmed" ||
-      action === "intent_failed"
-    ) {
-      return this.handleIntentCommand(chatId, rawText, action);
-    }
-
+  async handleAction(chatId, userId, action) {
     if (action === "start") {
       this.clearChatMode(chatId);
       await this.sendMessage(chatId, this.t("ready"), {
@@ -480,6 +359,15 @@ export default class BotRouter {
       this.kernel.start("copytrade", "infinite", chatId, userId);
       this.startLoop(chatId, userId);
       await this.sendMessage(chatId, `${this.t("run_started")}: COPYTRADE`, {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
+
+    if (action === "run_migration") {
+      this.kernel.start("migration_survivor", "infinite", chatId, userId);
+      this.startLoop(chatId, userId);
+      await this.sendMessage(chatId, `${this.t("run_started")}: MIGRATION_SURVIVOR`, {
         reply_markup: this.keyboard()
       });
       return;
@@ -671,9 +559,13 @@ export default class BotRouter {
 
     if (await this.processStatefulInput(chatId, text)) return;
 
-    const budgetMatch = text.match(/^budget\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)$/i);
-    if (budgetMatch) {
-      const values = budgetMatch.slice(1).map(Number);
+    const budgetCmd = text.match(/^budget\s+(.+)$/i);
+    if (budgetCmd) {
+      const values = String(budgetCmd[1] || "")
+        .trim()
+        .split(/\s+/)
+        .map((x) => Number(x));
+
       const result = this.kernel.queueBudgetUpdate(values);
 
       if (!result.ok) {
@@ -688,14 +580,18 @@ export default class BotRouter {
         `${this.t("pending_budget_saved")}
 
 <b>Pending</b>
-${Math.round(result.budget.scalp * 100)} / ${Math.round(result.budget.reversal * 100)} / ${Math.round(result.budget.runner * 100)} / ${Math.round(result.budget.copytrade * 100)}`,
+scalp: ${(result.budget.scalp * 100).toFixed(1)}%
+reversal: ${(result.budget.reversal * 100).toFixed(1)}%
+runner: ${(result.budget.runner * 100).toFixed(1)}%
+copytrade: ${(result.budget.copytrade * 100).toFixed(1)}%
+migration_survivor: ${(result.budget.migration_survivor * 100).toFixed(1)}%`,
         { reply_markup: this.keyboard() }
       );
       return;
     }
 
     if (action) {
-      await this.handleAction(chatId, userId, action, text);
+      await this.handleAction(chatId, userId, action);
       return;
     }
 
