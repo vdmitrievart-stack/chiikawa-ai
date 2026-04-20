@@ -55,6 +55,28 @@ function escapeHtml(input) {
     .replace(/"/g, "&quot;");
 }
 
+function clone(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function normalizePlanWithCopyVerdict(plan, copyVerdict) {
+  const nextPlan = clone(plan);
+
+  if (copyVerdict?.mode === "probe_only") {
+    nextPlan.entryMode = "PROBE";
+  }
+
+  if (copyVerdict?.adjustedPlan?.forceEntryMode) {
+    nextPlan.entryMode = copyVerdict.adjustedPlan.forceEntryMode;
+  }
+
+  if (safeNum(copyVerdict?.adjustedPlan?.forceStopLossPct, 0) > 0) {
+    nextPlan.stopLossPct = copyVerdict.adjustedPlan.forceStopLossPct;
+  }
+
+  return nextPlan;
+}
+
 export default class TradingKernel {
   constructor({
     walletRouter,
@@ -423,19 +445,73 @@ export default class TradingKernel {
       this.candidateService.buildAnalysisText(candidate, plans)
     );
 
-    for (const plan of plans) {
+    for (const rawPlan of plans) {
       const alreadyOpenSameStrategy = getPositions().some(
-        (p) => p.strategy === plan.strategyKey
+        (p) => p.strategy === rawPlan.strategyKey
       );
       if (alreadyOpenSameStrategy) continue;
-      if (candidate.corpse.isCorpse) continue;
-      if (candidate.falseBounce.rejected) continue;
-      if (candidate.developer.verdict === "Bad") continue;
-      if (candidate.score < 85 && plan.strategyKey !== "copytrade") continue;
+      if (candidate.corpse?.isCorpse && rawPlan.strategyKey !== "copytrade") continue;
+      if (candidate.falseBounce?.rejected && rawPlan.strategyKey !== "copytrade") continue;
+      if (candidate.developer?.verdict === "Bad" && rawPlan.strategyKey !== "copytrade") continue;
+      if (candidate.score < 85 && rawPlan.strategyKey !== "copytrade") continue;
+
+      let plan = clone(rawPlan);
 
       if (plan.strategyKey === "copytrade") {
-        if (!this.copytradeService.canTradeCopy(this.runtime.activeConfig)) {
+        const followDelaySec = safeNum(candidate?.copytradeMeta?.followDelaySec, 0);
+        const priceExtensionPct = safeNum(
+          candidate?.copytradeMeta?.priceExtensionPct,
+          safeNum(candidate?.delta?.priceDeltaPct, 0)
+        );
+
+        const copyVerdict = this.copytradeService.canTradeCopy(
+          this.runtime.activeConfig,
+          candidate,
+          {
+            followDelaySec,
+            priceExtensionPct
+          }
+        );
+
+        if (!copyVerdict.allow) {
+          if (copyVerdict.leader?.address) {
+            this.copytradeService.registerRejectedTrap(
+              this.runtime.activeConfig,
+              copyVerdict.leader.address,
+              copyVerdict.mode === "reject" ? "hard" : "soft"
+            );
+          }
+
+          await notificationService.sendText(
+            `🚫 <b>COPYTRADE REJECTED</b>
+
+<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}
+<b>Details:</b>
+${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
+          );
+          await this.persistSnapshot();
           continue;
+        }
+
+        plan = normalizePlanWithCopyVerdict(plan, copyVerdict);
+
+        if (copyVerdict.leader?.address) {
+          this.copytradeService.registerAcceptedQuality(
+            this.runtime.activeConfig,
+            copyVerdict.leader.address
+          );
+        }
+
+        if (copyVerdict.mode === "probe_only") {
+          await notificationService.sendText(
+            `⚠️ <b>COPYTRADE PROBE MODE</b>
+
+<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
+<b>Details:</b>
+${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
+          );
         }
       }
 
