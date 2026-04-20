@@ -7,6 +7,7 @@ import TradingKernel from "./core/trading-kernel.js";
 import BotRouter from "./core/bot-router.js";
 import RuntimePersistence from "./core/runtime-persistence.js";
 import WebhookServer from "./core/webhook-server.js";
+import XPublicFeed from "./core/x-public-feed.js";
 
 import GMGNWalletService from "./gmgn/gmgn-wallet-service.js";
 import GMGNOrderStateStore from "./gmgn/gmgn-order-state-store.js";
@@ -46,6 +47,8 @@ const gmgnExecutionService = new GMGNExecutionService({
   defaultMode: process.env.GMGN_EXECUTION_MODE || "dry_run",
   defaultSlippagePct: Number(process.env.GMGN_DEFAULT_SLIPPAGE_PCT || 1)
 });
+
+const xPublicFeed = new XPublicFeed({ logger: console });
 
 const kernel = new TradingKernel({
   walletRouter: null,
@@ -179,6 +182,8 @@ async function safeReplyError(chatId, error) {
 
 async function main() {
   try {
+    await xPublicFeed.load();
+
     if (typeof kernel.initialize === "function") {
       await kernel.initialize();
     } else {
@@ -211,3 +216,10 @@ async function main() {
 }
 
 main();
+
+export {
+  bot,
+  router,
+  kernel,
+  xPublicFeed
+};
