@@ -8,91 +8,276 @@ function round(v, d = 4) {
   return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
 }
 
-function esc(input) {
+function escapeHtml(input) {
   return String(input ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;");
+    .replace(/"/g, "&quot;");
 }
 
-function ageText(ms) {
-  const total = Math.max(0, Math.floor(safeNum(ms, 0) / 1000));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
+function fmtPct(v, digits = 2) {
+  const n = safeNum(v);
+  return `${round(n, digits)}%`;
 }
 
-export function buildDashboard(runtime, portfolio) {
-  const totalClosed = portfolio.closedTrades.length;
-  const wins = portfolio.closedTrades.filter(t => t.netPnlPct > 0).length;
-  const winrate = totalClosed ? (wins / totalClosed) * 100 : 0;
-  const lines = [
-    `📊 <b>BOT DASHBOARD</b>`,
-    ``,
-    `<b>Run ID:</b> ${esc(runtime.runId || "-")}`,
-    `<b>Mode:</b> ${esc(String(runtime.mode || "stopped").toUpperCase())}`,
-    `<b>Stop requested:</b> ${runtime.stopRequested ? "yes" : "no"}`,
-    `<b>Pending config:</b> ${runtime.pendingConfig ? "yes" : "no"}`,
-    `<b>Cash:</b> ${round(portfolio.cash, 4)} SOL`,
-    `<b>Equity:</b> ${round(portfolio.equity, 4)} SOL`,
-    `<b>Realized:</b> ${round(portfolio.realizedPnlSol, 4)} SOL`,
-    `<b>Unrealized:</b> ${round(portfolio.unrealizedPnlSol, 4)} SOL`,
-    `<b>Open positions:</b> ${portfolio.positions.length}`,
-    `<b>Closed trades:</b> ${totalClosed}`,
-    `<b>Winrate:</b> ${round(winrate, 2)}%`,
-    ``,
-    `<b>Strategies</b>`
-  ];
+function fmtSol(v, digits = 4) {
+  return `${round(v, digits)} SOL`;
+}
 
-  for (const [key, row] of Object.entries(portfolio.byStrategy || {})) {
-    lines.push(`• <b>${esc(row.label || key.toUpperCase())}</b> — alloc ${round((row.allocationPct || 0) * 100, 0)}% | available ${round(row.availableSol, 4)} SOL | open ${row.openPositions} | pnl ${round(row.totalPnlSol, 4)} SOL`);
+function fmtMinutes(v) {
+  const mins = Math.max(0, Math.round(safeNum(v, 0)));
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h ${m}m`;
+}
+
+function fmtAgeMs(ms) {
+  const totalSec = Math.max(0, Math.round(safeNum(ms, 0) / 1000));
+  if (totalSec < 60) return `${totalSec}s`;
+  const mins = Math.floor(totalSec / 60);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h < 24) return `${h}h ${m}m`;
+  const d = Math.floor(h / 24);
+  const hh = h % 24;
+  return `${d}d ${hh}h`;
+}
+
+function buildStrategyLine(key, row) {
+  return `• <b>${escapeHtml(String(key).toUpperCase())}</b> | alloc ${fmtPct(
+    safeNum(row?.allocationPct) * 100,
+    0
+  )} | avail ${fmtSol(row?.availableSol)} | open ${safeNum(
+    row?.openPositions,
+    0
+  )} | realized ${fmtSol(row?.realizedPnlSol)} | avg ${fmtPct(
+    row?.realizedPnlPctAvg,
+    2
+  )}`;
+}
+
+function summarizeOpenPositions(portfolio) {
+  const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : [];
+  if (!positions.length) return "No open positions";
+
+  return positions
+    .slice(0, 8)
+    .map((p, idx) => {
+      const mark = p?.lastMark || {};
+      return `${idx + 1}. <b>${escapeHtml(p?.token || "Unknown")}</b> | ${escapeHtml(
+        String(p?.strategy || "").toUpperCase()
+      )} | ${escapeHtml(p?.entryMode || "SCALED")} | ${fmtPct(
+        mark?.netPnlPct,
+        2
+      )} | age ${fmtAgeMs(mark?.ageMs || Date.now() - safeNum(p?.openedAt))}`;
+    })
+    .join("\n");
+}
+
+export function buildBalanceText(portfolio = {}) {
+  const byStrategy = portfolio?.byStrategy || {};
+  const strategyLines = Object.keys(byStrategy).length
+    ? Object.entries(byStrategy).map(([key, row]) => buildStrategyLine(key, row)).join("\n")
+    : "No strategies";
+
+  return `💰 <b>BALANCE</b>
+
+<b>Free cash:</b> ${fmtSol(portfolio?.cash)}
+<b>Total equity:</b> ${fmtSol(portfolio?.equity)}
+<b>Realized PnL:</b> ${fmtSol(portfolio?.realizedPnlSol)}
+<b>Unrealized PnL:</b> ${fmtSol(portfolio?.unrealizedPnlSol)}
+<b>Open positions:</b> ${safeNum(portfolio?.positions?.length, 0)}
+<b>Closed trades:</b> ${safeNum(portfolio?.closedTrades?.length, 0)}
+
+<b>By strategy</b>
+${strategyLines}
+
+<b>Open positions</b>
+${summarizeOpenPositions(portfolio)}`;
+}
+
+export function buildDashboard(runtime = {}, portfolio = {}) {
+  const byStrategy = portfolio?.byStrategy || {};
+  const strategyLines = Object.keys(byStrategy).length
+    ? Object.entries(byStrategy).map(([key, row]) => buildStrategyLine(key, row)).join("\n")
+    : "No strategies";
+
+  const mode = String(runtime?.mode || "stopped").toUpperCase();
+  const lang = runtime?.activeConfig?.language || "ru";
+  const dryRun = runtime?.activeConfig?.dryRun !== false;
+  const startedAt = runtime?.startedAt ? new Date(runtime.startedAt).toISOString() : "-";
+  const pending = runtime?.pendingConfig ? "yes" : "no";
+
+  return `📊 <b>STATUS</b>
+
+<b>Mode:</b> ${escapeHtml(mode)}
+<b>Language:</b> ${escapeHtml(String(lang).toUpperCase())}
+<b>Dry run:</b> ${dryRun ? "yes" : "no"}
+<b>Run ID:</b> ${escapeHtml(runtime?.runId || "-")}
+<b>Started:</b> ${escapeHtml(startedAt)}
+<b>Stop requested:</b> ${runtime?.stopRequested ? "yes" : "no"}
+<b>Pending config:</b> ${pending}
+
+<b>Free cash:</b> ${fmtSol(portfolio?.cash)}
+<b>Total equity:</b> ${fmtSol(portfolio?.equity)}
+<b>Realized PnL:</b> ${fmtSol(portfolio?.realizedPnlSol)}
+<b>Unrealized PnL:</b> ${fmtSol(portfolio?.unrealizedPnlSol)}
+
+<b>Strategy buckets</b>
+${strategyLines}
+
+<b>Open positions</b>
+${summarizeOpenPositions(portfolio)}`;
+}
+
+export function buildEntryText(position = {}) {
+  const links = position?.signalContext?.socials?.links || {};
+  const website = links.website ? `\n<b>Website:</b> ${escapeHtml(links.website)}` : "";
+  const twitter = links.twitter ? `\n<b>Twitter/X:</b> ${escapeHtml(links.twitter)}` : "";
+  const telegram = links.telegram ? `\n<b>Telegram:</b> ${escapeHtml(links.telegram)}` : "";
+
+  return `🚀 <b>ENTRY</b>
+
+<b>Strategy:</b> ${escapeHtml(String(position?.strategy || "").toUpperCase())}
+<b>Entry mode:</b> ${escapeHtml(position?.entryMode || "SCALED")}
+<b>Wallet:</b> ${escapeHtml(position?.walletId || "default")}
+<b>Plan:</b> ${escapeHtml(position?.planName || "-")}
+<b>Objective:</b> ${escapeHtml(position?.planObjective || "-")}
+
+<b>Token:</b> ${escapeHtml(position?.token || "Unknown")}
+<b>CA:</b> <code>${escapeHtml(position?.ca || "")}</code>
+<b>Entry ref:</b> ${safeNum(position?.entryReferencePrice)}
+<b>Entry effective:</b> ${safeNum(position?.entryEffectivePrice)}
+<b>Size:</b> ${fmtSol(position?.amountSol)}
+<b>Expected edge:</b> ${fmtPct(position?.expectedEdgePct)}
+
+<b>Stop:</b> ${fmtPct(-Math.abs(safeNum(position?.stopLossPct)))}
+<b>TP:</b> ${
+    safeNum(position?.takeProfitPct) > 0
+      ? fmtPct(position?.takeProfitPct)
+      : Array.isArray(position?.runnerTargetsPct) && position.runnerTargetsPct.length
+      ? `runner ${position.runnerTargetsPct.join(" / ")}%`
+      : "runner"
   }
 
-  return lines.join("\n");
+<b>Thesis:</b>
+${escapeHtml(position?.thesis || "-")}
+
+<b>Entry costs:</b> ${fmtSol(position?.entryCosts?.totalSol, 6)}${website}${twitter}${telegram}`;
 }
 
-export function buildBalanceText(portfolio) {
-  const lines = [
-    `💰 <b>BALANCE</b>`,
-    ``,
-    `<b>Free SOL:</b> ${round(portfolio.cash, 4)}`,
-    `<b>Total equity:</b> ${round(portfolio.equity, 4)}`,
-    `<b>Realized:</b> ${round(portfolio.realizedPnlSol, 4)} SOL`,
-    `<b>Unrealized:</b> ${round(portfolio.unrealizedPnlSol, 4)} SOL`,
-    ``,
-    `<b>By strategy</b>`
-  ];
+export function buildPositionUpdateText(position = {}, mark = {}, status = "HOLD") {
+  return `📈 <b>POSITION UPDATE</b>
 
-  for (const [key, row] of Object.entries(portfolio.byStrategy || {})) {
-    lines.push(`• <b>${esc(row.label || key.toUpperCase())}</b> — open ${row.openPositions} | pnl ${round(row.totalPnlPct, 2)}% | pnl SOL ${round(row.totalPnlSol, 4)} | avg age ${ageText(row.avgOpenAgeMs || 0)}`);
+<b>Strategy:</b> ${escapeHtml(String(position?.strategy || "").toUpperCase())}
+<b>Entry mode:</b> ${escapeHtml(position?.entryMode || "SCALED")}
+<b>Wallet:</b> ${escapeHtml(position?.walletId || "default")}
+<b>Token:</b> ${escapeHtml(position?.token || "Unknown")}
+<b>CA:</b> <code>${escapeHtml(position?.ca || "")}</code>
+
+<b>Entry ref:</b> ${safeNum(position?.entryReferencePrice)}
+<b>Current:</b> ${safeNum(mark?.currentPrice)}
+<b>Gross PnL:</b> ${fmtPct(mark?.grossPnlPct)}
+<b>Net PnL:</b> ${fmtPct(mark?.netPnlPct)}
+<b>Net PnL SOL:</b> ${fmtSol(mark?.netPnlSol)}
+<b>Age:</b> ${fmtAgeMs(mark?.ageMs)}
+<b>Status:</b> ${escapeHtml(status)}`;
+}
+
+export function buildExitText(trade = {}) {
+  return `🏁 <b>EXIT</b>
+
+<b>Strategy:</b> ${escapeHtml(String(trade?.strategy || "").toUpperCase())}
+<b>Entry mode:</b> ${escapeHtml(trade?.entryMode || "SCALED")}
+<b>Wallet:</b> ${escapeHtml(trade?.walletId || "default")}
+<b>Plan:</b> ${escapeHtml(trade?.planName || "-")}
+
+<b>Token:</b> ${escapeHtml(trade?.token || "Unknown")}
+<b>CA:</b> <code>${escapeHtml(trade?.ca || "")}</code>
+
+<b>Entry ref:</b> ${safeNum(trade?.entryReferencePrice)}
+<b>Entry effective:</b> ${safeNum(trade?.entryEffectivePrice)}
+<b>Exit ref:</b> ${safeNum(trade?.exitReferencePrice)}
+
+<b>Net PnL:</b> ${fmtPct(trade?.netPnlPct)}
+<b>Net PnL SOL:</b> ${fmtSol(trade?.netPnlSol, 6)}
+<b>Duration:</b> ${fmtAgeMs(trade?.durationMs)}
+<b>Reason:</b> ${escapeHtml(trade?.reason || "-")}
+<b>Balance after:</b> ${fmtSol(trade?.balanceAfter)}`;
+}
+
+function buildBestWorstClosed(portfolio = {}) {
+  const closed = Array.isArray(portfolio?.closedTrades) ? portfolio.closedTrades : [];
+  if (!closed.length) {
+    return {
+      best: "none",
+      worst: "none"
+    };
   }
 
-  return lines.join("\n");
+  const sorted = [...closed].sort((a, b) => safeNum(b?.netPnlPct) - safeNum(a?.netPnlPct));
+  const bestTrade = sorted[0];
+  const worstTrade = sorted[sorted.length - 1];
+
+  return {
+    best: `${bestTrade?.token || "Unknown"} ${fmtPct(bestTrade?.netPnlPct)} (${bestTrade?.strategy || "-"})`,
+    worst: `${worstTrade?.token || "Unknown"} ${fmtPct(worstTrade?.netPnlPct)} (${worstTrade?.strategy || "-"})`
+  };
 }
 
-export function buildEntryText(position) {
-  return `🚀 <b>ENTRY</b>\n\n<b>Strategy:</b> ${esc(String(position.strategy).toUpperCase())}\n<b>Wallet:</b> ${esc(position.walletId || "simulation")}\n<b>Token:</b> ${esc(position.token)}\n<b>CA:</b> <code>${esc(position.ca)}</code>\n\n<b>Entry mode:</b> ${esc(position.entryMode || "SCALED")}\n<b>Plan:</b> ${esc(position.planName || "trade_plan")}\n<b>Goal:</b> ${esc(position.planObjective || position.thesis || "capture edge")}\n<b>TP:</b> ${position.takeProfitPct ? `${round(position.takeProfitPct, 2)}%` : "runner"}\n<b>SL:</b> ${round(position.stopLossPct, 2)}%\n<b>Size:</b> ${round(position.amountSol, 4)} SOL\n<b>Expected edge:</b> ${round(position.expectedEdgePct, 2)}%\n\n<b>Thesis:</b>\n${esc(position.thesis || "n/a")}`;
-}
+export function buildPeriodicReport(runtime = {}, portfolio = {}, previousEquity = null) {
+  const equity = safeNum(portfolio?.equity);
+  const deltaSol = previousEquity == null ? 0 : equity - safeNum(previousEquity);
+  const deltaPct = previousEquity > 0 ? (deltaSol / previousEquity) * 100 : 0;
 
-export function buildPositionUpdateText(position, mark, status, portfolioDelta = null) {
-  return `📈 <b>POSITION UPDATE</b>\n\n<b>Strategy:</b> ${esc(String(position.strategy).toUpperCase())}\n<b>Wallet:</b> ${esc(position.walletId || "simulation")}\n<b>Token:</b> ${esc(position.token)}\n<b>Current:</b> ${mark.currentPrice}\n<b>Net PnL:</b> ${round(mark.netPnlPct, 2)}%\n<b>Age:</b> ${ageText(mark.ageMs)}\n<b>Status:</b> ${esc(status)}${portfolioDelta ? `\n<b>Account Δ:</b> ${round(portfolioDelta, 2)}%` : ""}`;
-}
+  const byStrategy = portfolio?.byStrategy || {};
+  const strategyLines = Object.keys(byStrategy).length
+    ? Object.entries(byStrategy)
+        .map(
+          ([key, row]) =>
+            `• ${escapeHtml(String(key).toUpperCase())}: realized ${fmtSol(
+              row?.realizedPnlSol
+            )}, open ${safeNum(row?.openPositions, 0)}, avail ${fmtSol(row?.availableSol)}`
+        )
+        .join("\n")
+    : "No strategy data";
 
-export function buildExitText(trade) {
-  return `🏁 <b>EXIT</b>\n\n<b>Strategy:</b> ${esc(String(trade.strategy).toUpperCase())}\n<b>Wallet:</b> ${esc(trade.walletId || "simulation")}\n<b>Token:</b> ${esc(trade.token)}\n<b>Net PnL:</b> ${round(trade.netPnlPct, 2)}%\n<b>Net PnL SOL:</b> ${round(trade.netPnlSol, 6)}\n<b>Reason:</b> ${esc(trade.reason)}\n<b>Duration:</b> ${ageText(trade.durationMs)}\n<b>Balance after:</b> ${round(trade.balanceAfter, 4)} SOL`;
-}
+  const openPositions = Array.isArray(portfolio?.positions) ? portfolio.positions : [];
+  const longest = openPositions.length
+    ? openPositions
+        .map((p) => ({
+          token: p?.token || "Unknown",
+          strategy: p?.strategy || "-",
+          ageMs: p?.lastMark?.ageMs || (Date.now() - safeNum(p?.openedAt))
+        }))
+        .sort((a, b) => safeNum(b.ageMs) - safeNum(a.ageMs))[0]
+    : null;
 
-export function buildPeriodicReport(runtime, portfolio, previousEquity = null) {
-  const deltaPct = previousEquity && previousEquity > 0
-    ? ((portfolio.equity - previousEquity) / previousEquity) * 100
-    : 0;
+  const bestWorst = buildBestWorstClosed(portfolio);
 
-  const best = [...portfolio.positions].sort((a, b) => (b.lastMark?.netPnlPct || -999) - (a.lastMark?.netPnlPct || -999))[0] || null;
-  const worst = [...portfolio.positions].sort((a, b) => (a.lastMark?.netPnlPct || 999) - (b.lastMark?.netPnlPct || 999))[0] || null;
+  return `🧠 <b>PERIODIC REPORT</b>
 
-  return `🧾 <b>ACCOUNT REPORT</b>\n\n<b>Mode:</b> ${esc(runtime.mode)}\n<b>Equity:</b> ${round(portfolio.equity, 4)} SOL\n<b>Period Δ:</b> ${round(deltaPct, 2)}%\n<b>Free SOL:</b> ${round(portfolio.cash, 4)}\n<b>In positions:</b> ${round(portfolio.equity - portfolio.cash, 4)}\n<b>Realized:</b> ${round(portfolio.realizedPnlSol, 4)} SOL\n<b>Unrealized:</b> ${round(portfolio.unrealizedPnlSol, 4)} SOL\n${best ? `\n<b>Best open:</b> ${esc(best.token)} ${round(best.lastMark?.netPnlPct || 0, 2)}%` : ""}\n${worst ? `<b>Worst open:</b> ${esc(worst.token)} ${round(worst.lastMark?.netPnlPct || 0, 2)}%` : ""}`;
+<b>Mode:</b> ${escapeHtml(String(runtime?.mode || "stopped").toUpperCase())}
+<b>Equity:</b> ${fmtSol(equity)}
+<b>Period Δ:</b> ${fmtSol(deltaSol)} (${fmtPct(deltaPct)})
+<b>Free cash:</b> ${fmtSol(portfolio?.cash)}
+<b>Realized:</b> ${fmtSol(portfolio?.realizedPnlSol)}
+<b>Unrealized:</b> ${fmtSol(portfolio?.unrealizedPnlSol)}
+<b>Open positions:</b> ${safeNum(openPositions.length, 0)}
+
+<b>By strategy</b>
+${strategyLines}
+
+<b>Best closed:</b> ${escapeHtml(bestWorst.best)}
+<b>Worst closed:</b> ${escapeHtml(bestWorst.worst)}
+<b>Longest open:</b> ${
+    longest
+      ? `${escapeHtml(longest.token)} | ${escapeHtml(
+          String(longest.strategy).toUpperCase()
+        )} | ${fmtAgeMs(longest.ageMs)}`
+      : "none"
+  }`;
 }
