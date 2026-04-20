@@ -12,10 +12,6 @@ function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
-function nowIso() {
-  return new Date().toISOString();
-}
-
 function shortId() {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -35,6 +31,8 @@ export default class GMGNExecutionService {
       options.defaultSlippagePct ?? process.env.GMGN_DEFAULT_SLIPPAGE_PCT,
       1
     );
+
+    this.dryRunAutoFill = options.dryRunAutoFill !== false;
   }
 
   requireDeps() {
@@ -46,10 +44,11 @@ export default class GMGNExecutionService {
     }
   }
 
-  makeClientOrderId(strategy, walletId, tokenCa, side) {
+  makeClientOrderId(strategy, walletId, tokenCa, side, operation) {
     return [
       "gmgn",
       asText(strategy, "strategy"),
+      asText(operation, "op"),
       asText(side, "side"),
       asText(walletId, "wallet"),
       asText(tokenCa, "token").slice(0, 10),
@@ -63,7 +62,14 @@ export default class GMGNExecutionService {
     return s === "SELL" ? "SELL" : "BUY";
   }
 
-  estimateSizeFromIntent(intent = {}) {
+  normalizeOperation(operation) {
+    const op = asText(operation, "open").toLowerCase();
+    if (op === "close") return "close";
+    if (op === "partial") return "partial";
+    return "open";
+  }
+
+  estimateSizeFromIntent(intent = {}, operation = "open") {
     const strategy = asText(intent.strategy).toLowerCase();
     const edge = safeNum(intent.expectedEdgePct, 0);
 
@@ -77,6 +83,10 @@ export default class GMGNExecutionService {
 
       if (edge >= 20) amountSol += 0.3;
       if (edge >= 35) amountSol += 0.2;
+
+      if (operation === "partial") {
+        amountSol = Math.max(0.1, amountSol * 0.5);
+      }
     }
 
     return {
@@ -89,6 +99,7 @@ export default class GMGNExecutionService {
   buildOrderPayload(runtimeConfig, {
     walletId,
     strategy,
+    operation,
     side,
     token,
     intent = {},
@@ -102,11 +113,13 @@ export default class GMGNExecutionService {
     }
 
     const tokenObj = clone(token || {});
+    const normalizedOperation = this.normalizeOperation(operation);
     const clientOrderId = this.makeClientOrderId(
       strategy,
       walletId,
       tokenObj.ca,
-      side
+      side,
+      normalizedOperation
     );
 
     return {
@@ -116,6 +129,7 @@ export default class GMGNExecutionService {
       gmgnWalletId: asText(profile.gmgnWalletId),
       gmgnAccountId: asText(profile.gmgnAccountId),
       strategy: asText(strategy),
+      operation: normalizedOperation,
       side: this.normalizeSide(side),
       status: "created",
       token: {
@@ -126,7 +140,13 @@ export default class GMGNExecutionService {
         dexId: asText(tokenObj.dexId),
         url: asText(tokenObj.url)
       },
-      size: this.estimateSizeFromIntent(intent),
+      size: this.estimateSizeFromIntent(
+        {
+          ...clone(intent),
+          strategy
+        },
+        normalizedOperation
+      ),
       pricing: {
         expectedEntryPrice: safeNum(intent.expectedEntryPrice ?? tokenObj.price, 0),
         executedEntryPrice: 0,
@@ -139,13 +159,40 @@ export default class GMGNExecutionService {
       note: asText(note),
       reason: "",
       signature: "",
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
       history: [],
       raw: {
         walletProfile: profile,
         intent: clone(intent)
       }
+    };
+  }
+
+  buildDryRunFillPatch(order) {
+    const operation = this.normalizeOperation(order?.operation);
+    const side = this.normalizeSide(order?.side);
+    const expectedEntryPrice = safeNum(order?.pricing?.expectedEntryPrice, 0);
+    const expectedExitPrice = safeNum(order?.pricing?.expectedExitPrice, 0);
+
+    const pricing = {
+      expectedEntryPrice,
+      executedEntryPrice: 0,
+      expectedExitPrice,
+      executedExitPrice: 0,
+      slippagePct: safeNum(order?.pricing?.slippagePct, this.defaultSlippagePct)
+    };
+
+    if (operation === "open" && side === "BUY") {
+      pricing.executedEntryPrice = expectedEntryPrice;
+    } else {
+      pricing.executedExitPrice = expectedExitPrice > 0 ? expectedExitPrice : expectedEntryPrice;
+    }
+
+    return {
+      operation,
+      note: `dry_run auto-filled (${operation})`,
+      pricing
     };
   }
 
@@ -162,33 +209,39 @@ export default class GMGNExecutionService {
       return this.orderStore.markFailed(
         { clientOrderId: order.clientOrderId },
         {
+          operation: order.operation,
           reason: "execution_disabled",
           note: "GMGN execution disabled"
         }
       );
     }
 
-    if (mode === "dry_run") {
-      return this.orderStore.markSubmitted(
+    const submitted = await this.orderStore.markSubmitted(
+      { clientOrderId: order.clientOrderId },
+      {
+        operation: order.operation,
+        note:
+          mode === "external_manual"
+            ? "waiting for external GMGN wallet execution"
+            : `submitted (${mode})`
+      }
+    );
+
+    if (mode === "dry_run" && this.dryRunAutoFill) {
+      return this.orderStore.markFilled(
         { clientOrderId: order.clientOrderId },
-        {
-          note: "dry_run submitted"
-        }
+        this.buildDryRunFillPatch(submitted || order)
       );
     }
 
-    if (mode === "external_manual") {
-      return this.orderStore.markSubmitted(
-        { clientOrderId: order.clientOrderId },
-        {
-          note: "waiting for external GMGN wallet execution"
-        }
-      );
+    if (mode === "external_manual" || mode === "dry_run") {
+      return this.orderStore.findOrder({ clientOrderId: order.clientOrderId });
     }
 
     return this.orderStore.markFailed(
       { clientOrderId: order.clientOrderId },
       {
+        operation: order.operation,
         reason: "unsupported_execution_mode",
         note: `mode=${mode}`
       }
@@ -205,6 +258,7 @@ export default class GMGNExecutionService {
     return this.submitOrder(runtimeConfig, {
       walletId,
       strategy,
+      operation: "open",
       side: "BUY",
       token,
       intent,
@@ -222,6 +276,7 @@ export default class GMGNExecutionService {
     return this.submitOrder(runtimeConfig, {
       walletId,
       strategy,
+      operation: "close",
       side: "SELL",
       token,
       intent,
@@ -241,6 +296,7 @@ export default class GMGNExecutionService {
     return this.submitOrder(runtimeConfig, {
       walletId,
       strategy,
+      operation: "partial",
       side: "SELL",
       token,
       intent: {
@@ -283,6 +339,8 @@ export default class GMGNExecutionService {
   buildExecutionSummaryText(runtimeConfig) {
     const openOrders = this.listOpenOrders();
     const mode = asText(this.defaultMode, "dry_run");
+    const statusCounts = this.orderStore.countByStatus();
+    const opCounts = this.orderStore.countByOperation();
 
     const strategyLines = ["scalp", "reversal", "runner", "copytrade"]
       .map((strategy) => {
@@ -296,6 +354,19 @@ export default class GMGNExecutionService {
 mode: ${mode}
 open orders: ${openOrders.length}
 default slippage pct: ${safeNum(this.defaultSlippagePct, 0)}
+
+<b>Status counters</b>
+created: ${safeNum(statusCounts.created)}
+submitted: ${safeNum(statusCounts.submitted)}
+filled: ${safeNum(statusCounts.filled)}
+partial: ${safeNum(statusCounts.partial)}
+failed: ${safeNum(statusCounts.failed)}
+cancelled: ${safeNum(statusCounts.cancelled)}
+
+<b>Operation counters</b>
+open: ${safeNum(opCounts.open)}
+close: ${safeNum(opCounts.close)}
+partial: ${safeNum(opCounts.partial)}
 
 <b>Primary wallets</b>
 ${strategyLines}`;
