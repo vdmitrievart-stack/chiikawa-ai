@@ -685,6 +685,45 @@ updated: ${escapeHtml(row.updatedAt || "-")}`
     return lines.join("\n");
   }
 
+  buildGMGNPnlHintSummary() {
+    const rows = this.gmgnOrderStore
+      .listOrders()
+      .filter((row) => {
+        const mode = String(row?.mode || "").toLowerCase();
+        const status = String(row?.status || "").toLowerCase();
+        const op = String(row?.operation || "").toLowerCase();
+        return (
+          mode === "dry_run" &&
+          status === "filled" &&
+          (op === "close" || op === "partial")
+        );
+      });
+
+    const totalSol = rows.reduce(
+      (sum, row) => sum + safeNum(row?.metrics?.pnlHintSol, 0),
+      0
+    );
+    const positiveSol = rows.reduce((sum, row) => {
+      const v = safeNum(row?.metrics?.pnlHintSol, 0);
+      return v > 0 ? sum + v : sum;
+    }, 0);
+    const negativeSol = rows.reduce((sum, row) => {
+      const v = safeNum(row?.metrics?.pnlHintSol, 0);
+      return v < 0 ? sum + v : sum;
+    }, 0);
+    const avgPct =
+      rows.length > 0
+        ? rows.reduce((sum, row) => sum + safeNum(row?.metrics?.pnlHintPct, 0), 0) / rows.length
+        : 0;
+
+    return `💡 <b>Simulated GMGN close hints</b>
+filled close/partial: ${rows.length}
+sum pnlHintSol: ${totalSol.toFixed(4)}
+positive pnlHintSol: ${positiveSol.toFixed(4)}
+negative pnlHintSol: ${negativeSol.toFixed(4)}
+avg pnlHintPct: ${avgPct.toFixed(2)}%`;
+  }
+
   buildStatusText() {
     const base = buildDashboard(this.runtime, getPortfolio());
     return `${base}
@@ -695,11 +734,15 @@ ${this.buildExecutionModelSummary()}
 
 ${this.buildGMGNExecutionText()}
 
+${this.buildGMGNPnlHintSummary()}
+
 ${this.buildRecentGMGNEventsSummary()}`;
   }
 
   buildBalanceText() {
-    return buildBalanceText(getPortfolio());
+    return `${buildBalanceText(getPortfolio())}
+
+${this.buildGMGNPnlHintSummary()}`;
   }
 
   buildWalletsText() {
