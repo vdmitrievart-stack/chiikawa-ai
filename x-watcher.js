@@ -2,17 +2,23 @@ import fetch from "node-fetch";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+const NITTER_INSTANCE = process.env.NITTER_INSTANCE || "nitter.poast.org";
 const CHECK_INTERVAL = Number(process.env.X_WATCHER_INTERVAL_MS || 60_000);
-const TARGET_ACCOUNTS = String(
-  process.env.X_WATCHER_TARGET_ACCOUNTS || "chiikawa_kouhou"
+
+const SEARCH_TERMS = String(
+  process.env.X_WATCHER_SEARCH_TERMS ||
+    "chiikawa,ちいかわ,$chiikawa,#chiikawa,chiikawa cto"
 )
   .split(",")
   .map((x) => x.trim())
   .filter(Boolean);
 
+const MIN_FOLLOWERS = Number(process.env.X_WATCHER_MIN_FOLLOWERS || 1000);
+const MAX_POST_AGE_HOURS = Number(process.env.X_WATCHER_MAX_POST_AGE_HOURS || 48);
+const MAX_NEW_POSTS_PER_LOOP = Number(process.env.X_WATCHER_MAX_NEW_POSTS || 2);
+
 const TELEGRAM_BOT_TOKEN =
   process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN || "";
-
 const TG_CHAT_ID =
   process.env.FORCED_GROUP_CHAT_ID ||
   process.env.PUBLIC_GROUP_CHAT_ID ||
@@ -23,11 +29,6 @@ const USER_AGENT =
 
 const STATE_DIR = path.resolve("./runtime-data");
 const STATE_FILE = path.join(STATE_DIR, "x-watcher-state.json");
-
-const MAX_NEW_POSTS_PER_LOOP = Number(process.env.X_WATCHER_MAX_NEW_POSTS || 2);
-const MAX_POST_AGE_HOURS = Number(process.env.X_WATCHER_MAX_POST_AGE_HOURS || 48);
-
-let isRunning = false;
 
 const DEFAULT_EMOTION_GIFS = {
   happy: [
@@ -48,11 +49,14 @@ const DEFAULT_EMOTION_GIFS = {
 };
 
 const state = {
-  accounts: {},
-  recentPostIds: [],
-  recentFingerprints: [],
+  seenIds: [],
+  seenFingerprints: [],
+  profileCache: {},
+  lastPublishedAt: "",
   gifCursor: 0
 };
+
+let isRunning = false;
 
 function asText(v, fallback = "") {
   const s = String(v ?? "").trim();
@@ -68,6 +72,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function normalizeWhitespace(text) {
+  return asText(text).replace(/\s+/g, " ").trim();
+}
+
 function decodeHtml(text) {
   return asText(text)
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
@@ -77,9 +85,9 @@ function decodeHtml(text) {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
     .replace(/&#x2F;/g, "/")
-    .replace(/&#47;/g, "/")
-    .replace(/&nbsp;/g, " ");
+    .replace(/&#47;/g, "/");
 }
 
 function stripHtml(text) {
@@ -99,8 +107,8 @@ function escapeHtml(input) {
     .replace(/"/g, "&quot;");
 }
 
-function shortText(text, max = 260) {
-  const s = asText(text);
+function shortText(text, max = 280) {
+  const s = normalizeWhitespace(text);
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
 }
@@ -119,24 +127,6 @@ function pickStable(seed, rows = []) {
   return rows[stableHash(seed) % rows.length];
 }
 
-function gifPoolForEmotion(emotion) {
-  const key = asText(emotion, "calm");
-  const envKey = `X_WATCHER_GIFS_${key.toUpperCase()}`;
-  const envValue = asText(process.env[envKey], "");
-  if (envValue) {
-    const rows = envValue.split(",").map((x) => x.trim()).filter(Boolean);
-    if (rows.length) return rows;
-  }
-  return DEFAULT_EMOTION_GIFS[key] || DEFAULT_EMOTION_GIFS.calm;
-}
-
-function nextEmotionGif(emotion = "calm") {
-  const pool = gifPoolForEmotion(emotion);
-  const gif = pool[state.gifCursor % pool.length];
-  state.gifCursor += 1;
-  return gif;
-}
-
 function parseDateMs(value) {
   const ms = Date.parse(value || "");
   return Number.isFinite(ms) ? ms : 0;
@@ -148,39 +138,88 @@ function isFreshEnough(pubDate) {
   return Date.now() - ms <= MAX_POST_AGE_HOURS * 60 * 60 * 1000;
 }
 
+function normalizeUrl(url) {
+  const raw = asText(url, "");
+  if (!raw) return "";
+  if (raw.startsWith("http://") || raw.startsWith("https://")) return raw;
+  if (raw.startsWith("//")) return `https:${raw}`;
+  if (raw.startsWith("/")) return `https://${NITTER_INSTANCE}${raw}`;
+  return `https://${NITTER_INSTANCE}/${raw.replace(/^\/+/, "")}`;
+}
+
+function profileUrl(username) {
+  return `https://${NITTER_INSTANCE}/${username}`;
+}
+
+function searchUrl(term) {
+  return `https://${NITTER_INSTANCE}/search?f=tweets&q=${encodeURIComponent(term)}`;
+}
+
+function compactHandle(handle) {
+  const h = asText(handle, "").replace(/^@/, "");
+  return h ? `@${h}` : "";
+}
+
+function postFingerprint(post) {
+  return [
+    asText(post?.id, ""),
+    asText(post?.url, ""),
+    asText(post?.username, ""),
+    asText(post?.text, "")
+  ]
+    .join("|")
+    .toLowerCase();
+}
+
 function rememberPost(post) {
   const id = asText(post?.id, "");
   const fp = postFingerprint(post);
 
   if (id) {
-    state.recentPostIds.unshift(id);
-    state.recentPostIds = Array.from(new Set(state.recentPostIds)).slice(0, 400);
+    state.seenIds.unshift(id);
+    state.seenIds = Array.from(new Set(state.seenIds)).slice(0, 500);
   }
 
   if (fp) {
-    state.recentFingerprints.unshift(fp);
-    state.recentFingerprints = Array.from(new Set(state.recentFingerprints)).slice(0, 400);
+    state.seenFingerprints.unshift(fp);
+    state.seenFingerprints = Array.from(new Set(state.seenFingerprints)).slice(0, 500);
   }
+
+  state.lastPublishedAt = nowIso();
 }
 
 function hasSeenPost(post) {
   const id = asText(post?.id, "");
   const fp = postFingerprint(post);
   return (
-    (id && state.recentPostIds.includes(id)) ||
-    (fp && state.recentFingerprints.includes(fp))
+    (id && state.seenIds.includes(id)) ||
+    (fp && state.seenFingerprints.includes(fp))
   );
 }
 
-function postFingerprint(post) {
-  return [
-    asText(post?.account, ""),
-    asText(post?.id, ""),
-    asText(post?.url, ""),
-    asText(post?.cleanText, "")
-  ]
-    .join("|")
-    .toLowerCase();
+function shouldPublishByCooldown() {
+  const lastMs = parseDateMs(state.lastPublishedAt);
+  if (!lastMs) return true;
+  return Date.now() - lastMs >= 20 * 60 * 1000;
+}
+
+function parseCompactNumber(text) {
+  const s = asText(text, "").toUpperCase().replace(/,/g, "").trim();
+  if (!s) return 0;
+
+  const m = s.match(/^([0-9]+(?:\.[0-9]+)?)([KMB])?$/);
+  if (!m) {
+    const plain = Number(s.replace(/[^\d.]/g, ""));
+    return Number.isFinite(plain) ? plain : 0;
+  }
+
+  const num = Number(m[1]);
+  const suffix = m[2] || "";
+
+  if (suffix === "K") return Math.round(num * 1_000);
+  if (suffix === "M") return Math.round(num * 1_000_000);
+  if (suffix === "B") return Math.round(num * 1_000_000_000);
+  return Math.round(num);
 }
 
 async function ensureStateDir() {
@@ -194,11 +233,12 @@ async function loadState() {
     const raw = await fs.readFile(STATE_FILE, "utf8");
     const parsed = JSON.parse(raw);
 
-    state.accounts = parsed?.accounts || {};
-    state.recentPostIds = Array.isArray(parsed?.recentPostIds) ? parsed.recentPostIds : [];
-    state.recentFingerprints = Array.isArray(parsed?.recentFingerprints)
-      ? parsed.recentFingerprints
+    state.seenIds = Array.isArray(parsed?.seenIds) ? parsed.seenIds : [];
+    state.seenFingerprints = Array.isArray(parsed?.seenFingerprints)
+      ? parsed.seenFingerprints
       : [];
+    state.profileCache = parsed?.profileCache || {};
+    state.lastPublishedAt = asText(parsed?.lastPublishedAt, "");
     state.gifCursor = safeNum(parsed?.gifCursor, 0);
   } catch (error) {
     if (error?.code !== "ENOENT") {
@@ -214,9 +254,10 @@ async function saveState() {
       STATE_FILE,
       JSON.stringify(
         {
-          accounts: state.accounts,
-          recentPostIds: state.recentPostIds,
-          recentFingerprints: state.recentFingerprints,
+          seenIds: state.seenIds,
+          seenFingerprints: state.seenFingerprints,
+          profileCache: state.profileCache,
+          lastPublishedAt: state.lastPublishedAt,
           gifCursor: state.gifCursor,
           updatedAt: nowIso()
         },
@@ -230,92 +271,201 @@ async function saveState() {
   }
 }
 
-function xmlTag(block, tag) {
-  return decodeHtml(block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i"))?.[1] || "");
+async function fetchText(url) {
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": USER_AGENT
+    }
+  });
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} for ${url}`);
+  }
+
+  return res.text();
 }
 
-function xmlAttr(block, tag, attr) {
-  const tagMatch = block.match(new RegExp(`<${tag}[^>]*${attr}="([^"]+)"[^>]*\\/?>`, "i"));
-  return decodeHtml(tagMatch?.[1] || "");
+function extractTimelineItems(html) {
+  const matches = [
+    ...html.matchAll(/<div class="timeline-item(?:\s|")([\s\S]*?)<\/table>\s*<\/div>/g),
+    ...html.matchAll(/<div class="timeline-item(?:\s|")([\s\S]*?)<\/div>\s*<\/div>/g)
+  ];
+
+  const seen = new Set();
+  const out = [];
+
+  for (const match of matches) {
+    const block = match[0];
+    const sig = block.slice(0, 120);
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push(block);
+  }
+
+  return out;
 }
 
-function extractMediaFromDescription(descriptionHtml) {
-  const html = asText(descriptionHtml, "");
+function parseSearchResultBlock(block) {
+  const statusHref =
+    block.match(/href="\/([^"/]+)\/status\/(\d+)"/i)?.[0] || "";
+  const hrefMatch = block.match(/href="\/([^"/]+)\/status\/(\d+)"/i);
+
+  const username = asText(hrefMatch?.[1], "");
+  const tweetId = asText(hrefMatch?.[2], "");
+
+  if (!username || !tweetId) return null;
+
+  const fullName =
+    stripHtml(block.match(/<a[^>]+class="fullname"[^>]*>([\s\S]*?)<\/a>/i)?.[1] || "") ||
+    "";
+
+  const handle =
+    stripHtml(block.match(/<a[^>]+class="username"[^>]*>([\s\S]*?)<\/a>/i)?.[1] || "") ||
+    username;
+
+  const textHtml =
+    block.match(/<div[^>]+class="tweet-content[^"]*"[^>]*>([\s\S]*?)<\/div>/i)?.[1] || "";
+
+  const text = stripHtml(textHtml);
+
+  const dateTitle =
+    decodeHtml(
+      block.match(/<a[^>]+title="([^"]+)"[^>]*>\s*<span class="tweet-date"/i)?.[1] || ""
+    ) ||
+    decodeHtml(
+      block.match(/<span class="tweet-date"[\s\S]*?<a[^>]+title="([^"]+)"/i)?.[1] || ""
+    );
+
+  const photoUrl =
+    normalizeUrl(block.match(/<a[^>]+class="still-image"[^>]+href="([^"]+)"/i)?.[1] || "") ||
+    normalizeUrl(block.match(/<img[^>]+src="([^"]+\/pic\/[^"]+)"/i)?.[1] || "");
 
   const videoSrc =
-    decodeHtml(html.match(/<source[^>]+src="([^"]+)"/i)?.[1] || "") ||
-    decodeHtml(html.match(/<video[^>]+src="([^"]+)"/i)?.[1] || "");
+    normalizeUrl(block.match(/<source[^>]+src="([^"]+)"/i)?.[1] || "") ||
+    normalizeUrl(block.match(/<video[^>]+src="([^"]+)"/i)?.[1] || "");
 
-  const videoPoster = decodeHtml(html.match(/<video[^>]+poster="([^"]+)"/i)?.[1] || "");
+  const poster =
+    normalizeUrl(block.match(/<video[^>]+poster="([^"]+)"/i)?.[1] || "");
 
-  const imgSrc = decodeHtml(html.match(/<img[^>]+src="([^"]+)"/i)?.[1] || "");
+  const mediaUrl = videoSrc || photoUrl || poster || "";
+  const mediaKind = videoSrc ? "video" : mediaUrl ? "photo" : "";
 
-  if (videoSrc) {
-    return {
-      mediaUrl: videoSrc,
-      mediaKind: "video",
-      posterUrl: videoPoster || imgSrc || ""
-    };
-  }
-
-  if (videoPoster) {
-    return {
-      mediaUrl: videoPoster,
-      mediaKind: "photo",
-      posterUrl: videoPoster
-    };
-  }
-
-  if (imgSrc) {
-    return {
-      mediaUrl: imgSrc,
-      mediaKind: "photo",
-      posterUrl: imgSrc
-    };
-  }
+  const replyCount = parseCompactNumber(
+    stripHtml(block.match(/icon-comment[\s\S]*?<span[^>]*>([^<]+)<\/span>/i)?.[1] || "")
+  );
+  const repostCount = parseCompactNumber(
+    stripHtml(block.match(/icon-retweet[\s\S]*?<span[^>]*>([^<]+)<\/span>/i)?.[1] || "")
+  );
+  const likeCount = parseCompactNumber(
+    stripHtml(block.match(/icon-heart[\s\S]*?<span[^>]*>([^<]+)<\/span>/i)?.[1] || "")
+  );
 
   return {
-    mediaUrl: "",
-    mediaKind: "",
-    posterUrl: ""
+    id: tweetId,
+    username,
+    handle: compactHandle(handle || username),
+    fullName,
+    text,
+    url: `https://x.com/${username}/status/${tweetId}`,
+    pubDate: dateTitle,
+    mediaUrl,
+    mediaKind,
+    posterUrl: poster,
+    replyCount,
+    repostCount,
+    likeCount
   };
 }
 
-function cleanTitle(title, username) {
-  let text = stripHtml(title);
+async function searchPosts(term) {
+  try {
+    const html = await fetchText(searchUrl(term));
+    const items = extractTimelineItems(html)
+      .map((block) => parseSearchResultBlock(block))
+      .filter(Boolean);
 
-  const prefixA = `${username}:`;
-  const prefixB = `${username} -`;
-
-  if (text.toLowerCase().startsWith(prefixA.toLowerCase())) {
-    text = text.slice(prefixA.length).trim();
-  } else if (text.toLowerCase().startsWith(prefixB.toLowerCase())) {
-    text = text.slice(prefixB.length).trim();
+    return items;
+  } catch (error) {
+    console.log(`❌ search error for "${term}":`, error.message);
+    return [];
   }
-
-  return text;
 }
 
-function extractTickerLike(text) {
-  const match = asText(text, "").match(/\$[A-Za-z0-9_]{2,12}\b/);
-  if (match) return match[0];
+function parseFollowersFromProfileHtml(html) {
+  const candidates = [
+    html.match(/profile-stat[\s\S]*?Followers[\s\S]*?profile-stat-num[^>]*>([^<]+)</i)?.[1],
+    html.match(/<a[^>]+href="\/[^"]+\/followers"[\s\S]*?<span[^>]*>([^<]+)<\/span>/i)?.[1],
+    html.match(/Followers[\s\S]{0,120}?>([0-9.,KMB]+)</i)?.[1]
+  ]
+    .map((x) => parseCompactNumber(stripHtml(x || "")))
+    .filter((x) => x > 0);
 
-  const upper = asText(text, "").match(/\b[A-Z]{3,8}\b/);
-  if (upper) return upper[0];
+  return candidates[0] || 0;
+}
 
-  return "";
+async function fetchProfileMeta(username) {
+  const cached = state.profileCache[username];
+  const freshEnough =
+    cached?.fetchedAt &&
+    Date.now() - parseDateMs(cached.fetchedAt) < 6 * 60 * 60 * 1000;
+
+  if (cached && freshEnough) {
+    return cached;
+  }
+
+  try {
+    const html = await fetchText(profileUrl(username));
+    const followers = parseFollowersFromProfileHtml(html);
+
+    const row = {
+      followers,
+      fetchedAt: nowIso()
+    };
+
+    state.profileCache[username] = row;
+    return row;
+  } catch (error) {
+    console.log(`⚠️ profile fetch failed for ${username}:`, error.message);
+
+    const fallback = {
+      followers: 0,
+      fetchedAt: nowIso()
+    };
+
+    state.profileCache[username] = fallback;
+    return fallback;
+  }
+}
+
+function relevanceScore(post, term) {
+  const text = asText(post?.text, "").toLowerCase();
+  const needle = asText(term, "").toLowerCase();
+
+  let score = 0;
+
+  if (needle && text.includes(needle)) score += 8;
+  if (text.includes("chiikawa")) score += 8;
+  if (text.includes("ちいかわ")) score += 8;
+  if (text.includes("$chiikawa")) score += 5;
+  if (text.includes("#chiikawa")) score += 4;
+  if (text.includes("cto")) score += 2;
+
+  score += Math.min(8, Math.floor(safeNum(post?.likeCount, 0) / 50));
+  score += Math.min(6, Math.floor(safeNum(post?.repostCount, 0) / 10));
+  score += Math.min(4, Math.floor(safeNum(post?.replyCount, 0) / 10));
+
+  return score;
 }
 
 function classifyEmotion(post) {
-  const text = asText(post?.cleanText, "").toLowerCase();
+  const text = asText(post?.text, "").toLowerCase();
 
   if (
-    text.includes("omg") ||
     text.includes("wow") ||
+    text.includes("omg") ||
     text.includes("huge") ||
-    text.includes("big") ||
-    text.includes("moon") ||
     text.includes("pump") ||
+    text.includes("moon") ||
     text.includes("爆") ||
     text.includes("!") ||
     text.includes("!?")
@@ -335,10 +485,10 @@ function classifyEmotion(post) {
 
   if (
     text.includes("cute") ||
-    text.includes("happy") ||
     text.includes("love") ||
     text.includes("good") ||
-    text.includes("nice")
+    text.includes("nice") ||
+    text.includes("happy")
   ) {
     return "happy";
   }
@@ -346,16 +496,25 @@ function classifyEmotion(post) {
   return "calm";
 }
 
+function extractTickerLike(text) {
+  const match = asText(text, "").match(/\$[A-Za-z0-9_]{2,12}\b/);
+  if (match) return match[0];
+
+  const upper = asText(text, "").match(/\b[A-Z]{3,8}\b/);
+  if (upper) return upper[0];
+
+  return "";
+}
+
 function buildLead(post, emotion) {
   const seed = `${post.id}:${emotion}:lead`;
-  const ticker = extractTickerLike(post.cleanText);
-  const acct = asText(post.account, "x");
+  const ticker = extractTickerLike(post.text);
 
   const common = [
     "Ого, смотрите что я нашёл, ребята.",
-    "Поймал это у себя в ленте и решил принести сюда.",
-    "Это проскочило у меня перед глазами, и мне стало любопытно.",
-    "Мимо такого я проходить не захотел."
+    "Это проскочило у меня в ленте, и я решил принести сюда.",
+    "Любопытный след в X, оставлю его тут.",
+    "Мимо такого я решил не проходить."
   ];
 
   const surprised = [
@@ -365,14 +524,14 @@ function buildLead(post, emotion) {
   ];
 
   const ironic = [
-    "Забавный мир: сначала мем, потом разговоры, потом все делают серьёзные лица.",
-    "Мемы опять ведут себя так, будто они тут главные. Иногда так и есть.",
+    "Мемы опять делают вид, что они тут просто шутят.",
+    "Иногда всё начинается с иронии, а потом кто-то открывает график.",
     "У ленты сегодня явно игривое настроение."
   ];
 
   const happy = [
-    "Люблю такие тёплые находки.",
-    "Тут прям чувствуется живое настроение.",
+    "Тут настроение прям тёплое.",
+    "Люблю такие аккуратные находки.",
     "Есть в этом что-то приятно-chaotic."
   ];
 
@@ -383,47 +542,39 @@ function buildLead(post, emotion) {
     ...(emotion === "happy" ? happy : [])
   ];
 
-  const picked = pickStable(seed, pool);
+  const line = pickStable(seed, pool);
 
-  if (ticker) {
-    return `${picked} ${ticker} тут тоже мелькнул, кстати.`;
-  }
-
-  if (acct) {
-    return `${picked} Источник — ${acct}.`;
-  }
-
-  return picked;
+  if (ticker) return `${line} ${ticker} тут тоже мелькнул, кстати.`;
+  return line;
 }
 
 function buildOpinion(post, emotion) {
   const seed = `${post.id}:${emotion}:opinion`;
-  const text = asText(post.cleanText, "");
-  const ticker = extractTickerLike(text);
+  const ticker = extractTickerLike(post.text);
 
   const generic = [
-    "Я бы не делал поспешных выводов по одному посту, но в копилку наблюдений такое точно отправляю.",
-    "Не каждая искра становится огнём, но я люблю замечать такие мелочи заранее.",
+    "Я бы не делал выводы по одному посту, но в копилку наблюдений такое точно уношу.",
+    "Не каждый шум становится движением, но замечать такие вещи заранее я люблю.",
     "Иногда один хороший пост говорит больше, чем длинная простыня шума.",
-    "Я такое отмечаю аккуратно: интересно, но без лишней спешки."
+    "Я такое отмечаю спокойно: интересно, но без лишней спешки."
   ];
 
   const ironic = [
-    "Если бы мемы умели улыбаться глазами, тут был бы как раз такой случай.",
-    "Выглядит так, будто рынок опять решил пошутить — а я такие шутки обычно сначала наблюдаю.",
-    "Сначала смешно, потом кто-то открывает график. Классика."
+    "Сначала смешно, потом кто-то становится серьёзным. Классика крипто-леса.",
+    "Если бы мемы умели улыбаться глазами, это был бы как раз такой случай.",
+    "Пока это выглядит забавно. А забавное в крипте иногда внезапно взрослеет."
   ];
 
   const surprised = [
-    "Честно? Тут я бы просто сел поудобнее и посмотрел, к чему это приведёт.",
+    "Честно? Тут я бы просто сел поудобнее и посмотрел, что будет дальше.",
     "Когда вокруг становится чуть громче, я обычно делаю не шумнее, а внимательнее.",
-    "Шум есть, а значит дальше интереснее."
+    "Шум есть, а значит история как минимум заслуживает взгляда."
   ];
 
   const happy = [
-    "Тут настроение доброе, но голову я всё равно держу холодной.",
-    "Любопытно и мило — хорошее сочетание, если не терять осторожность.",
-    "Мне нравится вайб, но размер риска всё равно должен быть скромным."
+    "Мне нравится вайб, но голову я всё равно держу холодной.",
+    "Тёплая находка — это хорошо. Дисциплина — ещё лучше.",
+    "Милый тон, но риск-менеджмент всё равно должен жить рядом."
   ];
 
   const pool = [
@@ -436,16 +587,15 @@ function buildOpinion(post, emotion) {
   let line = pickStable(seed, pool);
 
   if (ticker) {
-    line = `${line} ${ticker} я бы тоже отмечал без перегруза по риску.`;
+    line = `${line} ${ticker} я бы тоже смотрел без перегруза по риску.`;
   }
 
   return line;
 }
 
 function buildRiskLine(post) {
-  const seed = `${post.id}:risk`;
-  return pickStable(seed, [
-    "Не лезьте большим объёмом: в крипте даже красивая идея не стоит перегруза. 5–10% на одну идею обычно спокойнее.",
+  return pickStable(`${post.id}:risk`, [
+    "Не лезьте большим объёмом: даже интересная идея не стоит перегруза. 5–10% на одну идею обычно спокойнее.",
     "Если будете смотреть в эту сторону — с умом. Крупный размер позиции тут точно не нужен.",
     "Любопытно — да. Но без олл-инов: риск на одну идею лучше держать умеренным."
   ]);
@@ -459,18 +609,22 @@ function buildCaption(post) {
   const emotion = classifyEmotion(post);
   const lead = buildLead(post, emotion);
   const opinion = buildOpinion(post, emotion);
-  const summary = shortText(post.cleanText, 280);
+  const textPreview = shortText(post.text, 280);
+  const followers = safeNum(post.followers, 0);
+
+  const header = pickStable(`${post.id}:${emotion}:header`, [
+    "🐹 <b>Chiikawa заметил кое-что в X</b>",
+    "🍃 <b>Chiikawa принёс находку из X</b>",
+    "✨ <b>Смотрите, что Chiikawa увидел</b>"
+  ]);
 
   const lines = [
-    pickStable(`${post.id}:${emotion}:header`, [
-      "🐹 <b>Chiikawa заметил кое-что в X</b>",
-      "🍃 <b>Chiikawa принёс находку из X</b>",
-      "✨ <b>Смотрите, что Chiikawa увидел</b>"
-    ]),
+    header,
     "",
     escapeHtml(lead),
     "",
-    `📝 ${escapeHtml(summary)}`,
+    `👤 <b>${escapeHtml(post.fullName || post.handle || "@unknown")}</b> · ${followers} followers`,
+    `📝 ${escapeHtml(textPreview)}`,
     "",
     escapeHtml(opinion),
     "",
@@ -486,6 +640,24 @@ function buildCaption(post) {
     caption: lines.join("\n"),
     emotion
   };
+}
+
+function gifPoolForEmotion(emotion) {
+  const key = asText(emotion, "calm");
+  const envKey = `X_WATCHER_GIFS_${key.toUpperCase()}`;
+  const envValue = asText(process.env[envKey], "");
+  if (envValue) {
+    const rows = envValue.split(",").map((x) => x.trim()).filter(Boolean);
+    if (rows.length) return rows;
+  }
+  return DEFAULT_EMOTION_GIFS[key] || DEFAULT_EMOTION_GIFS.calm;
+}
+
+function nextEmotionGif(emotion = "calm") {
+  const pool = gifPoolForEmotion(emotion);
+  const gif = pool[state.gifCursor % pool.length];
+  state.gifCursor += 1;
+  return gif;
 }
 
 async function telegramCall(method, payload) {
@@ -557,149 +729,82 @@ async function sendStyledPost(post) {
   const caption = built.caption;
   const emotionGif = nextEmotionGif(built.emotion);
 
-  let sentMessage = null;
+  let sent = null;
 
   try {
     if (post.mediaUrl && post.mediaKind === "video") {
-      sentMessage = await sendVideoWithCaption(post.mediaUrl, caption);
+      sent = await sendVideoWithCaption(post.mediaUrl, caption);
     } else if (post.mediaUrl) {
-      sentMessage = await sendPhotoWithCaption(post.mediaUrl, caption);
+      sent = await sendPhotoWithCaption(post.mediaUrl, caption);
     } else {
-      sentMessage = await sendCaptionOnly(caption);
+      sent = await sendCaptionOnly(caption);
     }
   } catch (error) {
     console.log("⚠️ media send fallback:", error.message);
-    sentMessage = await sendCaptionOnly(caption);
+    sent = await sendCaptionOnly(caption);
   }
 
-  if (sentMessage?.message_id) {
-    await sendEmotionGifReply(sentMessage.message_id, emotionGif);
+  if (sent?.message_id) {
+    await sendEmotionGifReply(sent.message_id, emotionGif);
   }
 
-  return sentMessage;
+  return sent;
 }
 
-async function fetchTweets(username) {
-  try {
-    const url = `https://nitter.poast.org/${username}/rss`;
+async function collectCandidates() {
+  const out = [];
 
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": USER_AGENT
-      }
-    });
+  for (const term of SEARCH_TERMS) {
+    const posts = await searchPosts(term);
 
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    const xml = await res.text();
-    const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
-
-    return items.map((item) => {
-      const block = item[1];
-      const title = xmlTag(block, "title");
-      const link = xmlTag(block, "link");
-      const guid = xmlTag(block, "guid") || link;
-      const description = xmlTag(block, "description");
-      const pubDate = xmlTag(block, "pubDate");
-      const enclosureUrl = xmlAttr(block, "enclosure", "url");
-      const enclosureType = xmlAttr(block, "enclosure", "type");
-
-      const mediaFromDesc = extractMediaFromDescription(description);
-
-      let mediaUrl = mediaFromDesc.mediaUrl || enclosureUrl || "";
-      let mediaKind = mediaFromDesc.mediaKind || "";
-
-      if (!mediaKind && enclosureType) {
-        if (enclosureType.startsWith("video/")) mediaKind = "video";
-        else if (enclosureType.startsWith("image/")) mediaKind = "photo";
-      }
-
-      if (!mediaKind && mediaUrl) {
-        if (/\.mp4(\?|$)/i.test(mediaUrl)) mediaKind = "video";
-        else mediaKind = "photo";
-      }
-
-      const clean = cleanTitle(title, username);
-
-      return {
-        account: username,
-        id: guid,
-        text: title,
-        cleanText: clean,
-        url: link,
-        pubDate,
-        mediaUrl,
-        mediaKind,
-        posterUrl: mediaFromDesc.posterUrl || ""
-      };
-    });
-  } catch (err) {
-    console.log(`❌ fetch error for ${username}:`, err.message);
-    return [];
-  }
-}
-
-async function processAccount(username) {
-  const posts = await fetchTweets(username);
-
-  if (!posts.length) {
-    console.log(`⚠️ no posts for ${username}`);
-    return;
-  }
-
-  console.log(`📡 ${username}: ${posts.length} posts`);
-
-  if (!state.accounts[username]?.lastSeenId) {
-    console.log(`🧠 first sync for ${username} → skipping history`);
-    state.accounts[username] = {
-      lastSeenId: posts[0]?.id || "",
-      updatedAt: nowIso()
-    };
-    await saveState();
-    return;
-  }
-
-  const lastSeenId = state.accounts[username].lastSeenId;
-  const ordered = [...posts].reverse();
-  const toPublish = [];
-
-  for (const post of ordered) {
-    if (!post.id) continue;
-    if (post.id === lastSeenId) break;
-    if (!isFreshEnough(post.pubDate)) continue;
-    if (hasSeenPost(post)) continue;
-    toPublish.push(post);
-  }
-
-  const limited = toPublish.slice(0, MAX_NEW_POSTS_PER_LOOP);
-
-  for (const post of limited) {
-    try {
-      console.log(`🚀 NEW POST ${username}:`, post.cleanText);
-
-      await sendStyledPost(post);
-
-      rememberPost(post);
-      state.accounts[username] = {
-        lastSeenId: post.id,
-        updatedAt: nowIso()
-      };
-
-      await saveState();
-    } catch (error) {
-      console.log("❌ publish post error:", error.message);
+    for (const post of posts) {
+      if (!post?.id) continue;
+      if (!post?.text) continue;
+      if (!isFreshEnough(post.pubDate)) continue;
+      out.push({
+        ...post,
+        matchedTerm: term
+      });
     }
   }
 
-  if (posts[0]?.id) {
-    state.accounts[username] = {
-      lastSeenId: posts[0].id,
-      updatedAt: nowIso()
-    };
-    await saveState();
+  const deduped = new Map();
+  for (const post of out) {
+    const key = asText(post.id, "") || postFingerprint(post);
+    if (!key) continue;
+
+    const prev = deduped.get(key);
+    if (!prev) {
+      deduped.set(key, post);
+      continue;
+    }
+
+    const prevScore = relevanceScore(prev, prev.matchedTerm);
+    const nextScore = relevanceScore(post, post.matchedTerm);
+    if (nextScore > prevScore) {
+      deduped.set(key, post);
+    }
   }
+
+  return [...deduped.values()];
+}
+
+async function enrichWithFollowers(posts) {
+  const out = [];
+
+  for (const post of posts) {
+    const profile = await fetchProfileMeta(post.username);
+    const followers = safeNum(profile?.followers, 0);
+
+    if (followers < MIN_FOLLOWERS) continue;
+
+    out.push({
+      ...post,
+      followers
+    });
+  }
+
+  return out;
 }
 
 async function loop() {
@@ -707,11 +812,35 @@ async function loop() {
   isRunning = true;
 
   try {
-    for (const acc of TARGET_ACCOUNTS) {
-      await processAccount(acc);
+    if (!shouldPublishByCooldown()) {
+      isRunning = false;
+      return;
     }
-  } catch (err) {
-    console.log("❌ loop error:", err.message);
+
+    const candidates = await collectCandidates();
+    const enriched = await enrichWithFollowers(candidates);
+
+    const filtered = enriched
+      .filter((post) => !hasSeenPost(post))
+      .sort((a, b) => {
+        const scoreB = relevanceScore(b, b.matchedTerm) + Math.log10(Math.max(1, b.followers));
+        const scoreA = relevanceScore(a, a.matchedTerm) + Math.log10(Math.max(1, a.followers));
+        return scoreB - scoreA;
+      })
+      .slice(0, MAX_NEW_POSTS_PER_LOOP);
+
+    for (const post of filtered) {
+      try {
+        await sendStyledPost(post);
+        rememberPost(post);
+        await saveState();
+        break;
+      } catch (error) {
+        console.log("❌ publish post error:", error.message);
+      }
+    }
+  } catch (error) {
+    console.log("❌ loop error:", error.message);
   }
 
   isRunning = false;
@@ -719,7 +848,6 @@ async function loop() {
 
 export async function startXWatcher() {
   console.log("👀 X Watcher started");
-
   await loadState();
   await loop();
 
