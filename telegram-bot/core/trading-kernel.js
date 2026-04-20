@@ -610,11 +610,25 @@ accepted good: ${safeNum(leader.acceptedGoodCount, 0)}
 pending intents: ${this.txStore.listPendingIntents().length}`;
   }
 
+  buildExecutionModelSummary() {
+    const r = this.copytradeService?.rules || {};
+    return `🧠 <b>Execution model</b>
+entry by leader: ${r.entryUsesLeader ? "yes" : "no"}
+exit by bot strategy: yes
+leader sell mode: ${escapeHtml(String(r.exitUsesLeaderMode || "soft_only"))}
+leader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}
+leader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}
+own TP priority: ${r.ownTpPriority ? "yes" : "no"}
+own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
+  }
+
   buildStatusText() {
     const base = buildDashboard(this.runtime, getPortfolio());
     return `${base}
 
-${this.buildCopytradeStatusSummary()}`;
+${this.buildCopytradeStatusSummary()}
+
+${this.buildExecutionModelSummary()}`;
   }
 
   buildBalanceText() {
