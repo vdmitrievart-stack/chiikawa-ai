@@ -19,39 +19,239 @@ function normalizeAction(text) {
     .replace(/\s+/g, " ")
     .trim();
 
-  if (normalized === "/start" || normalized === "/menu") return "start";
-  if (normalized === "/runmulti" || normalized.includes("run multi")) return "run_multi";
-  if (normalized === "/runscalp" || normalized.includes("run scalp")) return "run_scalp";
-  if (normalized === "/runreversal" || normalized.includes("run reversal")) return "run_reversal";
-  if (normalized === "/runrunner" || normalized.includes("run runner")) return "run_runner";
-  if (normalized === "/runcopytrade" || normalized.includes("run copytrade")) return "run_copytrade";
-  if (normalized === "/runmigration" || normalized.includes("run migration")) return "run_migration";
+  const compact = normalized.replace(/\s+/g, "");
 
-  if (normalized === "/stop" || normalized === "stop" || normalized.endsWith(" stop")) return "stop";
-  if (normalized === "/kill" || normalized === "kill" || normalized.endsWith(" kill")) return "kill";
+  const hasAll = (...parts) => parts.every((part) => normalized.includes(part));
+  const hasAny = (...parts) => parts.some((part) => normalized.includes(part));
 
-  if (normalized === "/status" || normalized.includes("status")) return "status";
-  if (normalized === "/intents" || normalized.includes("pending intents")) return "intents";
-  if (normalized === "/gmgnexecution" || normalized.includes("gmgn execution")) return "gmgn_execution";
-  if (normalized === "/gmgnorders" || normalized.includes("gmgn orders")) return "gmgn_orders";
-  if (normalized === "/balance" || normalized.includes("balance")) return "balance";
-  if (normalized === "/scanmarket" || normalized.includes("scan market")) return "scan_market";
-  if (normalized === "/scanca" || normalized === "/ca" || normalized.includes("scan ca")) return "scan_ca";
-  if (normalized === "/language" || normalized.includes("language")) return "language";
-  if (normalized === "/wallets" || normalized.includes("wallets")) return "wallets";
-  if (normalized === "/copytrade" || normalized.includes("copytrade")) return "copytrade";
-  if (normalized === "/budget" || normalized.includes("budget")) return "budget";
-  if (normalized === "/gmgnstatus" || normalized.includes("gmgn status")) return "gmgn_status";
-  if (normalized === "/leaderhealth" || normalized.includes("leader health")) return "leader_health";
-  if (normalized === "/syncleaders" || normalized.includes("sync leaders")) return "sync_leaders";
-  if (normalized === "/addleader") return "add_leader";
-  if (normalized === "/setsecret") return "set_secret";
-  if (normalized === "/applypending") return "apply_pending";
-  if (normalized === "/exportcsv") return "exportcsv";
-  if (normalized === "/exportjson") return "exportjson";
-  if (normalized === "/exportxlsx") return "exportxlsx";
-  if (normalized === "lang ru") return "lang_ru";
-  if (normalized === "lang en") return "lang_en";
+  if (compact === "/start" || compact === "/menu" || normalized === "start") return "start";
+
+  if (
+    compact === "/runmulti" ||
+    compact === "runmulti" ||
+    hasAll("run", "multi") ||
+    hasAll("запуск", "мульти") ||
+    hasAll("multi", "5", "strategies")
+  ) {
+    return "run_multi";
+  }
+
+  if (
+    compact === "/runscalp" ||
+    compact === "runscalp" ||
+    hasAll("run", "scalp") ||
+    hasAll("запуск", "scalp")
+  ) {
+    return "run_scalp";
+  }
+
+  if (
+    compact === "/runreversal" ||
+    compact === "runreversal" ||
+    hasAll("run", "reversal") ||
+    hasAll("запуск", "reversal")
+  ) {
+    return "run_reversal";
+  }
+
+  if (
+    compact === "/runrunner" ||
+    compact === "runrunner" ||
+    hasAll("run", "runner") ||
+    hasAll("запуск", "runner")
+  ) {
+    return "run_runner";
+  }
+
+  if (
+    compact === "/runcopytrade" ||
+    compact === "runcopytrade" ||
+    hasAll("run", "copytrade") ||
+    hasAll("запуск", "copytrade")
+  ) {
+    return "run_copytrade";
+  }
+
+  if (
+    compact === "/runmigration" ||
+    compact === "runmigration" ||
+    hasAll("run", "migration") ||
+    hasAll("запуск", "migration")
+  ) {
+    return "run_migration";
+  }
+
+  if (
+    compact === "/stop" ||
+    compact === "stop" ||
+    normalized === "stop" ||
+    normalized.endsWith(" stop") ||
+    normalized === "стоп"
+  ) {
+    return "stop";
+  }
+
+  if (
+    compact === "/kill" ||
+    compact === "kill" ||
+    normalized === "kill"
+  ) {
+    return "kill";
+  }
+
+  if (
+    compact === "/status" ||
+    compact === "status" ||
+    normalized === "status" ||
+    normalized === "статус"
+  ) {
+    return "status";
+  }
+
+  if (
+    compact === "/intents" ||
+    compact === "intents" ||
+    hasAll("pending", "intents")
+  ) {
+    return "intents";
+  }
+
+  if (
+    compact === "/gmgnexecution" ||
+    compact === "gmgnexecution" ||
+    hasAll("gmgn", "execution")
+  ) {
+    return "gmgn_execution";
+  }
+
+  if (
+    compact === "/gmgnorders" ||
+    compact === "gmgnorders" ||
+    hasAll("gmgn", "orders")
+  ) {
+    return "gmgn_orders";
+  }
+
+  if (
+    compact === "/balance" ||
+    compact === "balance" ||
+    normalized === "balance" ||
+    normalized === "баланс"
+  ) {
+    return "balance";
+  }
+
+  if (
+    compact === "/scanmarket" ||
+    compact === "scanmarket" ||
+    hasAll("scan", "market") ||
+    hasAll("скан", "market")
+  ) {
+    return "scan_market";
+  }
+
+  if (
+    compact === "/scanca" ||
+    compact === "/ca" ||
+    compact === "scanca" ||
+    hasAll("scan", "ca") ||
+    hasAll("скан", "ca")
+  ) {
+    return "scan_ca";
+  }
+
+  if (
+    compact === "/language" ||
+    compact === "language" ||
+    normalized === "language" ||
+    normalized === "язык"
+  ) {
+    return "language";
+  }
+
+  if (
+    compact === "/wallets" ||
+    compact === "wallets" ||
+    normalized === "wallets" ||
+    normalized === "кошельки"
+  ) {
+    return "wallets";
+  }
+
+  if (
+    compact === "/copytrade" ||
+    compact === "copytrade" ||
+    normalized === "copytrade"
+  ) {
+    return "copytrade";
+  }
+
+  if (
+    compact === "/budget" ||
+    compact === "budget" ||
+    normalized === "budget" ||
+    normalized === "бюджет"
+  ) {
+    return "budget";
+  }
+
+  if (
+    compact === "/gmgnstatus" ||
+    compact === "gmgnstatus" ||
+    hasAll("gmgn", "status")
+  ) {
+    return "gmgn_status";
+  }
+
+  if (
+    compact === "/leaderhealth" ||
+    compact === "leaderhealth" ||
+    hasAll("leader", "health")
+  ) {
+    return "leader_health";
+  }
+
+  if (
+    compact === "/syncleaders" ||
+    compact === "syncleaders" ||
+    hasAll("sync", "leaders")
+  ) {
+    return "sync_leaders";
+  }
+
+  if (compact === "/addleader" || compact === "addleader") return "add_leader";
+  if (compact === "/setsecret" || compact === "setsecret") return "set_secret";
+  if (compact === "/applypending" || compact === "applypending") return "apply_pending";
+
+  if (
+    compact === "/exportcsv" ||
+    compact === "exportcsv" ||
+    hasAll("export", "csv") ||
+    hasAny(" csv")
+  ) {
+    return "exportcsv";
+  }
+
+  if (
+    compact === "/exportjson" ||
+    compact === "exportjson" ||
+    hasAll("export", "json") ||
+    hasAny(" json")
+  ) {
+    return "exportjson";
+  }
+
+  if (
+    compact === "/exportxlsx" ||
+    compact === "exportxlsx" ||
+    hasAll("export", "xlsx") ||
+    hasAny(" xlsx")
+  ) {
+    return "exportxlsx";
+  }
+
+  if (normalized === "lang ru" || compact === "langru") return "lang_ru";
+  if (normalized === "lang en" || compact === "langen") return "lang_en";
 
   return null;
 }
@@ -335,8 +535,7 @@ export default class BotRouter {
     XLSX.writeFile(this.statsToXlsxWorkbook(), filePath);
     await this.bot.sendDocument(chatId, filePath, {}, {
       filename: path.basename(filePath),
-      contentType:
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     });
     await this.scheduleTempCleanup(filePath);
   }
