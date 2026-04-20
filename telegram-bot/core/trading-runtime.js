@@ -1,151 +1,168 @@
-import { DEFAULT_STRATEGY_BUDGET, normalizeBudgetConfig } from "./budget-manager.js";
+function safeNum(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
-export const DEFAULT_RUNTIME_CONFIG = Object.freeze({
-  language: "ru",
-  dryRun: true,
-  reportIntervalMin: 20,
-  strategyBudget: DEFAULT_STRATEGY_BUDGET,
-  strategyEnabled: {
-    scalp: true,
-    reversal: true,
-    runner: true,
-    copytrade: true
-  },
-  strategyRouting: {
-    scalp: ["wallet_trader_main"],
-    reversal: ["wallet_trader_main"],
-    runner: ["wallet_runner_main"],
-    copytrade: ["wallet_copy_1", "wallet_copy_2"]
-  },
-  wallets: {
-    wallet_trader_main: {
-      label: "Trader Main",
-      role: "trader",
-      executionMode: "dry_run",
-      allowedStrategies: ["scalp", "reversal"],
-      enabled: true,
-      minReserveSol: 0.1,
-      maxTradeUsd: 250,
-      secretRef: ""
+export function buildDefaultRuntimeConfig(overrides = {}) {
+  return {
+    language: overrides.language || "ru",
+    dryRun: overrides.dryRun !== false,
+    strategyBudget: {
+      scalp: safeNum(overrides.strategyBudget?.scalp, 0.25),
+      reversal: safeNum(overrides.strategyBudget?.reversal, 0.25),
+      runner: safeNum(overrides.strategyBudget?.runner, 0.25),
+      copytrade: safeNum(overrides.strategyBudget?.copytrade, 0.25)
     },
-    wallet_runner_main: {
-      label: "Runner Main",
-      role: "trader",
-      executionMode: "dry_run",
-      allowedStrategies: ["runner"],
-      enabled: true,
-      minReserveSol: 0.15,
-      maxTradeUsd: 350,
-      secretRef: ""
+    strategyEnabled: {
+      scalp: overrides.strategyEnabled?.scalp !== false,
+      reversal: overrides.strategyEnabled?.reversal !== false,
+      runner: overrides.strategyEnabled?.runner !== false,
+      copytrade: overrides.strategyEnabled?.copytrade !== false
     },
-    wallet_copy_1: {
-      label: "Copy Follower 1",
-      role: "follower",
-      executionMode: "dry_run",
-      allowedStrategies: ["copytrade"],
-      enabled: true,
-      minReserveSol: 0.12,
-      maxTradeUsd: 200,
-      secretRef: ""
-    },
-    wallet_copy_2: {
-      label: "Copy Follower 2",
-      role: "follower",
-      executionMode: "dry_run",
-      allowedStrategies: ["copytrade"],
-      enabled: true,
-      minReserveSol: 0.12,
-      maxTradeUsd: 200,
-      secretRef: ""
-    }
-  },
-  copytrade: {
-    enabled: true,
-    rescoringEnabled: true,
-    minLeaderScore: 70,
-    cooldownMinutes: 90,
-    reactivationScore: 76,
-    maxLeaderDrawdownPct: 18,
-    maxFollowerSlippageBps: 300,
-    gmgnEnabled: false
-  },
-  gmgn: {
-    enabled: false,
-    baseUrl: process.env.GMGN_API_BASE_URL || "",
-    apiKey: process.env.GMGN_API_KEY || "",
-    leadersRefreshMs: 2 * 60 * 1000,
-    scannerRefreshMs: 90 * 1000
-  }
-});
-
-export function normalizeConfig(input = {}) {
-  const merged = {
-    ...clone(DEFAULT_RUNTIME_CONFIG),
-    ...clone(input)
+    wallets: clone(overrides.wallets || {}),
+    strategyRouting: clone(overrides.strategyRouting || {}),
+    copytrade: clone(
+      overrides.copytrade || {
+        enabled: true,
+        rescoringEnabled: true,
+        minLeaderScore: 70,
+        cooldownMinutes: 180,
+        leaders: []
+      }
+    )
   };
-
-  merged.strategyBudget = normalizeBudgetConfig(merged.strategyBudget);
-  merged.strategyEnabled = {
-    scalp: merged.strategyEnabled?.scalp !== false,
-    reversal: merged.strategyEnabled?.reversal !== false,
-    runner: merged.strategyEnabled?.runner !== false,
-    copytrade: merged.strategyEnabled?.copytrade !== false
-  };
-
-  return merged;
 }
 
-export function createRuntimeState() {
+export function createTradingRuntime(initialConfig = {}) {
   return {
     mode: "stopped",
-    enabled: true,
-    stopRequested: false,
-    killRequested: false,
     runId: null,
     startedAt: null,
-    activeConfig: normalizeConfig(DEFAULT_RUNTIME_CONFIG),
+    activeChatId: null,
+    activeUserId: null,
+
+    activeConfig: buildDefaultRuntimeConfig(initialConfig),
     pendingConfig: null,
     pendingReason: null,
-    lastReportAt: 0,
+    pendingQueuedAt: null,
+
+    strategyScope: "all",
+    stopRequested: false,
+    killRequested: false,
+    cycleCount: 0,
     lastCycleAt: 0,
-    lastError: null,
-    activeChatId: null,
-    activeUserId: null
+    lastStatusAt: 0
   };
 }
 
-export function setPendingConfig(runtime, patch = {}, reason = "manual_update") {
-  runtime.pendingConfig = normalizeConfig({
-    ...runtime.activeConfig,
-    ...clone(patch)
-  });
+export function startRuntime(runtime, options = {}) {
+  runtime.mode = options.mode || "infinite";
+  runtime.runId = `run-${Date.now()}`;
+  runtime.startedAt = Date.now();
+  runtime.activeChatId = options.chatId ?? null;
+  runtime.activeUserId = options.userId ?? null;
+  runtime.strategyScope = options.strategyScope || "all";
+  runtime.stopRequested = false;
+  runtime.killRequested = false;
+  runtime.cycleCount = 0;
+  runtime.lastCycleAt = 0;
+  return runtime;
+}
+
+export function requestStop(runtime) {
+  runtime.stopRequested = true;
+  runtime.killRequested = false;
+  return runtime;
+}
+
+export function requestKill(runtime) {
+  runtime.killRequested = true;
+  runtime.stopRequested = true;
+  return runtime;
+}
+
+export function finishRuntime(runtime) {
+  runtime.mode = "stopped";
+  runtime.strategyScope = "all";
+  runtime.stopRequested = false;
+  runtime.killRequested = false;
+  return runtime;
+}
+
+export function queuePendingConfig(runtime, patch = {}, reason = "manual_update") {
+  const base = clone(runtime.pendingConfig || runtime.activeConfig);
+  runtime.pendingConfig = deepMerge(base, patch);
   runtime.pendingReason = reason;
+  runtime.pendingQueuedAt = new Date().toISOString();
   return runtime.pendingConfig;
+}
+
+export function hasPendingConfig(runtime) {
+  return Boolean(runtime.pendingConfig);
+}
+
+export function canApplyPendingConfig(runtime, openPositionsCount = 0) {
+  return hasPendingConfig(runtime) && safeNum(openPositionsCount) === 0;
 }
 
 export function applyPendingConfig(runtime) {
   if (!runtime.pendingConfig) return null;
-  runtime.activeConfig = normalizeConfig(runtime.pendingConfig);
+  runtime.activeConfig = buildDefaultRuntimeConfig(runtime.pendingConfig);
   runtime.pendingConfig = null;
   runtime.pendingReason = null;
+  runtime.pendingQueuedAt = null;
   return runtime.activeConfig;
+}
+
+export function isRunStopped(runtime) {
+  return runtime.mode === "stopped";
+}
+
+export function isStrategyAllowed(runtime, strategyKey) {
+  if (!runtime?.activeConfig?.strategyEnabled?.[strategyKey]) return false;
+  if (runtime.strategyScope === "all") return true;
+  return runtime.strategyScope === strategyKey;
+}
+
+export function listAllowedStrategies(runtime) {
+  const keys = ["scalp", "reversal", "runner", "copytrade"];
+  return keys.filter((key) => isStrategyAllowed(runtime, key));
+}
+
+export function canOpenNewPositions(runtime) {
+  return !runtime.stopRequested && !runtime.killRequested && runtime.mode !== "stopped";
 }
 
 export function summarizeRuntime(runtime) {
   return {
     mode: runtime.mode,
-    enabled: runtime.enabled,
+    runId: runtime.runId,
+    strategyScope: runtime.strategyScope,
     stopRequested: runtime.stopRequested,
     killRequested: runtime.killRequested,
-    runId: runtime.runId,
     startedAt: runtime.startedAt,
-    language: runtime.activeConfig.language,
-    dryRun: runtime.activeConfig.dryRun,
     hasPendingConfig: Boolean(runtime.pendingConfig),
-    reportIntervalMin: runtime.activeConfig.reportIntervalMin
+    pendingReason: runtime.pendingReason,
+    pendingQueuedAt: runtime.pendingQueuedAt
   };
+}
+
+function isObject(x) {
+  return x && typeof x === "object" && !Array.isArray(x);
+}
+
+function deepMerge(target, patch) {
+  const out = clone(target);
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (isObject(value) && isObject(out[key])) {
+      out[key] = deepMerge(out[key], value);
+    } else {
+      out[key] = clone(value);
+    }
+  }
+  return out;
 }
