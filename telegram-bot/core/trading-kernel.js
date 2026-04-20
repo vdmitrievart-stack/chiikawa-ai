@@ -649,6 +649,30 @@ own TP priority: ${r.ownTpPriority ? "yes" : "no"}
 own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
   }
 
+  buildRecentGMGNEventsSummary(limit = 3) {
+    const rows = this.gmgnOrderStore.listRecentOrders(limit);
+
+    if (!rows.length) {
+      return `🕘 <b>Recent GMGN events</b>
+none`;
+    }
+
+    const lines = ["🕘 <b>Recent GMGN events</b>", ""];
+
+    for (const row of rows) {
+      lines.push(
+        `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}
+strategy: ${escapeHtml(row.strategy || "-")}
+token: ${escapeHtml(row?.token?.symbol || row?.token?.name || row?.token?.ca || "-")}
+note: ${escapeHtml(row.note || "-")}
+updated: ${escapeHtml(row.updatedAt || "-")}`
+      );
+      lines.push("");
+    }
+
+    return lines.join("\n");
+  }
+
   buildStatusText() {
     const base = buildDashboard(this.runtime, getPortfolio());
     return `${base}
@@ -657,7 +681,9 @@ ${this.buildCopytradeStatusSummary()}
 
 ${this.buildExecutionModelSummary()}
 
-${this.buildGMGNExecutionText()}`;
+${this.buildGMGNExecutionText()}
+
+${this.buildRecentGMGNEventsSummary()}`;
   }
 
   buildBalanceText() {
