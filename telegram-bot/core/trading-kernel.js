@@ -160,6 +160,7 @@ export default class TradingKernel {
     this.walletRouter = walletRouter;
     this.copytradeManager = copytradeManager;
     this.gmgnLeaderIntel = gmgnLeaderIntel;
+    this.startBalanceSol = safeNum(initialConfig?.startBalanceSol, 10);
 
     this.runtime = createTradingRuntime(
       buildDefaultRuntimeConfig(
@@ -167,38 +168,8 @@ export default class TradingKernel {
           language: "ru",
           dryRun: true,
           strategyBudget: { ...DEFAULT_STRATEGY_BUDGET },
-          wallets: {
-            wallet_trader_main: {
-              label: "Trader Main",
-              role: "trader",
-              enabled: true,
-              executionMode: "dry_run",
-              allowedStrategies: ["scalp", "reversal"],
-              secretRef: ""
-            },
-            wallet_runner_main: {
-              label: "Runner Main",
-              role: "trader",
-              enabled: true,
-              executionMode: "dry_run",
-              allowedStrategies: ["runner"],
-              secretRef: ""
-            },
-            wallet_copy_1: {
-              label: "Copy Follower 1",
-              role: "follower",
-              enabled: true,
-              executionMode: "dry_run",
-              allowedStrategies: ["copytrade"],
-              secretRef: ""
-            }
-          },
-          strategyRouting: {
-            scalp: ["wallet_trader_main"],
-            reversal: ["wallet_trader_main"],
-            runner: ["wallet_runner_main"],
-            copytrade: ["wallet_copy_1"]
-          },
+          wallets: {},
+          strategyRouting: {},
           copytrade: {
             enabled: true,
             rescoringEnabled: true,
@@ -212,6 +183,7 @@ export default class TradingKernel {
 
     this.recentlyTraded = new Map();
     this.previousReportEquity = null;
+    this.lastStatusText = "";
   }
 
   getRuntime() {
@@ -251,6 +223,7 @@ export default class TradingKernel {
     startRuntime(this.runtime, { mode, strategyScope, chatId, userId });
     this.previousReportEquity = null;
     this.syncPortfolioStrategyBudget();
+    resetPortfolio(this.startBalanceSol, getStrategyConfig());
     return this.runtime;
   }
 
