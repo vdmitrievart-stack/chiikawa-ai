@@ -161,6 +161,7 @@ export default class TradingKernel {
     });
 
     this.recentlyTraded = new Map();
+    this.noticeCooldowns = new Map();
     this.previousReportEquity = null;
   }
 
@@ -336,6 +337,14 @@ export default class TradingKernel {
     }
   }
 
+  canEmitNotice(key, cooldownMs = 15 * 60 * 1000) {
+    const now = Date.now();
+    const last = safeNum(this.noticeCooldowns.get(key), 0);
+    if (now - last < cooldownMs) return false;
+    this.noticeCooldowns.set(key, now);
+    return true;
+  }
+
   async syncLeaderScores() {
     const intel = await this.copytradeService.syncLeaderScores(
       this.runtime.activeConfig
@@ -493,7 +502,6 @@ export default class TradingKernel {
     });
 
     if (!result) {
-      await notificationService.sendText("❌ No candidates found");
       await this.persistSnapshot();
       return;
     }
@@ -501,10 +509,8 @@ export default class TradingKernel {
     let { candidate, plans, heroImage } = result;
     candidate = await this.enrichCandidateForCopytrade(candidate);
 
+    // На авто-цикле не спамим про чужие сети. Просто молча пропускаем.
     if (!isSolanaChain(candidate?.token?.chainId)) {
-      await notificationService.sendText(
-        `🚫 <b>CHAIN REJECTED</b>\n\nchain: ${escapeHtml(candidate?.token?.chainId || "-")}\nallowed: solana only`
-      );
       await this.persistSnapshot();
       return;
     }
@@ -557,9 +563,37 @@ export default class TradingKernel {
             );
           }
 
-          await notificationService.sendText(
-            `🚫 <b>COPYTRADE REJECTED</b>\n\n<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}\n<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}\n<b>Details:</b>\n${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
-          );
+          // NO_LEADER в multi-режиме вообще не шлем.
+          const isCopyOnlyMode = this.runtime.strategyScope === "copytrade";
+          const isNoLeader = copyVerdict.reason === "NO_LEADER";
+
+          let shouldNotifyReject = false;
+
+          if (isNoLeader) {
+            if (isCopyOnlyMode) {
+              shouldNotifyReject = this.canEmitNotice(
+                "copytrade:no_leader",
+                30 * 60 * 1000
+              );
+            }
+          } else {
+            shouldNotifyReject = this.canEmitNotice(
+              `copytrade:${candidate?.token?.ca || "unknown"}:${copyVerdict.reason || "reject"}`,
+              20 * 60 * 1000
+            );
+          }
+
+          if (shouldNotifyReject) {
+            await notificationService.sendText(
+              `🚫 <b>COPYTRADE REJECTED</b>
+
+<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}
+<b>Details:</b>
+${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
+            );
+          }
+
           await this.persistSnapshot();
           continue;
         }
@@ -573,9 +607,20 @@ export default class TradingKernel {
           );
         }
 
-        if (copyVerdict.mode === "probe_only") {
+        if (
+          copyVerdict.mode === "probe_only" &&
+          this.canEmitNotice(
+            `copytrade:probe:${candidate?.token?.ca || "unknown"}`,
+            20 * 60 * 1000
+          )
+        ) {
           await notificationService.sendText(
-            `⚠️ <b>COPYTRADE PROBE MODE</b>\n\n<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}\n<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}\n<b>Details:</b>\n${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
+            `⚠️ <b>COPYTRADE PROBE MODE</b>
+
+<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
+<b>Details:</b>
+${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
           );
         }
       }
@@ -893,7 +938,10 @@ Send: <code>budget 25 25 25 25</code>`;
 
     if (!isSolanaChain(result?.analyzed?.token?.chainId)) {
       await send.text(
-        `🚫 <b>CHAIN REJECTED</b>\n\nchain: ${escapeHtml(result?.analyzed?.token?.chainId || "-")}\nallowed: solana only`
+        `🚫 <b>CHAIN REJECTED</b>
+
+chain: ${escapeHtml(result?.analyzed?.token?.chainId || "-")}
+allowed: solana only`
       );
       return;
     }
