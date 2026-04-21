@@ -17,7 +17,8 @@ function escapeHtml(input) {
 }
 
 function fmtPct(v, digits = 2) {
-  return `${round(v, digits)}%`;
+  const n = safeNum(v);
+  return `${round(n, digits)}%`;
 }
 
 function fmtSol(v, digits = 4) {
@@ -68,30 +69,25 @@ function summarizeOpenPositions(portfolio) {
     .join("\n");
 }
 
-function buildQuietAccumulationSection(marketIntel = {}) {
-  const quiet = marketIntel?.quietAccumulation || null;
-  if (!quiet || safeNum(quiet?.score, 0) <= 0) {
+function buildHolderPanel(holderSummary = null) {
+  if (!holderSummary) {
     return `<b>Quiet accumulation</b>\nnone`;
   }
 
-  const title = marketIntel?.tokenName || marketIntel?.tokenSymbol || "candidate";
-  return `<b>Quiet accumulation</b>
-${escapeHtml(title)} | ${escapeHtml(marketIntel?.tokenSymbol || "-")}
-mode: ${escapeHtml(quiet?.primaryMode || quiet?.watch ? "quiet_base_watch" : "-")}
-source: ${escapeHtml(quiet?.signalSource || "proxy")}
-score: ${safeNum(quiet?.score, 0)}
-fresh-wallet cohort est: ${safeNum(quiet?.freshWalletBuyCount, 0)}
-retention 30m / 2h: ${fmtPct(quiet?.retention30mPct, 1)} / ${fmtPct(quiet?.retention2hPct, 1)}
-net control: ${fmtPct(quiet?.netControlPct, 1)}
-control trend: ${fmtPct(quiet?.controlTrendPct, 1)}
-dip-buy ratio: ${fmtPct(quiet?.dipBuyRatioPct, 1)}
-reload count: ${safeNum(quiet?.reloadCount, 0)}
-bottom touches: ${safeNum(quiet?.bottomTouches, 0)}
-base time: ${fmtAgeMs(safeNum(quiet?.baseMinutes, 0) * 60000)}
-reversal pass: ${marketIntel?.reversal?.allow ? "yes" : "no"}`;
+  return `<b>Quiet accumulation</b>\n` +
+    `token: ${escapeHtml(holderSummary?.tokenName || holderSummary?.mint || "-")}\n` +
+    `fresh cohort: ${safeNum(holderSummary?.freshWalletBuyCount, 0)}\n` +
+    `retention 30m / 2h: ${fmtPct(holderSummary?.retention30mPct)} / ${fmtPct(holderSummary?.retention2hPct)}\n` +
+    `net accumulation: ${fmtPct(holderSummary?.netAccumulationPct)}\n` +
+    `net control: ${fmtPct(holderSummary?.netControlPct)}\n` +
+    `reload count: ${safeNum(holderSummary?.reloadCount, 0)}\n` +
+    `dip-buy ratio: ${round(holderSummary?.dipBuyRatio, 2)}\n` +
+    `bottom touches: ${safeNum(holderSummary?.bottomTouches, 0)}\n` +
+    `quiet pass: ${holderSummary?.quietAccumulationPass ? "yes" : "no"}\n` +
+    `bottom-pack reversal: ${holderSummary?.bottomPackReversalPass ? "yes" : "no"}`;
 }
 
-export function buildBalanceText(portfolio = {}, marketIntel = {}) {
+export function buildBalanceText(portfolio = {}, holderSummary = null) {
   const byStrategy = portfolio?.byStrategy || {};
   const strategyLines = Object.keys(byStrategy).length
     ? Object.entries(byStrategy).map(([key, row]) => buildStrategyLine(key, row)).join("\n")
@@ -109,13 +105,13 @@ export function buildBalanceText(portfolio = {}, marketIntel = {}) {
 <b>By strategy</b>
 ${strategyLines}
 
-${buildQuietAccumulationSection(marketIntel)}
-
 <b>Open positions</b>
-${summarizeOpenPositions(portfolio)}`;
+${summarizeOpenPositions(portfolio)}
+
+${buildHolderPanel(holderSummary)}`;
 }
 
-export function buildDashboard(runtime = {}, portfolio = {}, marketIntel = {}) {
+export function buildDashboard(runtime = {}, portfolio = {}, holderSummary = null) {
   const byStrategy = portfolio?.byStrategy || {};
   const strategyLines = Object.keys(byStrategy).length
     ? Object.entries(byStrategy).map(([key, row]) => buildStrategyLine(key, row)).join("\n")
@@ -145,10 +141,71 @@ export function buildDashboard(runtime = {}, portfolio = {}, marketIntel = {}) {
 <b>Strategy buckets</b>
 ${strategyLines}
 
-${buildQuietAccumulationSection(marketIntel)}
-
 <b>Open positions</b>
-${summarizeOpenPositions(portfolio)}`;
+${summarizeOpenPositions(portfolio)}
+
+${buildHolderPanel(holderSummary)}`;
+}
+
+export function buildPeriodicReport(runtime = {}, portfolio = {}, previousEquity = null, holderSummary = null) {
+  const equity = safeNum(portfolio?.equity);
+  const deltaSol = previousEquity == null ? 0 : equity - safeNum(previousEquity);
+  const deltaPct = previousEquity > 0 ? (deltaSol / previousEquity) * 100 : 0;
+
+  const byStrategy = portfolio?.byStrategy || {};
+  const strategyLines = Object.keys(byStrategy).length
+    ? Object.entries(byStrategy)
+        .map(
+          ([key, row]) =>
+            `• ${escapeHtml(String(key).toUpperCase())}: realized ${fmtSol(
+              row?.realizedPnlSol
+            )}, open ${safeNum(row?.openPositions, 0)}, avail ${fmtSol(row?.availableSol)}`
+        )
+        .join("\n")
+    : "No strategy data";
+
+  const openPositions = Array.isArray(portfolio?.positions) ? portfolio.positions : [];
+  const longest = openPositions.length
+    ? openPositions
+        .map((p) => ({
+          token: p?.token || "Unknown",
+          strategy: p?.strategy || "-",
+          ageMs: p?.lastMark?.ageMs || (Date.now() - safeNum(p?.openedAt))
+        }))
+        .sort((a, b) => safeNum(b.ageMs) - safeNum(a.ageMs))[0]
+    : null;
+
+  const closed = Array.isArray(portfolio?.closedTrades) ? portfolio.closedTrades : [];
+  let best = "none";
+  let worst = "none";
+  if (closed.length) {
+    const sorted = [...closed].sort((a, b) => safeNum(b?.netPnlPct) - safeNum(a?.netPnlPct));
+    best = `${sorted[0]?.token || "Unknown"} ${fmtPct(sorted[0]?.netPnlPct)} (${sorted[0]?.strategy || "-"})`;
+    worst = `${sorted[sorted.length - 1]?.token || "Unknown"} ${fmtPct(sorted[sorted.length - 1]?.netPnlPct)} (${sorted[sorted.length - 1]?.strategy || "-"})`;
+  }
+
+  return `🧠 <b>PERIODIC REPORT</b>
+
+<b>Mode:</b> ${escapeHtml(String(runtime?.mode || "stopped").toUpperCase())}
+<b>Equity:</b> ${fmtSol(equity)}
+<b>Period Δ:</b> ${fmtSol(deltaSol)} (${fmtPct(deltaPct)})
+<b>Free cash:</b> ${fmtSol(portfolio?.cash)}
+<b>Realized:</b> ${fmtSol(portfolio?.realizedPnlSol)}
+<b>Unrealized:</b> ${fmtSol(portfolio?.unrealizedPnlSol)}
+<b>Open positions:</b> ${safeNum(openPositions.length, 0)}
+
+<b>By strategy</b>
+${strategyLines}
+
+<b>Best closed:</b> ${escapeHtml(best)}
+<b>Worst closed:</b> ${escapeHtml(worst)}
+<b>Longest open:</b> ${
+    longest
+      ? `${escapeHtml(longest.token)} | ${escapeHtml(String(longest.strategy).toUpperCase())} | ${fmtAgeMs(longest.ageMs)}`
+      : "none"
+  }
+
+${buildHolderPanel(holderSummary)}`;
 }
 
 export function buildEntryText(position = {}) {
@@ -225,74 +282,4 @@ export function buildExitText(trade = {}) {
 <b>Duration:</b> ${fmtAgeMs(trade?.durationMs)}
 <b>Reason:</b> ${escapeHtml(trade?.reason || "-")}
 <b>Balance after:</b> ${fmtSol(trade?.balanceAfter)}`;
-}
-
-function buildBestWorstClosed(portfolio = {}) {
-  const closed = Array.isArray(portfolio?.closedTrades) ? portfolio.closedTrades : [];
-  if (!closed.length) {
-    return { best: "none", worst: "none" };
-  }
-
-  const sorted = [...closed].sort((a, b) => safeNum(b?.netPnlPct) - safeNum(a?.netPnlPct));
-  const bestTrade = sorted[0];
-  const worstTrade = sorted[sorted.length - 1];
-
-  return {
-    best: `${bestTrade?.token || "Unknown"} ${fmtPct(bestTrade?.netPnlPct)} (${bestTrade?.strategy || "-"})`,
-    worst: `${worstTrade?.token || "Unknown"} ${fmtPct(worstTrade?.netPnlPct)} (${worstTrade?.strategy || "-"})`
-  };
-}
-
-export function buildPeriodicReport(runtime = {}, portfolio = {}, previousEquity = null, marketIntel = {}) {
-  const equity = safeNum(portfolio?.equity);
-  const deltaSol = previousEquity == null ? 0 : equity - safeNum(previousEquity);
-  const deltaPct = previousEquity > 0 ? (deltaSol / previousEquity) * 100 : 0;
-
-  const byStrategy = portfolio?.byStrategy || {};
-  const strategyLines = Object.keys(byStrategy).length
-    ? Object.entries(byStrategy)
-        .map(
-          ([key, row]) =>
-            `• ${escapeHtml(String(key).toUpperCase())}: realized ${fmtSol(
-              row?.realizedPnlSol
-            )}, open ${safeNum(row?.openPositions, 0)}, avail ${fmtSol(row?.availableSol)}`
-        )
-        .join("\n")
-    : "No strategy data";
-
-  const openPositions = Array.isArray(portfolio?.positions) ? portfolio.positions : [];
-  const longest = openPositions.length
-    ? openPositions
-        .map((p) => ({
-          token: p?.token || "Unknown",
-          strategy: p?.strategy || "-",
-          ageMs: p?.lastMark?.ageMs || (Date.now() - safeNum(p?.openedAt))
-        }))
-        .sort((a, b) => safeNum(b.ageMs) - safeNum(a.ageMs))[0]
-    : null;
-
-  const bestWorst = buildBestWorstClosed(portfolio);
-
-  return `🧠 <b>PERIODIC REPORT</b>
-
-<b>Mode:</b> ${escapeHtml(String(runtime?.mode || "stopped").toUpperCase())}
-<b>Equity:</b> ${fmtSol(equity)}
-<b>Period Δ:</b> ${fmtSol(deltaSol)} (${fmtPct(deltaPct)})
-<b>Free cash:</b> ${fmtSol(portfolio?.cash)}
-<b>Realized:</b> ${fmtSol(portfolio?.realizedPnlSol)}
-<b>Unrealized:</b> ${fmtSol(portfolio?.unrealizedPnlSol)}
-<b>Open positions:</b> ${safeNum(openPositions.length, 0)}
-
-<b>By strategy</b>
-${strategyLines}
-
-${buildQuietAccumulationSection(marketIntel)}
-
-<b>Best closed:</b> ${escapeHtml(bestWorst.best)}
-<b>Worst closed:</b> ${escapeHtml(bestWorst.worst)}
-<b>Longest open:</b> ${
-    longest
-      ? `${escapeHtml(longest.token)} | ${escapeHtml(String(longest.strategy).toUpperCase())} | ${fmtAgeMs(longest.ageMs)}`
-      : "none"
-  }`;
 }

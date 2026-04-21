@@ -37,6 +37,8 @@ import CandidateService from "./candidate-service.js";
 import PositionService from "./position-service.js";
 import CopytradeService from "./copytrade-service.js";
 import NotificationService from "./notification-service.js";
+import HolderAccumulationStore from "./holder-accumulation-store.js";
+import HolderAccumulationEngine from "./holder-accumulation-engine.js";
 
 import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
 import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
@@ -192,8 +194,19 @@ export default class TradingKernel {
         orderStore: this.gmgnOrderStore
       });
 
-    this.candidateService = new CandidateService({
+    this.holderAccumulationStore = new HolderAccumulationStore({
       logger: this.logger
+    });
+
+    this.holderAccumulationEngine = new HolderAccumulationEngine({
+      logger: this.logger,
+      store: this.holderAccumulationStore,
+      rpcUrl: process.env.SOLANA_RPC_URL
+    });
+
+    this.candidateService = new CandidateService({
+      logger: this.logger,
+      holderAccumulationEngine: this.holderAccumulationEngine
     });
 
     this.positionService = new PositionService({
@@ -215,12 +228,14 @@ export default class TradingKernel {
     this.recentlyTraded = new Map();
     this.noticeCooldowns = new Map();
     this.previousReportEquity = null;
-    this.lastDashboardIntel = null;
+    this.lastHolderSummary = null;
   }
 
   async initialize() {
     await this.gmgnOrderStore.load();
+    await this.holderAccumulationEngine.initialize();
     await this.restoreIfAvailable();
+    this.lastHolderSummary = this.holderAccumulationEngine.getDashboardSummary();
     return true;
   }
 
@@ -588,7 +603,7 @@ export default class TradingKernel {
           this.runtime,
           portfolio,
           this.previousReportEquity,
-          this.getDashboardIntel()
+          this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
         );
         this.previousReportEquity = portfolio.equity;
         await notificationService.sendText(report);
@@ -609,16 +624,9 @@ export default class TradingKernel {
         this.runtime.strategyScope === "scalp" &&
         this.canEmitNotice("scalp:no_candidate", 5 * 60 * 1000)
       ) {
-        await notificationService.sendText(`🫧 <b>SCALP</b>
-Пока не вижу нормального кандидата. Жду реальный всплеск объема, нормальный reclaim или живой откуп после миграции.`);
-      }
-
-      if (
-        this.runtime.strategyScope === "reversal" &&
-        this.canEmitNotice("reversal:no_candidate", 5 * 60 * 1000)
-      ) {
-        await notificationService.sendText(`🏔 <b>REVERSAL</b>
-Пока не вижу качественного дна. Нужны база, тихое накопление и подтвержденный reclaim, а не просто пролив.`);
+        await notificationService.sendText(
+          "🫧 <b>SCALP</b>\nПока не вижу нормального кандидата. Фильтры активны, жду что-то живое."
+        );
       }
 
       await this.persistSnapshot();
@@ -627,7 +635,7 @@ export default class TradingKernel {
 
     let { candidate, plans, heroImage } = result;
     candidate = await this.enrichCandidateForCopytrade(candidate);
-    this.lastDashboardIntel = this.buildDashboardIntel(candidate);
+    this.lastHolderSummary = candidate?.holderAccumulation || this.holderAccumulationEngine.getDashboardSummary();
 
     if (!isSolanaChain(candidate?.token?.chainId)) {
       await this.persistSnapshot();
@@ -798,33 +806,13 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
         this.runtime,
         portfolio,
         this.previousReportEquity,
-        this.getDashboardIntel()
+        this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
       );
       this.previousReportEquity = portfolio.equity;
       await notificationService.sendText(report);
     }
 
     await this.persistSnapshot();
-  }
-
-
-  getDashboardIntel() {
-    return this.lastDashboardIntel || null;
-  }
-
-  buildDashboardIntel(candidate = {}) {
-    if (!candidate) return null;
-
-    return {
-      tokenName: candidate?.token?.name || candidate?.token?.symbol || "",
-      tokenSymbol: candidate?.token?.symbol || "",
-      ca: candidate?.token?.ca || "",
-      updatedAt: new Date().toISOString(),
-      quietAccumulation: clone(candidate?.quietAccumulation || null),
-      reversal: clone(candidate?.reversal || null),
-      scalp: clone(candidate?.scalp || null),
-      migration: clone(candidate?.migration || null)
-    };
   }
 
   buildCopytradeStatusSummary() {
@@ -929,7 +917,11 @@ avg pnlHintPct: ${avgPct.toFixed(2)}%`;
   }
 
   buildStatusText() {
-    const base = buildDashboard(this.runtime, getPortfolio(), this.getDashboardIntel());
+    const base = buildDashboard(
+      this.runtime,
+      getPortfolio(),
+      this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
+    );
     return `${base}
 
 ${this.buildCopytradeStatusSummary()}
@@ -944,7 +936,10 @@ ${this.buildRecentGMGNEventsSummary()}`;
   }
 
   buildBalanceText() {
-    return `${buildPortfolioBalanceText(getPortfolio(), this.getDashboardIntel())}
+    return `${buildPortfolioBalanceText(
+      getPortfolio(),
+      this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
+    )}
 
 ${this.buildGMGNPnlHintSummary()}`;
   }
