@@ -17,20 +17,11 @@ function escapeHtml(input) {
 }
 
 function fmtPct(v, digits = 2) {
-  const n = safeNum(v);
-  return `${round(n, digits)}%`;
+  return `${round(v, digits)}%`;
 }
 
 function fmtSol(v, digits = 4) {
   return `${round(v, digits)} SOL`;
-}
-
-function fmtMinutes(v) {
-  const mins = Math.max(0, Math.round(safeNum(v, 0)));
-  if (mins < 60) return `${mins}m`;
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return `${h}h ${m}m`;
 }
 
 function fmtAgeMs(ms) {
@@ -77,7 +68,30 @@ function summarizeOpenPositions(portfolio) {
     .join("\n");
 }
 
-export function buildBalanceText(portfolio = {}) {
+function buildQuietAccumulationSection(marketIntel = {}) {
+  const quiet = marketIntel?.quietAccumulation || null;
+  if (!quiet || safeNum(quiet?.score, 0) <= 0) {
+    return `<b>Quiet accumulation</b>\nnone`;
+  }
+
+  const title = marketIntel?.tokenName || marketIntel?.tokenSymbol || "candidate";
+  return `<b>Quiet accumulation</b>
+${escapeHtml(title)} | ${escapeHtml(marketIntel?.tokenSymbol || "-")}
+mode: ${escapeHtml(quiet?.primaryMode || quiet?.watch ? "quiet_base_watch" : "-")}
+source: ${escapeHtml(quiet?.signalSource || "proxy")}
+score: ${safeNum(quiet?.score, 0)}
+fresh-wallet cohort est: ${safeNum(quiet?.freshWalletBuyCount, 0)}
+retention 30m / 2h: ${fmtPct(quiet?.retention30mPct, 1)} / ${fmtPct(quiet?.retention2hPct, 1)}
+net control: ${fmtPct(quiet?.netControlPct, 1)}
+control trend: ${fmtPct(quiet?.controlTrendPct, 1)}
+dip-buy ratio: ${fmtPct(quiet?.dipBuyRatioPct, 1)}
+reload count: ${safeNum(quiet?.reloadCount, 0)}
+bottom touches: ${safeNum(quiet?.bottomTouches, 0)}
+base time: ${fmtAgeMs(safeNum(quiet?.baseMinutes, 0) * 60000)}
+reversal pass: ${marketIntel?.reversal?.allow ? "yes" : "no"}`;
+}
+
+export function buildBalanceText(portfolio = {}, marketIntel = {}) {
   const byStrategy = portfolio?.byStrategy || {};
   const strategyLines = Object.keys(byStrategy).length
     ? Object.entries(byStrategy).map(([key, row]) => buildStrategyLine(key, row)).join("\n")
@@ -95,11 +109,13 @@ export function buildBalanceText(portfolio = {}) {
 <b>By strategy</b>
 ${strategyLines}
 
+${buildQuietAccumulationSection(marketIntel)}
+
 <b>Open positions</b>
 ${summarizeOpenPositions(portfolio)}`;
 }
 
-export function buildDashboard(runtime = {}, portfolio = {}) {
+export function buildDashboard(runtime = {}, portfolio = {}, marketIntel = {}) {
   const byStrategy = portfolio?.byStrategy || {};
   const strategyLines = Object.keys(byStrategy).length
     ? Object.entries(byStrategy).map(([key, row]) => buildStrategyLine(key, row)).join("\n")
@@ -128,6 +144,8 @@ export function buildDashboard(runtime = {}, portfolio = {}) {
 
 <b>Strategy buckets</b>
 ${strategyLines}
+
+${buildQuietAccumulationSection(marketIntel)}
 
 <b>Open positions</b>
 ${summarizeOpenPositions(portfolio)}`;
@@ -212,10 +230,7 @@ export function buildExitText(trade = {}) {
 function buildBestWorstClosed(portfolio = {}) {
   const closed = Array.isArray(portfolio?.closedTrades) ? portfolio.closedTrades : [];
   if (!closed.length) {
-    return {
-      best: "none",
-      worst: "none"
-    };
+    return { best: "none", worst: "none" };
   }
 
   const sorted = [...closed].sort((a, b) => safeNum(b?.netPnlPct) - safeNum(a?.netPnlPct));
@@ -228,7 +243,7 @@ function buildBestWorstClosed(portfolio = {}) {
   };
 }
 
-export function buildPeriodicReport(runtime = {}, portfolio = {}, previousEquity = null) {
+export function buildPeriodicReport(runtime = {}, portfolio = {}, previousEquity = null, marketIntel = {}) {
   const equity = safeNum(portfolio?.equity);
   const deltaSol = previousEquity == null ? 0 : equity - safeNum(previousEquity);
   const deltaPct = previousEquity > 0 ? (deltaSol / previousEquity) * 100 : 0;
@@ -271,13 +286,13 @@ export function buildPeriodicReport(runtime = {}, portfolio = {}, previousEquity
 <b>By strategy</b>
 ${strategyLines}
 
+${buildQuietAccumulationSection(marketIntel)}
+
 <b>Best closed:</b> ${escapeHtml(bestWorst.best)}
 <b>Worst closed:</b> ${escapeHtml(bestWorst.worst)}
 <b>Longest open:</b> ${
     longest
-      ? `${escapeHtml(longest.token)} | ${escapeHtml(
-          String(longest.strategy).toUpperCase()
-        )} | ${fmtAgeMs(longest.ageMs)}`
+      ? `${escapeHtml(longest.token)} | ${escapeHtml(String(longest.strategy).toUpperCase())} | ${fmtAgeMs(longest.ageMs)}`
       : "none"
   }`;
 }

@@ -215,6 +215,7 @@ export default class TradingKernel {
     this.recentlyTraded = new Map();
     this.noticeCooldowns = new Map();
     this.previousReportEquity = null;
+    this.lastDashboardIntel = null;
   }
 
   async initialize() {
@@ -586,7 +587,8 @@ export default class TradingKernel {
         const report = buildPeriodicReport(
           this.runtime,
           portfolio,
-          this.previousReportEquity
+          this.previousReportEquity,
+          this.getDashboardIntel()
         );
         this.previousReportEquity = portfolio.equity;
         await notificationService.sendText(report);
@@ -607,9 +609,16 @@ export default class TradingKernel {
         this.runtime.strategyScope === "scalp" &&
         this.canEmitNotice("scalp:no_candidate", 5 * 60 * 1000)
       ) {
-        await notificationService.sendText(
-          "🫧 <b>SCALP</b>\nПока не вижу нормального кандидата. Фильтры активны, жду что-то живое."
-        );
+        await notificationService.sendText(`🫧 <b>SCALP</b>
+Пока не вижу нормального кандидата. Жду реальный всплеск объема, нормальный reclaim или живой откуп после миграции.`);
+      }
+
+      if (
+        this.runtime.strategyScope === "reversal" &&
+        this.canEmitNotice("reversal:no_candidate", 5 * 60 * 1000)
+      ) {
+        await notificationService.sendText(`🏔 <b>REVERSAL</b>
+Пока не вижу качественного дна. Нужны база, тихое накопление и подтвержденный reclaim, а не просто пролив.`);
       }
 
       await this.persistSnapshot();
@@ -618,6 +627,7 @@ export default class TradingKernel {
 
     let { candidate, plans, heroImage } = result;
     candidate = await this.enrichCandidateForCopytrade(candidate);
+    this.lastDashboardIntel = this.buildDashboardIntel(candidate);
 
     if (!isSolanaChain(candidate?.token?.chainId)) {
       await this.persistSnapshot();
@@ -787,13 +797,34 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
       const report = buildPeriodicReport(
         this.runtime,
         portfolio,
-        this.previousReportEquity
+        this.previousReportEquity,
+        this.getDashboardIntel()
       );
       this.previousReportEquity = portfolio.equity;
       await notificationService.sendText(report);
     }
 
     await this.persistSnapshot();
+  }
+
+
+  getDashboardIntel() {
+    return this.lastDashboardIntel || null;
+  }
+
+  buildDashboardIntel(candidate = {}) {
+    if (!candidate) return null;
+
+    return {
+      tokenName: candidate?.token?.name || candidate?.token?.symbol || "",
+      tokenSymbol: candidate?.token?.symbol || "",
+      ca: candidate?.token?.ca || "",
+      updatedAt: new Date().toISOString(),
+      quietAccumulation: clone(candidate?.quietAccumulation || null),
+      reversal: clone(candidate?.reversal || null),
+      scalp: clone(candidate?.scalp || null),
+      migration: clone(candidate?.migration || null)
+    };
   }
 
   buildCopytradeStatusSummary() {
@@ -898,7 +929,7 @@ avg pnlHintPct: ${avgPct.toFixed(2)}%`;
   }
 
   buildStatusText() {
-    const base = buildDashboard(this.runtime, getPortfolio());
+    const base = buildDashboard(this.runtime, getPortfolio(), this.getDashboardIntel());
     return `${base}
 
 ${this.buildCopytradeStatusSummary()}
@@ -913,7 +944,7 @@ ${this.buildRecentGMGNEventsSummary()}`;
   }
 
   buildBalanceText() {
-    return `${buildPortfolioBalanceText(getPortfolio())}
+    return `${buildPortfolioBalanceText(getPortfolio(), this.getDashboardIntel())}
 
 ${this.buildGMGNPnlHintSummary()}`;
   }
