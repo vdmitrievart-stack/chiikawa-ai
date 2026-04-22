@@ -7,7 +7,8 @@ import {
   getClosedTrades,
   hydratePortfolioSnapshot,
   depositVirtualBalance as depositVirtualBalanceInPortfolio,
-  withdrawVirtualBalance as withdrawVirtualBalanceInPortfolio
+  withdrawVirtualBalance as withdrawVirtualBalanceInPortfolio,
+  getVirtualBase
 } from "../portfolio.js";
 
 import {
@@ -391,29 +392,21 @@ export default class TradingKernel {
     startRuntime(this.runtime, { mode, strategyScope, chatId, userId });
     this.previousReportEquity = null;
     this.syncPortfolioStrategyBudget();
-    this.startBalanceSol = safeNum(getPortfolio()?.startBalance, this.startBalanceSol);
-    this.runtime.activeConfig.startBalanceSol = this.startBalanceSol;
     void this.persistSnapshot();
     return this.runtime;
   }
 
-  async depositVirtualBalance(amountSol = 0) {
+  depositVirtualBalance(amountSol = 0) {
     const result = depositVirtualBalanceInPortfolio(amountSol);
-    if (!result?.ok) return result;
-
-    this.startBalanceSol = safeNum(result?.portfolio?.startBalance, this.startBalanceSol);
-    this.runtime.activeConfig.startBalanceSol = this.startBalanceSol;
-    await this.persistSnapshot();
+    this.startBalanceSol = getVirtualBase();
+    void this.persistSnapshot();
     return result;
   }
 
-  async withdrawVirtualBalance(amountSol = 0) {
+  withdrawVirtualBalance(amountSol = 0) {
     const result = withdrawVirtualBalanceInPortfolio(amountSol);
-    if (!result?.ok) return result;
-
-    this.startBalanceSol = safeNum(result?.portfolio?.startBalance, this.startBalanceSol);
-    this.runtime.activeConfig.startBalanceSol = this.startBalanceSol;
-    await this.persistSnapshot();
+    this.startBalanceSol = getVirtualBase();
+    void this.persistSnapshot();
     return result;
   }
 
@@ -643,22 +636,20 @@ export default class TradingKernel {
     });
 
     if (!result) {
+      const noCandidateText = "Пока не вижу нормального кандидата. Продолжаю сканировать рынок.";
+
       if (
         this.runtime.strategyScope === "scalp" &&
-        this.canEmitNotice("scalp:no_candidate", 5 * 60 * 1000)
+        this.canEmitNotice("scalp:no_candidate", 20 * 60 * 1000)
       ) {
-        await notificationService.sendText(
-          "🫧 <b>SCALP</b>\nПока не вижу нормального кандидата. Продолжаю сканировать рынок."
-        );
+        await notificationService.sendText(`🫧 <b>SCALP</b>\n${noCandidateText}`);
       }
 
       if (
         this.runtime.strategyScope === "reversal" &&
-        this.canEmitNotice("reversal:no_candidate", 5 * 60 * 1000)
+        this.canEmitNotice("reversal:no_candidate", 20 * 60 * 1000)
       ) {
-        await notificationService.sendText(
-          "🔁 <b>REVERSAL</b>\nПока не вижу нормального кандидата. Продолжаю сканировать рынок."
-        );
+        await notificationService.sendText(`↩️ <b>REVERSAL</b>\n${noCandidateText}`);
       }
 
       await this.persistSnapshot();

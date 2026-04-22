@@ -222,6 +222,25 @@ function normalizeAction(text) {
   if (compact === "/addleader" || compact === "addleader") return "add_leader";
   if (compact === "/setsecret" || compact === "setsecret") return "set_secret";
   if (compact === "/applypending" || compact === "applypending") return "apply_pending";
+  if (
+    compact === "/addbalance" ||
+    compact === "addbalance" ||
+    hasAll("add", "balance") ||
+    hasAll("пополн", "баланс")
+  ) {
+    return "deposit_balance";
+  }
+
+  if (
+    compact === "/withdrawbalance" ||
+    compact === "withdrawbalance" ||
+    hasAll("withdraw", "balance") ||
+    hasAll("вывод", "баланс") ||
+    hasAll("снять", "баланс")
+  ) {
+    return "withdraw_balance";
+  }
+
 
   if (
     compact === "/exportcsv" ||
@@ -412,25 +431,10 @@ export default class BotRouter {
   startLoop(chatId, userId) {
     this.stopLoop();
 
-    const runTick = async () => {
-      try {
-        await this.kernel.tick(this.createSendBridge(chatId));
-      } catch (err) {
-        this.logger.log("tick error:", err.message);
-        try {
-          await this.sendMessage(
-            chatId,
-            `❌ <b>Tick error</b>\n<code>${String(err?.message || err).slice(0, 500)}</code>`,
-            { reply_markup: this.keyboard() }
-          );
-        } catch {}
-      }
-    };
-
-    void runTick();
-
     this.loopId = setInterval(() => {
-      void runTick();
+      this.kernel.tick(this.createSendBridge(chatId)).catch((err) => {
+        this.logger.log("tick error:", err.message);
+      });
     }, this.AUTO_INTERVAL_MS);
   }
 
@@ -616,6 +620,36 @@ export default class BotRouter {
       return true;
     }
 
+    if (mode.mode === "awaiting_deposit_amount") {
+      const amount = Number(String(text || "").replace(',', '.').trim());
+      if (!Number.isFinite(amount) || amount <= 0) {
+        await this.sendMessage(chatId, "Введите положительную сумму в SOL.", { reply_markup: this.keyboard() });
+        return true;
+      }
+      this.clearChatMode(chatId);
+      const result = this.kernel.depositVirtualBalance(amount);
+      await this.sendMessage(chatId, `➕ <b>Virtual balance updated</b>\nAdded: ${result.amount} SOL`, { reply_markup: this.keyboard() });
+      await this.sendMessage(chatId, this.kernel.buildBalanceText(), { reply_markup: this.keyboard() });
+      return true;
+    }
+
+    if (mode.mode === "awaiting_withdraw_amount") {
+      const amount = Number(String(text || "").replace(',', '.').trim());
+      if (!Number.isFinite(amount) || amount <= 0) {
+        await this.sendMessage(chatId, "Введите положительную сумму в SOL.", { reply_markup: this.keyboard() });
+        return true;
+      }
+      this.clearChatMode(chatId);
+      const result = this.kernel.withdrawVirtualBalance(amount);
+      if (!result.ok) {
+        await this.sendMessage(chatId, "Недостаточно свободного виртуального баланса для вывода.", { reply_markup: this.keyboard() });
+        return true;
+      }
+      await this.sendMessage(chatId, `➖ <b>Virtual balance updated</b>\nWithdrawn: ${result.amount} SOL`, { reply_markup: this.keyboard() });
+      await this.sendMessage(chatId, this.kernel.buildBalanceText(), { reply_markup: this.keyboard() });
+      return true;
+    }
+
     return false;
   }
 
@@ -724,6 +758,22 @@ export default class BotRouter {
 
     if (action === "balance") {
       await this.sendMessage(chatId, this.kernel.buildBalanceText(), {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
+
+    if (action === "deposit_balance") {
+      this.setChatMode(chatId, "awaiting_deposit_amount");
+      await this.sendMessage(chatId, "➕ Введите сумму в SOL для пополнения виртуального баланса.", {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
+
+    if (action === "withdraw_balance") {
+      this.setChatMode(chatId, "awaiting_withdraw_amount");
+      await this.sendMessage(chatId, "➖ Введите сумму в SOL для вывода из виртуального баланса.", {
         reply_markup: this.keyboard()
       });
       return;
