@@ -28,6 +28,10 @@ function fmtFdv(v) {
   return `${round(v, 2)}`;
 }
 
+function fmtApproxPct(v, d = 2) {
+  return `≈${round(v, d)}%`;
+}
+
 function isLikelyCA(text) {
   const value = String(text || "").trim();
   return /^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(value);
@@ -84,7 +88,10 @@ function getCategory(result) {
   const holder = analyzed?.holderAccumulation || {};
 
   if (
-    (holder?.quietAccumulationPass || holder?.warehouseStoragePass || safeNum(holder?.netControlPct) >= 65) &&
+    (holder?.quietAccumulationPass ||
+      holder?.warehouseStoragePass ||
+      holder?.bottomPackReversalPass ||
+      safeNum(holder?.netControlPct) >= 65) &&
     !analyzed?.reversal?.allow
   ) {
     return "PACKAGING";
@@ -97,24 +104,46 @@ function getCategory(result) {
   return "WATCH";
 }
 
+function derivePackagingProbeReady(analyzed = {}) {
+  const holder = analyzed?.holderAccumulation || {};
+  if (analyzed?.reversal?.allow) return false;
+  return Boolean(
+    (holder?.warehouseStoragePass || holder?.quietAccumulationPass) &&
+      safeNum(holder?.freshWalletBuyCount, 0) >= 10 &&
+      safeNum(holder?.retention30mPct, 0) >= 70 &&
+      safeNum(holder?.retention2hPct, 0) >= 65 &&
+      safeNum(holder?.netAccumulationPct, 0) >= 80 &&
+      safeNum(holder?.netControlPct, 0) >= 65 &&
+      safeNum(holder?.bottomTouches, 0) >= 3
+  );
+}
+
 function deriveStructureScore(analyzed = {}) {
   const reversal = analyzed?.reversal || {};
   const holder = analyzed?.holderAccumulation || {};
   const migration = analyzed?.migration || {};
   let score = safeNum(reversal?.score, 0);
-  if (score > 0) return score;
 
-  if (holder?.quietAccumulationPass) score += 18;
-  if (holder?.warehouseStoragePass) score += 18;
-  if (holder?.bottomPackReversalPass) score += 16;
-  if (safeNum(holder?.netControlPct) >= 70) score += 10;
-  if (safeNum(holder?.retention2hPct) >= 60) score += 8;
-  if (safeNum(holder?.bottomTouches) >= 3) score += 8;
-  if (safeNum(holder?.reloadCount) >= 2) score += 6;
-  if (safeNum(migration?.survivorScore) >= 80) score += 6;
-  if (safeNum(holder?.historicalRetention6hPct) >= 10) score += 4;
+  if (score <= 0) {
+    if (holder?.quietAccumulationPass) score += 16;
+    if (holder?.warehouseStoragePass) score += 18;
+    if (holder?.bottomPackReversalPass) score += 16;
+    if (safeNum(holder?.netControlPct) >= 80) score += 14;
+    else if (safeNum(holder?.netControlPct) >= 70) score += 10;
+    if (safeNum(holder?.retention30mPct) >= 75) score += 8;
+    if (safeNum(holder?.retention2hPct) >= 65) score += 8;
+    if (safeNum(holder?.historicalRetention6hPct ?? holder?.retention6hPct, 0) >= 10) score += 6;
+    if (safeNum(holder?.bottomTouches) >= 4) score += 10;
+    else if (safeNum(holder?.bottomTouches) >= 3) score += 7;
+    if (safeNum(holder?.reloadCount, 0) >= 3) score += 6;
+    if (safeNum(migration?.survivorScore, 0) >= 80) score += 4;
+  }
 
-  return Math.min(100, score);
+  if (derivePackagingProbeReady(analyzed) && score < 58) {
+    score = 58;
+  }
+
+  return Math.min(100, Math.max(0, round(score, 0)));
 }
 
 function deriveCohortArchetype(holder = {}) {
@@ -130,7 +159,7 @@ function deriveCohortArchetype(holder = {}) {
     return {
       key: "warehouse_storage",
       label: "warehouse_storage",
-      note: "складская упаковка: много кошельков, высокое удержание, низкая суета"
+      note: "спокойная складская упаковка, без лишней суеты"
     };
   }
 
@@ -146,7 +175,7 @@ function deriveCohortArchetype(holder = {}) {
     return {
       key: "speculative_dca",
       label: "speculative_dca",
-      note: "скорее усредняющийся спекулянт, а не упаковщик"
+      note: "похоже на усредняющегося спекулянта, а не на упаковщика"
     };
   }
 
@@ -194,6 +223,7 @@ function extractMetrics(result) {
     reversalAllow: Boolean(reversal?.allow),
     reversalMode: reversal?.primaryMode || "-",
     archetype: deriveCohortArchetype(holder).label,
+    packagingProbeReady: derivePackagingProbeReady(analyzed),
   };
 }
 
@@ -224,7 +254,7 @@ function buildSignalStatsReport(signalRegistry) {
     `<b>Runner:</b> ${safeNum(byCategory.RUNNER, 0)}`,
     `<b>Migration:</b> ${safeNum(byCategory.MIGRATION_SURVIVOR, 0)}`,
     `<b>Watch:</b> ${safeNum(byCategory.WATCH, 0)}`,
-    `<b>Avg peak FDV multiple:</b> ${matured.length ? fmtNum(avgPeak, 2) + 'x' : '-'}`,
+    `<b>Avg peak FDV multiple:</b> ${matured.length ? `${fmtNum(avgPeak, 2)}x` : `-`}`,
   ];
 
   if (best) {
@@ -319,16 +349,11 @@ function buildAccumulationReport(result, monitorEnabled = false) {
   const category = getCategory(result);
   const archetype = deriveCohortArchetype(holder);
   const structureScore = deriveStructureScore(analyzed);
-
-  const positiveHolder = [];
-  if (holder?.quietAccumulationPass) positiveHolder.push(green('Тихое накопление: да'));
-  else positiveHolder.push(red('Тихое накопление: нет'));
-  if (holder?.warehouseStoragePass) positiveHolder.push(green('Складская упаковка: да'));
-  else positiveHolder.push(yellow('Складская упаковка: нет'));
-  if (holder?.activeReaccumulationPass) positiveHolder.push(green('Активный добор: да'));
-  else positiveHolder.push(yellow('Активный добор: нет'));
-  if (holder?.bottomPackReversalPass) positiveHolder.push(green('Нижняя упаковка: да'));
-  else positiveHolder.push(red('Нижняя упаковка: нет'));
+  const packagingProbeReady = derivePackagingProbeReady(analyzed);
+  const shortPlanList = plans.length ? plans.map((p) => p?.strategyKey).filter(Boolean) : [];
+  if (packagingProbeReady && !shortPlanList.includes('packaging_probe')) {
+    shortPlanList.unshift('packaging_probe');
+  }
 
   const flush = Boolean(reversal?.flushDetected);
   const base = Boolean(reversal?.baseForming);
@@ -337,53 +362,42 @@ function buildAccumulationReport(result, monitorEnabled = false) {
 
   const lines = [
     deriveDisplayHeader(result),
-    `🧺 <b>ACCUMULATION SCAN — <b>${escapeHtml(category)}</b></b>`,
-    "",
-    `<b>Token:</b> <b>${escapeHtml(token.name || token.symbol || 'UNKNOWN')}</b>`,
-    `<b>CA:</b> <code>${escapeHtml(token.ca || '')}</code>`,
-    `<b>Chain:</b> ${escapeHtml(token.chainId || '-')}`,
-    `<b>Price:</b> ${safeNum(token.price, 0)}`,
-    `<b>Liquidity:</b> ${safeNum(token.liquidity, 0)}`,
-    `<b>Volume 1h:</b> ${safeNum(token.volumeH1 ?? token.volume, 0)}`,
-    `<b>Volume 24h:</b> ${safeNum(token.volumeH24 ?? token.volume, 0)}`,
-    `<b>Txns 1h:</b> ${safeNum(token.txnsH1 ?? token.txns, 0)}`,
-    `<b>Txns 24h:</b> ${safeNum(token.txnsH24 ?? token.txns, 0)}`,
-    `<b>FDV:</b> ${safeNum(token.fdv, 0)}`,
-    "",
-    `<b>Holder accumulation</b>`,
-    `${safeNum(holder.trackedWallets, 0) > 0 ? green('Отслеженные кошельки: ') : red('Отслеженные кошельки: ')}${safeNum(holder.trackedWallets, 0)}`,
-    `${safeNum(holder.freshWalletBuyCount, 0) >= 10 ? green('Новая когорта кошельков: ') : yellow('Новая когорта кошельков: ')}${safeNum(holder.freshWalletBuyCount, 0)}`,
-    `${safeNum(holder.retention30mPct, 0) >= 50 ? green('Удержание 30м / 2ч: ') : yellow('Удержание 30м / 2ч: ')}${fmtPct(holder.retention30mPct)} / ${fmtPct(holder.retention2hPct)}`,
-    `${safeNum(holder.historicalRetention6hPct ?? holder.retention6hPct, 0) > 0 ? green('Историческое удержание 6ч / 24ч: ') : yellow('Историческое удержание 6ч / 24ч: ')}${fmtPct(holder.historicalRetention6hPct ?? holder.retention6hPct)} / ${fmtPct(holder.historicalRetention24hPct)}`,
-    `${safeNum(holder.netAccumulationPct, 0) > 0 ? green('Процент чистого накопления: ') : yellow('Процент чистого накопления: ')}${fmtPct(holder.netAccumulationPct)}`,
-    `${safeNum(holder.netControlPct, 0) >= 65 ? green('Процент чистого контроля: ') : yellow('Процент чистого контроля: ')}${fmtPct(holder.netControlPct)}`,
-    `${safeNum(holder.reloadCount, 0) >= 2 ? green('Количество перезагрузок: ') : yellow('Количество перезагрузок: ')}${safeNum(holder.reloadCount, 0)}`,
-    `${safeNum(holder.dipBuyRatio, 0) >= 0.12 ? green('Соотношение покупки на спаде: ') : yellow('Соотношение покупки на спаде: ')}${fmtNum(holder.dipBuyRatio, 2)}`,
-    `${safeNum(holder.bottomTouches, 0) >= 3 ? green('Количество минимумов: ') : yellow('Количество минимумов: ')}${safeNum(holder.bottomTouches, 0)}`,
-    ...positiveHolder,
-    `${archetype.key === 'warehouse_storage' ? green('Архетип когорты: ') : yellow('Архетип когорты: ')}${escapeHtml(archetype.label)}`,
-    `${yellow('Комментарий: ')}${escapeHtml(archetype.note)}`,
-    "",
-    `<b>Структура разворота</b>`,
-    `${reversal?.allow ? green('Разрешено: да') : red('Разрешено: нет')}`,
-    `${structureScore > 0 ? yellow('Оценка: ') : red('Оценка: ')}${safeNum(structureScore, 0)}`,
-    `${yellow('Режим: ')}${escapeHtml(reversal?.primaryMode || '-')}`,
-    `${flush ? green('Сброс') : red('Сброс')} / ${base ? green('база') : red('база')} / ${exhaust ? green('исчерпание') : red('исчерпание')} / ${reclaim ? green('reclaim') : red('reclaim')}`,
-    "",
-    `<b>Миграция</b>`,
-    `${safeNum(migration?.pairAgeMin, 0) > 0 ? yellow('Возраст пары мин: ') : red('Возраст пары мин: ')}${fmtNum(migration?.pairAgeMin, 1)}`,
-    `${safeNum(migration?.survivorScore, 0) >= 60 ? green('Оценка выживания: ') : yellow('Оценка выживания: ')}${safeNum(migration?.survivorScore, 0)}`,
-    `${safeNum(migration?.liqToMcapPct, 0) > 0 ? yellow('Процент ликвидности/рыночной капитализации: ') : red('Процент ликвидности/рыночной капитализации: ')}${fmtPct(migration?.liqToMcapPct)}`,
-    `${safeNum(migration?.volToLiqPct, 0) > 0 ? yellow('Процент объёма/ликвидности: ') : red('Процент объёма/ликвидности: ')}${fmtPct(migration?.volToLiqPct)}`,
-    `${migration?.passes ? green('Прохождение: да') : yellow('Прохождение: нет')}`,
-    "",
-    `<b>Планы:</b> ${plans.length ? escapeHtml(plans.map((p) => p?.strategyKey).filter(Boolean).join(', ')) : 'нет'}`,
+    `🧺 <b>ACCUMULATION SCAN — ${escapeHtml(category)}</b>`,
+    category === 'PACKAGING'
+      ? `🟡 Ранняя стадия упаковки. Это watchlist/ранний вход, а не поздний подтвержденный reversal.`
+      : ``,
+    packagingProbeReady
+      ? green('Packaging probe: можно брать небольшую пробную позицию')
+      : yellow('Packaging probe: пока только наблюдение'),
+    ``,
+    `<b>${escapeHtml(token.name || token.symbol || 'UNKNOWN')}</b>`,
+    `<code>${escapeHtml(token.ca || '')}</code>`,
+    `Цена ${safeNum(token.price, 0)} | FDV ${safeNum(token.fdv, 0)} | Ликвидность ${safeNum(token.liquidity, 0)}`,
+    `Объём 1ч/24ч ${safeNum(token.volumeH1 ?? token.volume, 0)} / ${safeNum(token.volumeH24 ?? token.volume, 0)} | Txns 1ч/24ч ${safeNum(token.txnsH1 ?? token.txns, 0)} / ${safeNum(token.txnsH24 ?? token.txns, 0)}`,
+    ``,
+    `<b>📦 Holder accumulation</b>`,
+    `${safeNum(holder.trackedWallets, 0) > 0 ? green('Кошельков отслежено') : red('Кошельков отслежено')} — ${safeNum(holder.trackedWallets, 0)}`,
+    `${safeNum(holder.freshWalletBuyCount, 0) >= 10 ? green('Новая когорта') : yellow('Новая когорта')} — ${safeNum(holder.freshWalletBuyCount, 0)}`,
+    `${safeNum(holder.retention30mPct, 0) >= 50 ? green('Удержание 30м / 2ч') : yellow('Удержание 30м / 2ч')} — ${fmtPct(holder.retention30mPct)} / ${fmtPct(holder.retention2hPct)}`,
+    `${safeNum(holder.historicalRetention6hPct ?? holder.retention6hPct, 0) > 0 ? green('Историческое удержание 6ч / 24ч') : yellow('Историческое удержание 6ч / 24ч')} — ${fmtPct(holder.historicalRetention6hPct ?? holder.retention6hPct)} / ${fmtPct(holder.historicalRetention24hPct)}`,
+    `${safeNum(holder.netAccumulationPct, 0) > 0 ? green('Чистое накопление') : yellow('Чистое накопление')} — ${fmtPct(holder.netAccumulationPct)}`,
+    `${safeNum(holder.netControlPct, 0) >= 65 ? green('Оценочный контроль когорты (в отслеж. объёме)') : yellow('Оценочный контроль когорты (в отслеж. объёме)')} — ${fmtApproxPct(Math.min(safeNum(holder.netControlPct, 0), 95), 2)}`,
+    `${safeNum(holder.reloadCount, 0) >= 2 ? green('Reload count') : yellow('Reload count')} — ${safeNum(holder.reloadCount, 0)} | Dip-buy ${fmtNum(holder.dipBuyRatio, 2)} | Bottom touches ${safeNum(holder.bottomTouches, 0)}`,
+    `${holder?.quietAccumulationPass ? green('Тихое накопление') : red('Тихое накопление')} | ${holder?.warehouseStoragePass ? green('Складская упаковка') : yellow('Складская упаковка')} | ${holder?.activeReaccumulationPass ? green('Активный добор') : yellow('Активный добор')}`,
+    `${holder?.bottomPackReversalPass ? green('Нижняя упаковка') : red('Нижняя упаковка')} | ${archetype.key === 'warehouse_storage' ? green('Архетип') : yellow('Архетип')} — ${escapeHtml(archetype.label)}`,
+    `🟡 ${escapeHtml(archetype.note)}`,
+    ``,
+    `<b>🔁 Структура разворота</b>`,
+    `${reversal?.allow ? green('Reversal confirmed') : red('Reversal confirmed')} | score ${safeNum(structureScore, 0)} | mode ${escapeHtml(reversal?.primaryMode || '-')}`,
+    `${flush ? green('flush') : red('flush')} / ${base ? green('base') : red('base')} / ${exhaust ? green('exhaustion') : red('exhaustion')} / ${reclaim ? green('reclaim') : red('reclaim')}`,
+    ``,
+    `<b>🌊 Миграция</b>`,
+    `Возраст пары ${fmtNum(migration?.pairAgeMin, 1)}м | Survivor ${safeNum(migration?.survivorScore, 0)} | liq/mcap ${fmtPct(migration?.liqToMcapPct)} | vol/liq ${fmtPct(migration?.volToLiqPct)}`,
+    `${migration?.passes ? green('Migration pass') : yellow('Migration pass')} — ${migration?.passes ? 'да' : 'нет'}`,
+    ``,
+    `<b>Планы:</b> ${shortPlanList.length ? escapeHtml(shortPlanList.join(', ')) : 'нет'}`,
     `<b>URL:</b> ${escapeHtml(token.url || '-')}`,
-  ];
-
-  if (category === 'PACKAGING') {
-    lines.splice(2, 0, yellow('Раннее обнаружение упаковки. Это watchlist/ранняя фаза, а не готовый reversal.'));
-  }
+  ].filter(Boolean);
 
   if (monitorEnabled) {
     lines.push('');
@@ -401,16 +415,17 @@ function buildDeltaMessage(prev, next) {
   const bullish = [];
   const bearish = [];
 
+  if (!prev.packagingProbeReady && next.packagingProbeReady) bullish.push(green('packaging probe ready'));
   if (!prev.quietAccumulationPass && next.quietAccumulationPass) bullish.push(green('quiet accumulation confirmed'));
   if (!prev.warehouseStoragePass && next.warehouseStoragePass) bullish.push(green('warehouse storage confirmed'));
-  if (!prev.bottomPackReversalPass && next.bottomPackReversalPass) bullish.push(green('bottom-pack reversal confirmed'));
+  if (!prev.bottomPackReversalPass && next.bottomPackReversalPass) bullish.push(green('bottom-pack started'));
   if (!prev.reversalAllow && next.reversalAllow) bullish.push(green(`reversal now allowed (${escapeHtml(next.reversalMode)})`));
-  if (deltaControl >= 2.0) bullish.push(green(`net control +${deltaControl}%`));
+  if (deltaControl >= 2.0) bullish.push(green(`cohort control +${deltaControl}%`));
   if (deltaAccum >= 4.0) bullish.push(green(`net accumulation +${deltaAccum}%`));
   if (deltaRet2h >= 10.0) bullish.push(green(`retention 2h +${deltaRet2h}%`));
   if (deltaFresh >= 3) bullish.push(green(`fresh cohort +${deltaFresh}`));
 
-  if (deltaControl <= -6.0) bearish.push(red(`net control ${deltaControl}%`));
+  if (deltaControl <= -6.0) bearish.push(red(`cohort control ${deltaControl}%`));
   if (deltaAccum <= -10.0) bearish.push(red(`net accumulation ${deltaAccum}%`));
   if (deltaRet2h <= -15.0) bearish.push(red(`retention 2h ${deltaRet2h}%`));
   if (prev.quietAccumulationPass && !next.quietAccumulationPass && next.netControlPct < 60) bearish.push(red('quiet accumulation weakened'));
@@ -422,19 +437,19 @@ function buildDeltaMessage(prev, next) {
     `<b>Token:</b> <b>${escapeHtml(next.tokenName)}</b>`,
     `<b>CA:</b> <code>${escapeHtml(next.ca)}</code>`,
     `<b>Category:</b> <b>${escapeHtml(next.category)}</b>`,
-    `<b>Net control:</b> ${fmtPct(next.netControlPct)} (${deltaControl >= 0 ? '+' : ''}${deltaControl}%)`,
-    `<b>Net accumulation:</b> ${fmtPct(next.netAccumulationPct)} (${deltaAccum >= 0 ? '+' : ''}${deltaAccum}%)`,
-    `<b>Retention 30m / 2h / 6h:</b> ${fmtPct(next.retention30mPct)} / ${fmtPct(next.retention2hPct)} / ${fmtPct(next.retention6hPct)}`,
-    `<b>Fresh cohort:</b> ${next.freshWalletBuyCount}`,
-    `<b>Warehouse / active:</b> ${next.warehouseStoragePass ? 'yes' : 'no'} / ${next.activeReaccumulationPass ? 'yes' : 'no'}`,
-    `<b>Archetype:</b> ${escapeHtml(next.archetype || '-')}`,
+    `<b>Оценочный контроль когорты:</b> ${fmtApproxPct(Math.min(next.netControlPct, 95), 2)} (${deltaControl >= 0 ? '+' : ''}${deltaControl}%)`,
+    `<b>Чистое накопление:</b> ${fmtPct(next.netAccumulationPct)} (${deltaAccum >= 0 ? '+' : ''}${deltaAccum}%)`,
+    `<b>Удержание 30м / 2ч / 6ч:</b> ${fmtPct(next.retention30mPct)} / ${fmtPct(next.retention2hPct)} / ${fmtPct(next.retention6hPct)}`,
+    `<b>Новая когорта:</b> ${next.freshWalletBuyCount}`,
+    `<b>Склад / активно:</b> ${next.warehouseStoragePass ? 'да' : 'нет'} / ${next.activeReaccumulationPass ? 'да' : 'нет'}`,
+    `<b>Архетип:</b> ${escapeHtml(next.archetype || '-')}`,
   ];
 
   if (bullish.length) {
-    lines.push('', '<b>🟢 Bullish changes</b>', ...bullish.map((x) => `• ${x}`));
+    lines.push('', '<b>🟢 Бычьи изменения</b>', ...bullish.map((x) => `• ${x}`));
   }
   if (bearish.length) {
-    lines.push('', '<b>🔴 Bearish changes</b>', ...bearish.map((x) => `• ${x}`));
+    lines.push('', '<b>🔴 Медвежьи изменения</b>', ...bearish.map((x) => `• ${x}`));
   }
   return lines.join('\n');
 }
