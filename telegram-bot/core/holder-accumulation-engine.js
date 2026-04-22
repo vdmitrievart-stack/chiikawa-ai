@@ -1,5 +1,5 @@
+
 import { Connection, PublicKey } from "@solana/web3.js";
-import HolderAccumulationStore from "./holder-accumulation-store.js";
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -15,234 +15,344 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
-function clone(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value));
+function chunk(rows = [], size = 4) {
+  const out = [];
+  for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
+  return out;
+}
+
+function sum(rows, key) {
+  return rows.reduce((acc, row) => acc + safeNum(row?.[key], 0), 0);
 }
 
 export default class HolderAccumulationEngine {
   constructor(options = {}) {
     this.logger = options.logger || console;
-    this.store = options.store || new HolderAccumulationStore({ logger: this.logger });
-    this.rpcUrl = options.rpcUrl || process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com";
-    this.connection = options.connection || new Connection(this.rpcUrl, "confirmed");
-    this.maxTrackedAccounts = Number(options.maxTrackedAccounts || process.env.HOLDER_TRACK_MAX_ACCOUNTS || 20);
-    this.refreshMs = Number(options.refreshMs || process.env.HOLDER_TRACK_REFRESH_MS || 180000);
+    this.store = options.store;
+    this.rpcUrl = options.rpcUrl || process.env.SOLANA_RPC_URL || "";
+    this.summaryTtlMs = Number(options.summaryTtlMs || 5 * 60 * 1000);
+    this.walletTtlMs = Number(options.walletTtlMs || 30 * 60 * 1000);
+    this.maxTrackedWallets = Number(options.maxTrackedWallets || 20);
+    this.maxHistorySignatures = Number(options.maxHistorySignatures || 18);
+    this.connection = null;
   }
 
   async initialize() {
-    await this.store.load();
-    return true;
+    if (this.store?.initialize) await this.store.initialize();
+    if (this.rpcUrl && !this.connection) {
+      this.connection = new Connection(this.rpcUrl, "confirmed");
+    }
   }
 
   getDashboardSummary() {
-    const rows = this.store.summarizeTopTracked(1);
-    return rows[0] || null;
+    return this.store?.getLatestSummary?.() || null;
   }
 
   async trackCandidate(candidate = {}) {
-    const token = candidate?.token || {};
-    const mint = asText(token?.ca, "");
+    await this.initialize();
+
+    const mint = asText(candidate?.token?.ca);
     if (!mint) return null;
 
-    const existing = this.store.getTokenState(mint);
-    const now = Date.now();
-    if (existing?.summary?.observedAt && now - Date.parse(existing.summary.observedAt) < this.refreshMs) {
-      return clone(existing.summary);
+    const cached = this.store?.getSummary?.(mint);
+    if (cached && Date.now() - safeNum(cached?.updatedAt, 0) < this.summaryTtlMs) {
+      return cached;
     }
 
-    const snapshot = await this.fetchLiveSnapshot(mint);
-    if (!snapshot) {
-      return existing?.summary || null;
+    if (!this.connection) {
+      return cached || this.buildEmptySummary(candidate);
     }
 
-    const nextState = this.mergeSnapshot(existing, snapshot, candidate);
-    this.store.setTokenState(mint, nextState);
-    await this.store.save();
-    return clone(nextState.summary);
-  }
-
-  async fetchLiveSnapshot(mint) {
     try {
-      const mintPk = new PublicKey(mint);
-      const supplyResp = await this.connection.getTokenSupply(mintPk);
-      const supplyUi = safeNum(supplyResp?.value?.uiAmountString || supplyResp?.value?.uiAmount, 0);
-      const largestResp = await this.connection.getTokenLargestAccounts(mintPk);
-      const largest = Array.isArray(largestResp?.value) ? largestResp.value.slice(0, this.maxTrackedAccounts) : [];
-
-      const wallets = [];
-      for (const row of largest) {
-        try {
-          const parsed = await this.connection.getParsedAccountInfo(row.address);
-          const info = parsed?.value?.data?.parsed?.info;
-          const owner = asText(info?.owner, "");
-          const amountUi = safeNum(info?.tokenAmount?.uiAmountString || info?.tokenAmount?.uiAmount, 0);
-          if (!owner || amountUi <= 0) continue;
-          wallets.push({
-            owner,
-            tokenAccount: row.address.toBase58(),
-            amountUi,
-            sharePct: supplyUi > 0 ? (amountUi / supplyUi) * 100 : 0
-          });
-        } catch (error) {
-          this.logger.log("holder parsed account error:", error.message);
-        }
-      }
-
-      return {
-        mint,
-        observedAt: new Date().toISOString(),
-        supplyUi,
-        wallets
-      };
+      const holders = await this.fetchTopTokenAccounts(mint);
+      const historical = await this.enrichHistoricalWallets(mint, holders, candidate);
+      const summary = this.buildSummary(candidate, historical);
+      await this.store?.setSummary?.(mint, summary);
+      return summary;
     } catch (error) {
-      this.logger.log("holder live snapshot failed:", error.message);
-      return null;
+      this.logger.log("holder engine trackCandidate error:", error.message);
+      return cached || this.buildEmptySummary(candidate);
     }
   }
 
-  mergeSnapshot(existing = null, snapshot = {}, candidate = {}) {
-    const nowIso = snapshot?.observedAt || new Date().toISOString();
-    const nowMs = Date.parse(nowIso) || Date.now();
-    const previousWallets = clone(existing?.wallets || {});
-    const nextWallets = {};
-    const currentOwners = new Set();
-
-    for (const wallet of snapshot.wallets || []) {
-      const owner = asText(wallet?.owner, "");
-      if (!owner) continue;
-      currentOwners.add(owner);
-      const prev = previousWallets[owner] || null;
-      const currentBalance = safeNum(wallet?.amountUi, 0);
-      const prevBalance = safeNum(prev?.currentBalance, 0);
-      const grew = prev ? currentBalance > prevBalance * 1.02 : false;
-      const shrank = prev ? currentBalance < prevBalance * 0.98 : false;
-
-      nextWallets[owner] = {
-        owner,
-        tokenAccount: asText(wallet?.tokenAccount, prev?.tokenAccount || ""),
-        firstSeenAt: asText(prev?.firstSeenAt, nowIso),
-        lastSeenAt: nowIso,
-        initialBalance: prev ? safeNum(prev?.initialBalance, currentBalance) : currentBalance,
-        currentBalance,
-        peakBalance: Math.max(safeNum(prev?.peakBalance, currentBalance), currentBalance),
-        firstSharePct: prev ? safeNum(prev?.firstSharePct, wallet?.sharePct) : safeNum(wallet?.sharePct, 0),
-        currentSharePct: safeNum(wallet?.sharePct, 0),
-        increaseCount: safeNum(prev?.increaseCount, 0) + (grew ? 1 : 0),
-        decreaseCount: safeNum(prev?.decreaseCount, 0) + (shrank ? 1 : 0),
-        lastIncreaseAt: grew ? nowIso : asText(prev?.lastIncreaseAt, ""),
-        lastDecreaseAt: shrank ? nowIso : asText(prev?.lastDecreaseAt, "")
-      };
-    }
-
-    for (const [owner, prev] of Object.entries(previousWallets)) {
-      if (currentOwners.has(owner)) continue;
-      nextWallets[owner] = {
-        ...prev,
-        currentBalance: 0,
-        currentSharePct: 0,
-        decreaseCount: safeNum(prev?.currentBalance, 0) > 0 ? safeNum(prev?.decreaseCount, 0) + 1 : safeNum(prev?.decreaseCount, 0),
-        lastDecreaseAt: safeNum(prev?.currentBalance, 0) > 0 ? nowIso : asText(prev?.lastDecreaseAt, ""),
-        lastSeenAt: asText(prev?.lastSeenAt, nowIso)
-      };
-    }
-
-    const summary = this.buildSummary(nextWallets, snapshot, candidate, existing?.summary || null, nowMs, nowIso);
-
+  buildEmptySummary(candidate = {}) {
+    const mint = asText(candidate?.token?.ca);
     return {
-      mint: snapshot?.mint,
-      supplyUi: safeNum(snapshot?.supplyUi, safeNum(existing?.supplyUi, 0)),
-      observedAt: nowIso,
-      wallets: nextWallets,
-      summary
+      tokenName: candidate?.token?.name || candidate?.token?.symbol || "-",
+      mint,
+      trackedWallets: 0,
+      freshWalletBuyCount: 0,
+      warehouseWalletCount: 0,
+      retention30mPct: 0,
+      retention2hPct: 0,
+      retention6hPct: 0,
+      retention24hPct: 0,
+      historicalRetentionBasis: "live_only",
+      netAccumulationPct: 0,
+      netControlPct: 0,
+      reloadCount: 0,
+      dipBuyRatio: 0,
+      bottomTouches: this.estimateBottomTouches(candidate),
+      quietAccumulationPass: false,
+      bottomPackReversalPass: false,
+      accumulationPhaseAgeHours: 0,
+      warehouseSimilarityScore: 0,
+      warehouseChurnScore: 100,
+      updatedAt: Date.now()
     };
   }
 
-  buildSummary(wallets = {}, snapshot = {}, candidate = {}, previousSummary = null, nowMs = Date.now(), nowIso = new Date().toISOString()) {
-    const rows = Object.values(wallets || {});
-    const supplyUi = safeNum(snapshot?.supplyUi, 0);
-    const tracked = rows.filter((row) => safeNum(row?.peakBalance, 0) > 0);
-    const fresh = tracked.filter((row) => {
-      const ageMs = nowMs - (Date.parse(asText(row?.firstSeenAt, nowIso)) || nowMs);
-      return ageMs <= 24 * 60 * 60 * 1000 && safeNum(row?.currentBalance, 0) > 0;
-    });
+  async fetchTopTokenAccounts(mint) {
+    const mintKey = new PublicKey(mint);
+    const largest = await this.connection.getTokenLargestAccounts(mintKey);
+    const rows = (largest?.value || []).slice(0, this.maxTrackedWallets);
 
-    const matured30 = fresh.filter((row) => nowMs - (Date.parse(asText(row?.firstSeenAt, nowIso)) || nowMs) >= 30 * 60 * 1000);
-    const retained30 = matured30.filter((row) => safeNum(row?.currentBalance, 0) >= safeNum(row?.initialBalance, 0) * 0.75);
-    const matured2h = fresh.filter((row) => nowMs - (Date.parse(asText(row?.firstSeenAt, nowIso)) || nowMs) >= 2 * 60 * 60 * 1000);
-    const retained2h = matured2h.filter((row) => safeNum(row?.currentBalance, 0) >= safeNum(row?.initialBalance, 0) * 0.7);
+    const out = [];
+    for (const row of rows) {
+      const tokenAccount = asText(row?.address?.toBase58?.() || row?.address || "");
+      if (!tokenAccount) continue;
+      try {
+        const parsed = await this.connection.getParsedAccountInfo(new PublicKey(tokenAccount));
+        const info = parsed?.value?.data?.parsed?.info || {};
+        const owner = asText(info?.owner, "");
+        const amount = safeNum(row?.uiAmount, 0);
+        if (!owner || amount <= 0) continue;
+        out.push({ tokenAccount, owner, currentTokenAmount: amount });
+      } catch (error) {
+        this.logger.log("holder engine parsed token account error:", error.message);
+      }
+    }
+    return out;
+  }
 
-    const freshWalletBuyCount = fresh.length;
-    const retention30mPct = matured30.length ? (retained30.length / matured30.length) * 100 : 0;
-    const retention2hPct = matured2h.length ? (retained2h.length / matured2h.length) * 100 : 0;
-    const netCurrentBalance = fresh.reduce((sum, row) => sum + safeNum(row?.currentBalance, 0), 0);
-    const netInitialBalance = fresh.reduce((sum, row) => sum + safeNum(row?.initialBalance, 0), 0);
-    const netAccumulationPct = netInitialBalance > 0 ? ((netCurrentBalance - netInitialBalance) / netInitialBalance) * 100 : 0;
-    const netControlPct = supplyUi > 0 ? (netCurrentBalance / supplyUi) * 100 : 0;
-    const reloadCount = fresh.reduce((sum, row) => sum + safeNum(row?.increaseCount, 0), 0);
-    const decreaseCount = fresh.reduce((sum, row) => sum + safeNum(row?.decreaseCount, 0), 0);
-    const dipBuyRatio = reloadCount + decreaseCount > 0 ? reloadCount / (reloadCount + decreaseCount) : 0;
-    const silentHoldPct = fresh.length
-      ? (fresh.filter((row) => safeNum(row?.decreaseCount, 0) === 0).length / fresh.length) * 100
-      : 0;
+  async enrichHistoricalWallets(mint, holders = [], candidate = {}) {
+    const now = Date.now();
+    const out = [];
+    for (const holder of holders) {
+      const cached = this.store?.getWalletRecord?.(mint, holder.tokenAccount);
+      if (cached && now - safeNum(cached?.updatedAt, 0) < this.walletTtlMs) {
+        out.push({ ...cached, currentTokenAmount: holder.currentTokenAmount, owner: holder.owner, tokenAccount: holder.tokenAccount });
+        continue;
+      }
 
-    const priceH6 = safeNum(candidate?.delta?.priceH6Pct, safeNum(candidate?.token?.priceChangeH6, 0));
-    const priceH1 = safeNum(candidate?.delta?.priceH1Pct, safeNum(candidate?.token?.priceChangeH1, 0));
-    const priceM5 = safeNum(candidate?.delta?.priceM5Pct, safeNum(candidate?.token?.priceChangeM5, 0));
-    const bottomTouches = clamp(
-      Math.round(
-        (priceH6 < 0 ? 1 : 0) +
-        (Math.abs(priceH1) <= 10 ? 1 : 0) +
-        (Math.abs(priceM5) <= 5 ? 1 : 0) +
-        (freshWalletBuyCount >= 3 ? 1 : 0)
-      ),
-      0,
-      4
-    );
+      const fresh = await this.backfillTokenAccountHistory(mint, holder, candidate);
+      out.push(fresh);
+      await this.store?.setWalletRecord?.(mint, holder.tokenAccount, fresh);
+    }
+    return out;
+  }
 
-    let quietAccumulationScore = 0;
-    if (freshWalletBuyCount >= 3) quietAccumulationScore += 18;
-    if (retention30mPct >= 55) quietAccumulationScore += 18;
-    if (retention2hPct >= 45) quietAccumulationScore += 12;
-    if (netControlPct >= 1) quietAccumulationScore += 14;
-    if (netControlPct >= 2.5) quietAccumulationScore += 8;
-    if (netAccumulationPct >= 10) quietAccumulationScore += 10;
-    if (dipBuyRatio >= 0.58) quietAccumulationScore += 10;
-    if (reloadCount >= 2) quietAccumulationScore += 8;
-    if (silentHoldPct >= 45) quietAccumulationScore += 8;
-    if (bottomTouches >= 3) quietAccumulationScore += 6;
+  async backfillTokenAccountHistory(mint, holder = {}, candidate = {}) {
+    const tokenAccount = asText(holder.tokenAccount);
+    const owner = asText(holder.owner);
+    const currentTokenAmount = safeNum(holder.currentTokenAmount, 0);
+    const now = Date.now();
+
+    let signatures = [];
+    try {
+      signatures = await this.connection.getSignaturesForAddress(new PublicKey(tokenAccount), { limit: this.maxHistorySignatures });
+    } catch (error) {
+      this.logger.log("holder engine signatures error:", error.message);
+    }
+
+    let earliestBuyAt = 0;
+    let latestBuyAt = 0;
+    let latestSellAt = 0;
+    let totalBought = 0;
+    let totalSold = 0;
+    let buyCount = 0;
+    let sellCount = 0;
+
+    for (const group of chunk(signatures, 4)) {
+      const txs = await Promise.all(group.map(async (sigRow) => {
+        try {
+          return await this.connection.getParsedTransaction(sigRow.signature, { maxSupportedTransactionVersion: 0 });
+        } catch {
+          return null;
+        }
+      }));
+
+      for (let i = 0; i < txs.length; i += 1) {
+        const tx = txs[i];
+        const sigRow = group[i];
+        if (!tx?.meta) continue;
+        const delta = this.computeTokenAccountDelta(tx, mint, tokenAccount, owner);
+        if (delta > 0) {
+          totalBought += delta;
+          buyCount += 1;
+          const at = safeNum(sigRow?.blockTime, 0) * 1000;
+          if (at > 0 && (!earliestBuyAt || at < earliestBuyAt)) earliestBuyAt = at;
+          if (at > latestBuyAt) latestBuyAt = at;
+        } else if (delta < 0) {
+          totalSold += Math.abs(delta);
+          sellCount += 1;
+          const at = safeNum(sigRow?.blockTime, 0) * 1000;
+          if (at > latestSellAt) latestSellAt = at;
+        }
+      }
+    }
+
+    const firstSeenAt = earliestBuyAt || (signatures.length ? safeNum(signatures[signatures.length - 1]?.blockTime, 0) * 1000 : 0) || 0;
+    const holdDurationMinutes = firstSeenAt > 0 ? (now - firstSeenAt) / 60000 : 0;
+    const currentHoldingPct = totalBought > 0 ? clamp((currentTokenAmount / Math.max(totalBought, 0.0000001)) * 100, 0, 100) : (currentTokenAmount > 0 ? 100 : 0);
+    const reloadCount = Math.max(0, buyCount - 1);
+    const churnScore = clamp(totalBought > 0 ? (totalSold / totalBought) * 100 : 0, 0, 100);
+    const storageLike = currentHoldingPct >= 60 && churnScore <= 40 && (sellCount <= 1 || latestSellAt === 0);
+
+    const priceWeakness = safeNum(candidate?.delta?.priceH6Pct, 0) < 0 || safeNum(candidate?.delta?.priceH24Pct, 0) < 0;
+    const dipBuyRatio = buyCount > 0 ? clamp((reloadCount / buyCount) * (priceWeakness ? 1 : 0.5), 0, 1) : 0;
+
+    return {
+      tokenAccount,
+      owner,
+      currentTokenAmount,
+      totalBought,
+      totalSold,
+      buyCount,
+      sellCount,
+      firstBuyAt: earliestBuyAt || firstSeenAt || 0,
+      latestBuyAt,
+      latestSellAt,
+      firstSeenAt,
+      holdDurationMinutes,
+      currentHoldingPct,
+      reloadCount,
+      churnScore,
+      dipBuyRatio,
+      storageLike,
+      updatedAt: now
+    };
+  }
+
+  computeTokenAccountDelta(tx, mint, tokenAccount, owner) {
+    const pre = Array.isArray(tx?.meta?.preTokenBalances) ? tx.meta.preTokenBalances : [];
+    const post = Array.isArray(tx?.meta?.postTokenBalances) ? tx.meta.postTokenBalances : [];
+
+    const sumFor = (rows) => rows
+      .filter((row) => asText(row?.mint) === mint && (asText(row?.owner) === owner || safeNum(row?.accountIndex, -1) >= 0))
+      .reduce((acc, row) => {
+        const amt = safeNum(row?.uiTokenAmount?.uiAmount, 0);
+        return acc + amt;
+      }, 0);
+
+    const preAmt = sumFor(pre);
+    const postAmt = sumFor(post);
+    return postAmt - preAmt;
+  }
+
+  buildSummary(candidate = {}, walletRows = []) {
+    const mint = asText(candidate?.token?.ca);
+    const tokenName = candidate?.token?.name || candidate?.token?.symbol || mint;
+    const now = Date.now();
+    const pairAgeMin = safeNum(candidate?.migration?.pairAgeMin, 0);
+    const cohortWindowMin = Math.max(60, Math.min(10 * 24 * 60, pairAgeMin > 0 ? pairAgeMin : 10 * 24 * 60));
+
+    const trackedWallets = walletRows.length;
+    const freshCohort = walletRows.filter((row) => safeNum(row?.holdDurationMinutes, 0) > 0 && safeNum(row?.holdDurationMinutes, 0) <= cohortWindowMin);
+    const freshWalletBuyCount = freshCohort.length;
+    const warehouseWallets = freshCohort.filter((row) => row?.storageLike);
+
+    const retained30m = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 30 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
+    const retained2h = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 120 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
+    const retained6h = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 360 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
+    const retained24h = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 1440 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
+
+    const totalCurrentTracked = sum(walletRows, 'currentTokenAmount');
+    const freshCurrent = sum(freshCohort, 'currentTokenAmount');
+    const freshBought = sum(freshCohort, 'totalBought');
+    const reloadCount = sum(freshCohort, 'reloadCount');
+    const avgDipBuy = freshCohort.length ? freshCohort.reduce((acc, row) => acc + safeNum(row?.dipBuyRatio, 0), 0) / freshCohort.length : 0;
+    const avgChurn = freshCohort.length ? freshCohort.reduce((acc, row) => acc + safeNum(row?.churnScore, 0), 0) / freshCohort.length : 100;
+    const earliestBuyAt = freshCohort.reduce((min, row) => {
+      const v = safeNum(row?.firstBuyAt, 0);
+      if (!v) return min;
+      return min && min < v ? min : v;
+    }, 0);
+
+    const retention30mPct = freshWalletBuyCount > 0 ? (retained30m / freshWalletBuyCount) * 100 : 0;
+    const retention2hPct = freshWalletBuyCount > 0 ? (retained2h / freshWalletBuyCount) * 100 : 0;
+    const retention6hPct = freshWalletBuyCount > 0 ? (retained6h / freshWalletBuyCount) * 100 : 0;
+    const retention24hPct = freshWalletBuyCount > 0 ? (retained24h / freshWalletBuyCount) * 100 : 0;
+    const netAccumulationPct = freshBought > 0 ? clamp((freshCurrent / freshBought) * 100, 0, 100) : 0;
+    const netControlPct = totalCurrentTracked > 0 ? clamp((freshCurrent / totalCurrentTracked) * 100, 0, 100) : 0;
+    const bottomTouches = this.estimateBottomTouches(candidate, reloadCount, retention2hPct);
+    const accumulationPhaseAgeHours = earliestBuyAt > 0 ? (now - earliestBuyAt) / 3600000 : 0;
+    const warehouseSimilarityScore = this.estimateSimilarityScore(freshCohort, candidate);
 
     const quietAccumulationPass =
-      freshWalletBuyCount >= 3 &&
-      retention30mPct >= 55 &&
-      netControlPct >= 1 &&
-      dipBuyRatio >= 0.55 &&
-      quietAccumulationScore >= 56;
+      freshWalletBuyCount >= 10 &&
+      netControlPct >= 20 &&
+      (retention30mPct >= 30 || retention2hPct >= 18 || retention6hPct >= 10) &&
+      (reloadCount >= 2 || bottomTouches >= 2);
 
     const bottomPackReversalPass =
       quietAccumulationPass &&
-      bottomTouches >= 3 &&
-      priceH6 <= -8 &&
-      priceH1 > -10 &&
-      priceM5 > -3;
+      (freshWalletBuyCount >= 14 || warehouseWallets.length >= 8) &&
+      retention2hPct >= 12 &&
+      avgDipBuy >= 0.18 &&
+      bottomTouches >= 2 &&
+      avgChurn <= 45;
 
     return {
-      mint: snapshot?.mint,
-      tokenName: asText(candidate?.token?.name, ""),
-      observedAt: nowIso,
-      trackedWallets: tracked.length,
+      tokenName,
+      mint,
+      trackedWallets,
       freshWalletBuyCount,
-      retention30mPct: clamp(retention30mPct, 0, 100),
-      retention2hPct: clamp(retention2hPct, 0, 100),
-      netAccumulationPct,
-      netControlPct,
+      warehouseWalletCount: warehouseWallets.length,
+      retention30mPct: roundPct(retention30mPct),
+      retention2hPct: roundPct(retention2hPct),
+      retention6hPct: roundPct(retention6hPct),
+      retention24hPct: roundPct(retention24hPct),
+      historicalRetentionBasis: "first_buy_backfill",
+      netAccumulationPct: roundPct(netAccumulationPct),
+      netControlPct: roundPct(netControlPct),
       reloadCount,
-      dipBuyRatio: clamp(dipBuyRatio, 0, 1),
-      silentHoldPct: clamp(silentHoldPct, 0, 100),
+      dipBuyRatio: roundNum(avgDipBuy, 2),
       bottomTouches,
-      quietAccumulationScore: clamp(Math.round(quietAccumulationScore), 0, 99),
       quietAccumulationPass,
       bottomPackReversalPass,
-      controlTrendPct: safeNum(previousSummary?.netControlPct, 0) ? netControlPct - safeNum(previousSummary?.netControlPct, 0) : 0
+      accumulationPhaseAgeHours: roundNum(accumulationPhaseAgeHours, 2),
+      warehouseSimilarityScore: roundNum(warehouseSimilarityScore, 2),
+      warehouseChurnScore: roundNum(100 - avgChurn, 2),
+      updatedAt: now
     };
   }
+
+  estimateBottomTouches(candidate = {}, reloadCount = 0, retention2hPct = 0) {
+    const priceM5 = safeNum(candidate?.delta?.priceM5Pct, 0);
+    const priceH1 = safeNum(candidate?.delta?.priceH1Pct, 0);
+    const priceH6 = safeNum(candidate?.delta?.priceH6Pct, 0);
+    let touches = 0;
+    if (Math.abs(priceM5) <= 4) touches += 1;
+    if (priceH1 <= 0 && priceH1 > -15) touches += 1;
+    if (priceH6 < 0) touches += 1;
+    if (reloadCount >= 2) touches += 1;
+    if (retention2hPct >= 12) touches += 1;
+    return clamp(touches, 0, 5);
+  }
+
+  estimateSimilarityScore(rows = [], candidate = {}) {
+    if (!rows.length) return 0;
+    const holds = rows.map((x) => safeNum(x?.holdDurationMinutes, 0)).filter(Boolean);
+    const holdings = rows.map((x) => safeNum(x?.currentHoldingPct, 0));
+    const mean = (arr) => arr.reduce((a, b) => a + b, 0) / Math.max(arr.length, 1);
+    const variance = (arr) => {
+      const m = mean(arr);
+      return arr.reduce((acc, x) => acc + (x - m) ** 2, 0) / Math.max(arr.length, 1);
+    };
+    const holdVar = variance(holds || [0]);
+    const holdPctVar = variance(holdings || [0]);
+    const priceM5 = Math.abs(safeNum(candidate?.delta?.priceM5Pct, 0));
+    const score = 100 - Math.min(100, Math.sqrt(holdVar) * 0.5 + Math.sqrt(holdPctVar) * 0.7 + priceM5 * 1.5);
+    return clamp(score, 0, 100);
+  }
+}
+
+function roundPct(v) {
+  return Math.round((safeNum(v, 0) + Number.EPSILON) * 100) / 100;
+}
+
+function roundNum(v, d = 2) {
+  const p = 10 ** d;
+  return Math.round((safeNum(v, 0) + Number.EPSILON) * p) / p;
 }

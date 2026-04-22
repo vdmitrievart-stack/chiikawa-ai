@@ -84,7 +84,9 @@ function buildHolderPanel(holderSummary = null) {
     `dip-buy ratio: ${round(holderSummary?.dipBuyRatio, 2)}\n` +
     `bottom touches: ${safeNum(holderSummary?.bottomTouches, 0)}\n` +
     `quiet pass: ${holderSummary?.quietAccumulationPass ? "yes" : "no"}\n` +
-    `bottom-pack reversal: ${holderSummary?.bottomPackReversalPass ? "yes" : "no"}`;
+    `bottom-pack reversal: ${holderSummary?.bottomPackReversalPass ? "yes" : "no"}
+` +
+    `phase age h: ${round(holderSummary?.accumulationPhaseAgeHours, 2)} | basis: ${escapeHtml(holderSummary?.historicalRetentionBasis || "live_only")}`;
 }
 
 export function buildBalanceText(portfolio = {}, holderSummary = null) {
@@ -95,8 +97,6 @@ export function buildBalanceText(portfolio = {}, holderSummary = null) {
 
   return `💰 <b>BALANCE</b>
 
-<b>Virtual base:</b> ${fmtSol(portfolio?.virtualBase ?? portfolio?.startBalance)}
-<b>Virtual base:</b> ${fmtSol(portfolio?.virtualBase ?? portfolio?.startBalance)}
 <b>Free cash:</b> ${fmtSol(portfolio?.cash)}
 <b>Total equity:</b> ${fmtSol(portfolio?.equity)}
 <b>Realized PnL:</b> ${fmtSol(portfolio?.realizedPnlSol)}
@@ -135,8 +135,6 @@ export function buildDashboard(runtime = {}, portfolio = {}, holderSummary = nul
 <b>Stop requested:</b> ${runtime?.stopRequested ? "yes" : "no"}
 <b>Pending config:</b> ${pending}
 
-<b>Virtual base:</b> ${fmtSol(portfolio?.virtualBase ?? portfolio?.startBalance)}
-<b>Virtual base:</b> ${fmtSol(portfolio?.virtualBase ?? portfolio?.startBalance)}
 <b>Free cash:</b> ${fmtSol(portfolio?.cash)}
 <b>Total equity:</b> ${fmtSol(portfolio?.equity)}
 <b>Realized PnL:</b> ${fmtSol(portfolio?.realizedPnlSol)}
@@ -191,10 +189,8 @@ export function buildPeriodicReport(runtime = {}, portfolio = {}, previousEquity
   return `🧠 <b>PERIODIC REPORT</b>
 
 <b>Mode:</b> ${escapeHtml(String(runtime?.mode || "stopped").toUpperCase())}
-<b>Virtual base:</b> ${fmtSol(portfolio?.virtualBase ?? portfolio?.startBalance)}
 <b>Equity:</b> ${fmtSol(equity)}
 <b>Period Δ:</b> ${fmtSol(deltaSol)} (${fmtPct(deltaPct)})
-<b>Virtual base:</b> ${fmtSol(portfolio?.virtualBase ?? portfolio?.startBalance)}
 <b>Free cash:</b> ${fmtSol(portfolio?.cash)}
 <b>Realized:</b> ${fmtSol(portfolio?.realizedPnlSol)}
 <b>Unrealized:</b> ${fmtSol(portfolio?.unrealizedPnlSol)}

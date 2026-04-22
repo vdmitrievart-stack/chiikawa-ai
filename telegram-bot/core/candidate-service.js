@@ -72,7 +72,7 @@ export default class CandidateService {
       "solana community takeover"
     ];
     this.holderAccumulationEngine = options.holderAccumulationEngine || null;
-    this.maxHolderEnrichPerPass = Number(options.maxHolderEnrichPerPass || 8);
+    this.maxHolderEnrichPerPass = Number(options.maxHolderEnrichPerPass || 24);
   }
 
   async fetchDexSearch(query) {
@@ -1126,13 +1126,19 @@ export default class CandidateService {
       })
       .sort((a, b) => this.getRelevantRank(b, strategyScope) - this.getRelevantRank(a, strategyScope));
 
+    const enrichLimit = strategyScope === "reversal"
+      ? Math.max(this.maxHolderEnrichPerPass, 36)
+      : strategyScope === "all"
+        ? Math.max(this.maxHolderEnrichPerPass, 24)
+        : this.maxHolderEnrichPerPass;
+
     if (this.holderAccumulationEngine && ranked.length) {
-      for (const candidate of ranked.slice(0, this.maxHolderEnrichPerPass)) {
+      for (const candidate of ranked.slice(0, enrichLimit)) {
         await this.enrichCandidateWithHolderLive(candidate);
       }
       ranked = ranked.sort((a, b) => this.getRelevantRank(b, strategyScope) - this.getRelevantRank(a, strategyScope));
     } else {
-      for (const candidate of ranked.slice(0, this.maxHolderEnrichPerPass)) {
+      for (const candidate of ranked.slice(0, enrichLimit)) {
         candidate.reversal = this.buildReversalSignals(candidate);
         this.recomputeCompositeScore(candidate);
       }
@@ -1180,17 +1186,6 @@ dex: ${escapeHtml(token.dexId || "-")}
 url: ${escapeHtml(token.url || "-")}`;
   }
 
-
-  resolvePrimaryCategory(candidate = {}, plans = []) {
-    const firstPlan = Array.isArray(plans) && plans.length ? String(plans[0]?.strategyKey || '') : '';
-    if (firstPlan) return firstPlan.toUpperCase();
-    if (candidate?.runner?.allow) return 'RUNNER';
-    if (candidate?.migration?.passes) return 'MIGRATION_SURVIVOR';
-    if (candidate?.reversal?.allow) return 'REVERSAL';
-    if (candidate?.scalp?.allow) return 'SCALP';
-    return 'ANALYSIS';
-  }
-
   buildAnalysisText(candidate, plans = []) {
     const token = candidate?.token || {};
     const socials = candidate?.socials?.links || {};
@@ -1202,12 +1197,10 @@ url: ${escapeHtml(token.url || "-")}`;
     const scalpMetrics = scalp?.metrics || {};
     const reversalMetrics = reversal?.metrics || {};
 
-    const category = this.resolvePrimaryCategory(candidate, plans);
+    return `🔎 <b>ANALYSIS</b>
 
-    return `🔎 <b>ANALYSIS — ${escapeHtml(category)}</b>
-
-<b>Token:</b> <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
-<b>Contract:</b> <code>${escapeHtml(token.ca || "-")}</code>
+Token: ${escapeHtml(token.name || token.symbol || "UNKNOWN")}
+CA: <code>${escapeHtml(token.ca || "-")}</code>
 Chain: ${escapeHtml(token.chainId || "-")}
 Score: ${safeNum(candidate?.score, 0)}
 
@@ -1251,8 +1244,8 @@ fresh wallets: ${safeNum(reversalMetrics?.freshWalletBuyCount, 0)} | reloads: ${
 🧺 Holder accumulation:
 tracked wallets: ${safeNum(holder?.trackedWallets, 0)}
 fresh wallet cohort: ${safeNum(holder?.freshWalletBuyCount, 0)}
-retention 30m: ${safeNum(holder?.retention30mPct, 0).toFixed(1)}%
-retention 2h: ${safeNum(holder?.retention2hPct, 0).toFixed(1)}%
+retention 30m / 2h: ${safeNum(holder?.retention30mPct, 0).toFixed(1)}% / ${safeNum(holder?.retention2hPct, 0).toFixed(1)}%
+historical retention 6h / 24h: ${safeNum(holder?.retention6hPct, 0).toFixed(1)}% / ${safeNum(holder?.retention24hPct, 0).toFixed(1)}%
 net accumulation pct: ${safeNum(holder?.netAccumulationPct, 0).toFixed(2)}%
 net control pct: ${safeNum(holder?.netControlPct, 0).toFixed(2)}%
 reload count: ${safeNum(holder?.reloadCount, 0)}
@@ -1260,6 +1253,8 @@ dip-buy ratio: ${safeNum(holder?.dipBuyRatio, 0).toFixed(2)}
 bottom touches: ${safeNum(holder?.bottomTouches, 0)}
 quiet accumulation pass: ${holder?.quietAccumulationPass ? "yes" : "no"}
 bottom-pack reversal pass: ${holder?.bottomPackReversalPass ? "yes" : "no"}
+historical basis: ${escapeHtml(holder?.historicalRetentionBasis || "live_only")}
+accumulation phase age h: ${safeNum(holder?.accumulationPhaseAgeHours, 0).toFixed(2)}
 
 🌊 Migration:
 pair age min: ${safeNum(migration?.pairAgeMin, 0).toFixed(1)}
