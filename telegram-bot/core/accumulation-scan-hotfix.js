@@ -118,7 +118,7 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     lines.push("", `<b>Monitor:</b> active for ~8h. I will notify only on meaningful changes. Small control dips during packaging are ignored.`);
   }
 
-  RETURN_JOIN_MARKER
+  return lines.join("\n");
 }
 
 function extractMetrics(result) {
@@ -291,8 +291,8 @@ export function applyAccumulationScanHotfix(router, kernel) {
       if (!isLikelyCA(text)) {
         await router.sendMessage(
           chatId,
-          "🧺 <b>Accumulation Scan</b>
-Пришли Solana CA, чтобы проверить накопление, удержание и признаки складского набора.",
+          `🧺 <b>Accumulation Scan</b>
+Пришли Solana CA, чтобы проверить накопление, удержание и признаки складского набора.`,
           { reply_markup: router.keyboard() }
         );
         return;
@@ -378,8 +378,8 @@ export function applyAccumulationScanHotfix(router, kernel) {
       }
       await router.sendMessage(
         chatId,
-        "🧺 <b>Accumulation Scan</b>
-Пришли Solana CA, и я проверю накопление, удержание, cohort и признаки складского набора. Если увижу начальную фазу накопления, включу временный авто-монитор важных изменений.",
+        `🧺 <b>Accumulation Scan</b>
+Пришли Solana CA, и я проверю накопление, удержание, cohort и признаки складского набора. Если увижу начальную фазу накопления, включу временный авто-монитор важных изменений.`,
         { reply_markup: router.keyboard() }
       );
       return;
