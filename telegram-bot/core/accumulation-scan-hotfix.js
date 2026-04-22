@@ -1,23 +1,20 @@
-function escapeHtml(input) {
-  return String(input ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/\"/g, "&quot;");
-}
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
 
-function round(v, d = 2) {
-  const p = 10 ** d;
-  return Math.round((safeNum(v) + Number.EPSILON) * p) / p;
+function escapeHtml(input) {
+  return String(input ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
-function fmtPct(v, d = 2) {
-  return `${round(v, d)}%`;
+function fmtPct(v, digits = 2) {
+  const n = safeNum(v, 0);
+  return `${n.toFixed(digits)}%`;
 }
 
 function isLikelyCA(text) {
@@ -25,290 +22,276 @@ function isLikelyCA(text) {
   return /^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(value);
 }
 
-function matchesAccumulationScan(text) {
-  const raw = String(text || "").toLowerCase().trim();
-  if (!raw) return false;
-  const normalized = raw.replace(/\s+/g, " ");
-  const compact = normalized.replace(/\s+/g, "");
-
-  return (
-    compact === "/accumscan" ||
-    compact === "/accumulationscan" ||
-    compact === "/cascanaccum" ||
-    normalized.includes("accumulation scan") ||
-    normalized.includes("scan accumulation") ||
-    normalized.includes("накопление") ||
-    normalized.includes("скан накоп") ||
-    normalized.includes("accum scan")
-  );
+function asTokenName(token = {}) {
+  return token?.name || token?.symbol || "UNKNOWN";
 }
 
-function normalizeCategory(plans = [], analyzed = {}) {
-  const keys = Array.isArray(plans) ? plans.map((p) => p?.strategyKey).filter(Boolean) : [];
-  if (keys.includes("packaging")) return "PACKAGING";
-  if (keys.includes("reversal")) return "REVERSAL";
-  if (keys.includes("runner")) return "RUNNER";
-  if (keys.includes("migration_survivor")) return "MIGRATION_SURVIVOR";
-  if (keys.includes("scalp")) return "SCALP";
-  if (keys.includes("copytrade")) return "COPYTRADE";
+function buildBasicAnalyzed(token = {}) {
+  const liquidity = safeNum(token?.liquidity, 0);
+  const fdv = safeNum(token?.fdv, 0);
+  const volume24h = safeNum(token?.volumeH24, token?.volume, 0);
+  const pairAgeMin = safeNum(token?.pairCreatedAt, 0) > 0
+    ? Math.max(0, (Date.now() - safeNum(token?.pairCreatedAt, 0)) / 60000)
+    : 0;
 
-  if (analyzed?.holderAccumulation?.warehouseStoragePass) return "PACKAGING";
-  if (analyzed?.reversal?.allow) return "REVERSAL";
-  if (analyzed?.migration?.passes) return "MIGRATION_SURVIVOR";
-  if (analyzed?.scalp?.allow) return "SCALP";
-  return "WATCH";
-}
-
-function deriveCohortArchetype(holder = {}) {
-  const fresh = safeNum(holder.freshWalletBuyCount, 0);
-  const ret30 = safeNum(holder.retention30mPct, 0);
-  const ret2h = safeNum(holder.retention2hPct, 0);
-  const ret6h = safeNum(holder.historicalRetention6hPct ?? holder.retention6hPct, 0);
-  const netControl = safeNum(holder.netControlPct, 0);
-  const netAccum = safeNum(holder.netAccumulationPct, 0);
-  const reload = safeNum(holder.reloadCount, 0);
-  const dip = safeNum(holder.dipBuyRatio, 0);
-  const quiet = Boolean(holder.quietAccumulationPass);
-  const wh = Boolean(holder.warehouseStoragePass);
-  const active = Boolean(holder.activeReaccumulationPass);
-
-  if (wh || (fresh >= 10 && quiet && netControl >= 60 && netAccum >= 70 && ret30 >= 45 && ret2h >= 30 && reload <= 2 && dip <= 0.18)) {
-    return {
-      key: "warehouse_storage",
-      label: "warehouse storage",
-      note: "похоже на складскую упаковку: много кошельков, высокое удержание, низкая суета"
-    };
-  }
-
-  if (active || (fresh >= 8 && (reload >= 3 || dip >= 0.35) && ret30 >= 35 && netAccum >= 40)) {
-    return {
-      key: "active_reaccumulation",
-      label: "active reaccumulation",
-      note: "похоже на активный добор/реаккумуляцию: есть повторные покупки на проливах"
-    };
-  }
-
-  if (fresh >= 8 && (reload >= 3 || dip >= 0.2) && netControl < 60 && (ret6h < 50 || ret2h < 45)) {
-    return {
-      key: "speculative_dca",
-      label: "speculative dca",
-      note: "похоже на усредняющихся игроков, а не на упаковщиков"
-    };
-  }
-
-  if (fresh >= 6 && ret30 < 25 && ret2h < 15 && netAccum <= 20) {
-    return {
-      key: "weak_or_noise",
-      label: "weak / noisy",
-      note: "скорее шумный поток, а не устойчивая когорта"
-    };
-  }
+  const liqToMcapPct = fdv > 0 ? (liquidity / Math.max(fdv, 1)) * 100 : 0;
+  const volToLiqPct = liquidity > 0 ? (volume24h / Math.max(liquidity, 1)) * 100 : 0;
 
   return {
-    key: "mixed_watch",
-    label: "mixed watch",
-    note: "есть интересные признаки, но архетип пока смешанный"
+    token,
+    score: 0,
+    socials: { socialCount: 0, links: { twitter: "", telegram: "", website: "" } },
+    rug: { risk: 0 },
+    corpse: { score: 0, isCorpse: false },
+    developer: { verdict: "Neutral" },
+    accumulation: { score: 0 },
+    absorption: { score: 0 },
+    holderAccumulation: null,
+    reversal: {
+      allow: false,
+      score: 0,
+      primaryMode: "base_reclaim_reversal",
+      quietAccumulation: false,
+      bottomPack: false,
+      metrics: {}
+    },
+    migration: {
+      pairAgeMin,
+      survivorScore: 0,
+      liqToMcapPct,
+      volToLiqPct,
+      passes: false
+    },
+    narrative: {
+      verdict: "weak",
+      summary: token?.description || "No narrative available."
+    }
   };
 }
 
-function buildAccumulationReport(result, monitorEnabled = false) {
+async function performScanCA(kernel, ca) {
+  const runtime = typeof kernel?.getRuntime === "function" ? kernel.getRuntime() : {};
+  const cs = kernel?.candidateService || null;
+
+  if (cs && typeof cs.scanCA === "function" && typeof kernel?.fetchTokenByCA === "function") {
+    try {
+      const result = await cs.scanCA.call(cs, {
+        runtime,
+        fetchTokenByCA: (value) => kernel.fetchTokenByCA(value),
+        ca
+      });
+      if (result) return result;
+    } catch (error) {
+      kernel?.logger?.log?.("accum scan primary scanCA failed:", error?.message || String(error));
+    }
+  }
+
+  if (typeof kernel?.fetchTokenByCA !== "function") {
+    throw new Error("kernel.fetchTokenByCA unavailable");
+  }
+
+  const token = await kernel.fetchTokenByCA(ca);
+  if (!token) return null;
+  if (String(token?.chainId || "").toLowerCase() !== "solana") return null;
+
+  let analyzed = null;
+
+  if (cs && typeof cs.analyzeToken === "function") {
+    try {
+      analyzed = await cs.analyzeToken.call(cs, token);
+    } catch (error) {
+      kernel?.logger?.log?.("accum scan analyzeToken failed:", error?.message || String(error));
+    }
+  }
+
+  if (!analyzed) {
+    analyzed = buildBasicAnalyzed(token);
+  }
+
+  if (cs && typeof cs.enrichCandidateWithHolderLive === "function") {
+    try {
+      const enriched = await cs.enrichCandidateWithHolderLive.call(cs, analyzed);
+      if (enriched) analyzed = enriched;
+    } catch (error) {
+      kernel?.logger?.log?.("accum scan holder enrich failed:", error?.message || String(error));
+    }
+  } else if (kernel?.holderAccumulationEngine?.trackCandidate) {
+    try {
+      analyzed.holderAccumulation = await kernel.holderAccumulationEngine.trackCandidate(analyzed);
+    } catch (error) {
+      kernel?.logger?.log?.("accum scan holder engine fallback failed:", error?.message || String(error));
+    }
+  }
+
+  if ((!analyzed.reversal || typeof analyzed.reversal !== "object") && cs && typeof cs.buildReversalSignals === "function") {
+    try {
+      analyzed.reversal = cs.buildReversalSignals.call(cs, analyzed);
+    } catch (error) {
+      kernel?.logger?.log?.("accum scan reversal signals failed:", error?.message || String(error));
+    }
+  }
+
+  if (!analyzed.migration || typeof analyzed.migration !== "object") {
+    analyzed.migration = buildBasicAnalyzed(token).migration;
+  }
+
+  let plans = [];
+  if (cs && typeof cs.buildPlans === "function") {
+    try {
+      plans = cs.buildPlans.call(cs, analyzed, runtime?.strategyScope || "all") || [];
+    } catch (error) {
+      kernel?.logger?.log?.("accum scan buildPlans failed:", error?.message || String(error));
+    }
+  }
+
+  return {
+    analyzed,
+    plans,
+    heroImage: token?.imageUrl || null
+  };
+}
+
+function buildAccumulationReport(result = {}, monitorEligible = false) {
   const analyzed = result?.analyzed || {};
   const token = analyzed?.token || {};
   const holder = analyzed?.holderAccumulation || {};
   const reversal = analyzed?.reversal || {};
   const migration = analyzed?.migration || {};
-  const plans = result?.plans || [];
-  const category = normalizeCategory(plans, analyzed);
-  const archetype = deriveCohortArchetype(holder);
+  const plans = Array.isArray(result?.plans) ? result.plans : [];
 
-  const lines = [
-    `🧺 <b>ACCUMULATION SCAN — ${escapeHtml(category)}</b>`,
-    "",
-    `<b>Token:</b> <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>`,
-    `<b>CA:</b> <code>${escapeHtml(token.ca || "")}</code>`,
-    `<b>Chain:</b> ${escapeHtml(token.chainId || "-")}`,
-    `<b>Price:</b> ${safeNum(token.price, 0)}`,
-    `<b>Liquidity:</b> ${safeNum(token.liquidity, 0)}`,
-    `<b>Volume 1h:</b> ${safeNum(token.volumeH1 ?? token.volume, 0)}`,
-    `<b>Volume 24h:</b> ${safeNum(token.volumeH24 ?? token.volume, 0)}`,
-    `<b>Txns 1h:</b> ${safeNum(token.txnsH1 ?? token.txns, 0)}`,
-    `<b>Txns 24h:</b> ${safeNum(token.txnsH24 ?? token.txns, 0)}`,
-    `<b>FDV:</b> ${safeNum(token.fdv, 0)}`,
-    "",
-    `<b>Holder accumulation</b>`,
-    `tracked wallets: ${safeNum(holder.trackedWallets, 0)}`,
-    `fresh wallet cohort: ${safeNum(holder.freshWalletBuyCount, 0)}`,
-    `retention 30m / 2h / 6h: ${fmtPct(holder.retention30mPct)} / ${fmtPct(holder.retention2hPct)} / ${fmtPct(holder.historicalRetention6hPct ?? holder.retention6hPct)}`,
-    `historical retention 24h: ${fmtPct(holder.historicalRetention24hPct)}`,
-    `net accumulation pct: ${fmtPct(holder.netAccumulationPct)}`,
-    `net control pct: ${fmtPct(holder.netControlPct)}`,
-    `reload count: ${safeNum(holder.reloadCount, 0)}`,
-    `dip-buy ratio: ${round(holder.dipBuyRatio, 2)}`,
-    `bottom touches: ${safeNum(holder.bottomTouches, 0)}`,
-    `warehouse storage pass: ${holder.warehouseStoragePass ? "yes" : "no"}`,
-    `active reaccum pass: ${holder.activeReaccumulationPass ? "yes" : "no"}`,
-    `quiet accumulation pass: ${holder.quietAccumulationPass ? "yes" : "no"}`,
-    `bottom-pack reversal pass: ${holder.bottomPackReversalPass ? "yes" : "no"}`,
-    `phase age h: ${round(holder.accumulationPhaseAgeHours, 1)}`,
-    `cohort archetype: ${escapeHtml(archetype.label)}`,
-    `archetype note: ${escapeHtml(archetype.note)}`,
-    "",
-    `<b>Reversal structure</b>`,
-    `allow: ${reversal.allow ? "yes" : "no"}`,
-    `score: ${safeNum(reversal.score, 0)}`,
-    `mode: ${escapeHtml(reversal.primaryMode || "-")}`,
-    `passed: ${escapeHtml(Array.isArray(reversal.passedModes) ? reversal.passedModes.join(", ") : "-")}`,
-    `flush/base/exhaust/reclaim: ${reversal.flushDetected ? "yes" : "no"} / ${reversal.baseForming ? "yes" : "no"} / ${reversal.sellerExhaustion ? "yes" : "no"} / ${reversal.reclaimPressure ? "yes" : "no"}`,
-    "",
-    `<b>Migration</b>`,
-    `pair age min: ${round(migration.pairAgeMin, 1)}`,
-    `survivor score: ${safeNum(migration.survivorScore, 0)}`,
-    `liq/mcap %: ${round(migration.liqToMcapPct, 1)}`,
-    `vol/liq %: ${round(migration.volToLiqPct, 1)}`,
-    `passes: ${migration.passes ? "yes" : "no"}`,
-    "",
-    `<b>Plans:</b> ${escapeHtml(plans.map((p) => p?.strategyKey).filter(Boolean).join(", ") || "none")}`,
-    `<b>URL:</b> ${escapeHtml(token.url || "-")}`
-  ];
+  const archetype = holder?.archetype || (holder?.warehouseStoragePass ? "warehouse_storage" : holder?.activeReaccumulationPass ? "active_reaccumulation" : "mixed_watch");
+  const planText = plans.length ? plans.map((p) => p?.strategyKey || "-").join(", ") : "нет";
 
-  if (monitorEnabled) {
-    lines.push("", `<b>Monitor:</b> active for ~8h. I will notify only on meaningful changes. Small control dips during packaging are ignored.`);
-  }
-
-  return lines.join("\n");
+  return [
+    "🧺 <b>СКАН НАКОПЛЕНИЯ — СМОТРИТЕ</b>",
+    "",
+    `<b>Токен:</b> ${escapeHtml(asTokenName(token))}`,
+    `<b>CA:</b> <code>${escapeHtml(token?.ca || "")}</code>`,
+    `<b>Чейн:</b> ${escapeHtml(String(token?.chainId || "-"))}`,
+    `<b>Цена:</b> ${safeNum(token?.price, 0)}`,
+    `<b>Ликвидность:</b> ${safeNum(token?.liquidity, 0)}`,
+    `<b>Объём за 1 час:</b> ${safeNum(token?.volumeH1, 0)}`,
+    `<b>Объём за 24 часа:</b> ${safeNum(token?.volumeH24, token?.volume, 0)}`,
+    `<b>Транзакции за 1 час:</b> ${safeNum(token?.txnsH1, 0)}`,
+    `<b>Транзакции за 24 часа:</b> ${safeNum(token?.txnsH24, token?.txns, 0)}`,
+    `<b>FDV:</b> ${safeNum(token?.fdv, 0)}`,
+    "",
+    "<b>Накопление держателей</b>",
+    `Отслеженные кошельки: ${safeNum(holder?.trackedWalletCount, holder?.trackedWallets, 0)}`,
+    `Новая когорта кошельков: ${safeNum(holder?.freshWalletBuyCount, 0)}`,
+    `Удержание за 30 минут/2 часа: ${fmtPct(holder?.retention30mPct)} / ${fmtPct(holder?.retention2hPct)}`,
+    `Историческое удержание за 6 часов/24 часа: ${fmtPct(holder?.retention6hPct)} / ${fmtPct(holder?.retention24hPct)}`,
+    `Процент чистого накопления: ${fmtPct(holder?.netAccumulationPct)}`,
+    `Процент чистого контроля: ${fmtPct(holder?.netControlPct)}`,
+    `Количество перезагрузок: ${safeNum(holder?.reloadCount, 0)}`,
+    `Соотношение покупки на спаде: ${safeNum(holder?.dipBuyRatio, 0).toFixed(2)}`,
+    `Количество минимумов: ${safeNum(holder?.bottomTouches, 0)}`,
+    `Тихое накопление: ${holder?.quietAccumulationPass ? "да" : "нет"}`,
+    `Нижняя упаковка: ${holder?.bottomPackReversalPass ? "да" : "нет"}`,
+    `Склад / активный добор: ${holder?.warehouseStoragePass ? "да" : "нет"} / ${holder?.activeReaccumulationPass ? "да" : "нет"}`,
+    `Архетип когорты: ${escapeHtml(archetype)}`,
+    "",
+    "<b>Структура разворота</b>",
+    `Разрешено: ${reversal?.allow ? "да" : "нет"}`,
+    `Оценка: ${safeNum(reversal?.score, 0)}`,
+    `Режим: ${escapeHtml(reversal?.primaryMode || "-")}`,
+    "",
+    "<b>Миграция</b>",
+    `Минимальный возраст пары: ${safeNum(migration?.pairAgeMin, 0).toFixed(1)}`,
+    `Оценка выживания: ${safeNum(migration?.survivorScore, 0)}`,
+    `Процент ликвидности/рыночной капитализации: ${safeNum(migration?.liqToMcapPct, 0).toFixed(1)}`,
+    `Процент объёма/ликвидности: ${safeNum(migration?.volToLiqPct, 0).toFixed(1)}`,
+    `Прохождение: ${migration?.passes ? "да" : "нет"}`,
+    "",
+    `<b>Планы:</b> ${escapeHtml(planText)}`,
+    `<b>URL:</b> ${escapeHtml(token?.url || "-")}`,
+    monitorEligible ? "\n🔔 Монитор важных изменений накопления включится автоматически." : ""
+  ].join("\n");
 }
 
-function extractMetrics(result) {
+function extractMetrics(result = {}) {
   const analyzed = result?.analyzed || {};
+  const token = analyzed?.token || {};
   const holder = analyzed?.holderAccumulation || {};
   const reversal = analyzed?.reversal || {};
-  const archetype = deriveCohortArchetype(holder);
+  const plans = Array.isArray(result?.plans) ? result.plans : [];
   return {
-    tokenName: analyzed?.token?.name || analyzed?.token?.symbol || '-',
-    ca: analyzed?.token?.ca || '',
-    netControlPct: safeNum(holder?.netControlPct, 0),
-    netAccumulationPct: safeNum(holder?.netAccumulationPct, 0),
+    tokenName: asTokenName(token),
+    ca: token?.ca || "",
+    url: token?.url || "",
     retention30mPct: safeNum(holder?.retention30mPct, 0),
     retention2hPct: safeNum(holder?.retention2hPct, 0),
-    retention6hPct: safeNum(holder?.historicalRetention6hPct ?? holder?.retention6hPct, 0),
+    retention6hPct: safeNum(holder?.retention6hPct, 0),
+    netAccumulationPct: safeNum(holder?.netAccumulationPct, 0),
+    netControlPct: safeNum(holder?.netControlPct, 0),
     freshWalletBuyCount: safeNum(holder?.freshWalletBuyCount, 0),
-    reloadCount: safeNum(holder?.reloadCount, 0),
-    bottomTouches: safeNum(holder?.bottomTouches, 0),
-    quietAccumulationPass: Boolean(holder?.quietAccumulationPass),
     warehouseStoragePass: Boolean(holder?.warehouseStoragePass),
     activeReaccumulationPass: Boolean(holder?.activeReaccumulationPass),
+    quietAccumulationPass: Boolean(holder?.quietAccumulationPass),
     bottomPackReversalPass: Boolean(holder?.bottomPackReversalPass),
+    archetype: holder?.archetype || (holder?.warehouseStoragePass ? "warehouse_storage" : holder?.activeReaccumulationPass ? "active_reaccumulation" : "mixed_watch"),
     reversalAllow: Boolean(reversal?.allow),
     reversalScore: safeNum(reversal?.score, 0),
-    reversalMode: reversal?.primaryMode || '-',
-    plansText: Array.isArray(result?.plans) ? result.plans.map((p) => p?.strategyKey).filter(Boolean).join(', ') : '',
-    url: analyzed?.token?.url || '-',
-    archetype: archetype.label,
+    plansText: plans.length ? plans.map((p) => p?.strategyKey || "-").join(", ") : "нет"
   };
 }
 
-function isWatchworthy(result) {
-  const m = extractMetrics(result);
-  return Boolean(
-    m.warehouseStoragePass ||
-    m.activeReaccumulationPass ||
-    m.quietAccumulationPass ||
-    m.bottomPackReversalPass ||
-    (m.freshWalletBuyCount >= 10 && (m.retention30mPct >= 35 || m.retention2hPct >= 20 || m.netControlPct >= 55))
+function isWatchworthy(result = {}) {
+  const next = extractMetrics(result);
+  return (
+    next.quietAccumulationPass ||
+    next.warehouseStoragePass ||
+    next.netControlPct >= 45 ||
+    next.retention30mPct >= 40 ||
+    next.retention2hPct >= 25
   );
 }
 
-function buildDeltaMessage(prev, next) {
-  const lines = [];
-  const deltaControl = round(next.netControlPct - prev.netControlPct, 2);
-  const deltaAccum = round(next.netAccumulationPct - prev.netAccumulationPct, 2);
-  const deltaRet2h = round(next.retention2hPct - prev.retention2hPct, 2);
-  const deltaFresh = next.freshWalletBuyCount - prev.freshWalletBuyCount;
+function buildDeltaMessage(prev = {}, next = {}) {
+  const deltaControl = +(safeNum(next.netControlPct, 0) - safeNum(prev.netControlPct, 0)).toFixed(2);
+  const deltaAccum = +(safeNum(next.netAccumulationPct, 0) - safeNum(prev.netAccumulationPct, 0)).toFixed(2);
 
   const bullish = [];
   const bearish = [];
 
-  if (prev.archetype !== next.archetype) bullish.push(`cohort archetype → ${next.archetype}`);
-  if (!prev.quietAccumulationPass && next.quietAccumulationPass) bullish.push('quiet accumulation confirmed');
-  if (!prev.warehouseStoragePass && next.warehouseStoragePass) bullish.push('warehouse storage confirmed');
-  if (!prev.bottomPackReversalPass && next.bottomPackReversalPass) bullish.push('bottom-pack reversal confirmed');
-  if (!prev.reversalAllow && next.reversalAllow) bullish.push(`reversal now allowed (${escapeHtml(next.reversalMode)})`);
-  if (deltaControl >= 2.0) bullish.push(`net control +${deltaControl}%`);
-  if (deltaAccum >= 4.0) bullish.push(`net accumulation +${deltaAccum}%`);
-  if (deltaRet2h >= 10.0) bullish.push(`retention 2h +${deltaRet2h}%`);
-  if (deltaFresh >= 3) bullish.push(`fresh cohort +${deltaFresh}`);
+  if (deltaControl >= 3) bullish.push(`контроль вырос на ${deltaControl}%`);
+  if (deltaAccum >= 5) bullish.push(`накопление выросло на ${deltaAccum}%`);
+  if (!prev.warehouseStoragePass && next.warehouseStoragePass) bullish.push("складская упаковка подтверждена");
+  if (!prev.quietAccumulationPass && next.quietAccumulationPass) bullish.push("включилось тихое накопление");
+  if (!prev.reversalAllow && next.reversalAllow) bullish.push("разворотная структура дозрела");
+  if (!prev.bottomPackReversalPass && next.bottomPackReversalPass) bullish.push("включился bottom-pack reversal");
 
-  // do not overreact to small drops during packaging
-  if (deltaControl <= -6.0) bearish.push(`net control ${deltaControl}%`);
-  if (deltaAccum <= -10.0) bearish.push(`net accumulation ${deltaAccum}%`);
-  if (deltaRet2h <= -15.0) bearish.push(`retention 2h ${deltaRet2h}%`);
-  if (prev.quietAccumulationPass && !next.quietAccumulationPass && next.netControlPct < 60) bearish.push('quiet accumulation weakened');
+  if (deltaControl <= -8) bearish.push(`контроль заметно снизился на ${Math.abs(deltaControl)}%`);
+  if (deltaAccum <= -10) bearish.push(`накопление заметно снизилось на ${Math.abs(deltaAccum)}%`);
+  if (prev.warehouseStoragePass && !next.warehouseStoragePass) bearish.push("складская упаковка ослабла");
+  if (prev.quietAccumulationPass && !next.quietAccumulationPass) bearish.push("тихое накопление выключилось");
 
-  if (!bullish.length && !bearish.length) return '';
+  if (!bullish.length && !bearish.length) return "";
 
-  lines.push(`🔔 <b>ACCUMULATION WATCH UPDATE</b>`);
-  lines.push(`<b>Token:</b> <b>${escapeHtml(next.tokenName)}</b>`);
-  lines.push(`<b>CA:</b> <code>${escapeHtml(next.ca)}</code>`);
-  lines.push(`<b>Net control:</b> ${fmtPct(next.netControlPct)} (${deltaControl >= 0 ? '+' : ''}${deltaControl}%)`);
-  lines.push(`<b>Net accumulation:</b> ${fmtPct(next.netAccumulationPct)} (${deltaAccum >= 0 ? '+' : ''}${deltaAccum}%)`);
-  lines.push(`<b>Retention 30m / 2h / 6h:</b> ${fmtPct(next.retention30mPct)} / ${fmtPct(next.retention2hPct)} / ${fmtPct(next.retention6hPct)}`);
-  lines.push(`<b>Fresh cohort:</b> ${next.freshWalletBuyCount}`);
-  lines.push(`<b>Warehouse / active:</b> ${next.warehouseStoragePass ? 'yes' : 'no'} / ${next.activeReaccumulationPass ? 'yes' : 'no'}`);
-  lines.push(`<b>Archetype:</b> ${escapeHtml(next.archetype)}`);
+  const lines = [
+    "🔔 <b>ACCUMULATION WATCH UPDATE</b>",
+    `<b>Token:</b> <b>${escapeHtml(next.tokenName)}</b>`,
+    `<b>CA:</b> <code>${escapeHtml(next.ca)}</code>`,
+    `<b>Net control:</b> ${fmtPct(next.netControlPct)} (${deltaControl >= 0 ? "+" : ""}${deltaControl}%)`,
+    `<b>Net accumulation:</b> ${fmtPct(next.netAccumulationPct)} (${deltaAccum >= 0 ? "+" : ""}${deltaAccum}%)`,
+    `<b>Retention 30m / 2h / 6h:</b> ${fmtPct(next.retention30mPct)} / ${fmtPct(next.retention2hPct)} / ${fmtPct(next.retention6hPct)}`,
+    `<b>Fresh cohort:</b> ${next.freshWalletBuyCount}`,
+    `<b>Warehouse / active:</b> ${next.warehouseStoragePass ? "yes" : "no"} / ${next.activeReaccumulationPass ? "yes" : "no"}`,
+    `<b>Archetype:</b> ${escapeHtml(next.archetype)}`
+  ];
+
   if (bullish.length) {
-    lines.push('', `<b>Bullish changes</b>`);
+    lines.push("", "<b>Bullish changes</b>");
     for (const item of bullish) lines.push(`• ${escapeHtml(item)}`);
   }
   if (bearish.length) {
-    lines.push('', `<b>Caution</b>`);
+    lines.push("", "<b>Caution</b>");
     for (const item of bearish) lines.push(`• ${escapeHtml(item)}`);
-    lines.push('• minor control dips during packaging are ignored; this is only a warning, not a forced sell signal');
+    lines.push("• minor control dips during packaging are ignored; this is only a warning, not a forced sell signal");
   }
-  lines.push('', `<b>Plans now:</b> ${escapeHtml(next.plansText || 'none')}`);
-  lines.push(`<b>URL:</b> ${escapeHtml(next.url || '-')}`);
+
+  lines.push("", `<b>Plans now:</b> ${escapeHtml(next.plansText || "none")}`, `<b>URL:</b> ${escapeHtml(next.url || "-")}`);
   return lines.join("\n");
-}
-
-async function performScanCA(kernel, ca) {
-  const cs = kernel?.candidateService;
-  if (!cs || typeof kernel?.fetchTokenByCA !== 'function') return null;
-
-  const runtime = typeof kernel.getRuntime === 'function' ? kernel.getRuntime() : {};
-
-  if (typeof cs.scanCA === 'function') {
-    try {
-      return await cs.scanCA.call(cs, {
-        runtime,
-        fetchTokenByCA: (value) => kernel.fetchTokenByCA(value),
-        ca,
-      });
-    } catch (error) {
-      const message = String(error?.message || error || '');
-      const hasThisBug = message.includes('analyzeToken is not a function');
-      if (!hasThisBug) throw error;
-    }
-  }
-
-  const token = await kernel.fetchTokenByCA(ca);
-  if (!token) return null;
-  if (String(token?.chainId || '').toLowerCase() !== 'solana') return null;
-  if (typeof cs.analyzeToken !== 'function') {
-    throw new Error('candidateService.analyzeToken unavailable');
-  }
-  const analyzed = await cs.analyzeToken.call(cs, token);
-  if (!analyzed || String(analyzed?.token?.chainId || '').toLowerCase() !== 'solana') return null;
-  if (typeof cs.enrichCandidateWithHolderLive === 'function') {
-    await cs.enrichCandidateWithHolderLive.call(cs, analyzed);
-  }
-  const plans = typeof cs.buildPlans === 'function'
-    ? cs.buildPlans.call(cs, analyzed, runtime?.strategyScope || 'all')
-    : [];
-
-  return {
-    analyzed,
-    plans,
-    heroImage: token?.imageUrl || null,
-  };
 }
 
 export function applyAccumulationScanHotfix(router, kernel) {
@@ -342,7 +325,7 @@ export function applyAccumulationScanHotfix(router, kernel) {
           }
           item.lastMetrics = nextMetrics;
         } catch (error) {
-          router.logger?.log?.('accum watch loop error:', error?.message || String(error));
+          router.logger?.log?.("accum watch loop error:", error?.message || String(error));
         }
       }
       if (watched.size === 0 && watchLoopId) {
@@ -359,13 +342,10 @@ export function applyAccumulationScanHotfix(router, kernel) {
   router.keyboard = function patchedKeyboard() {
     const kb = originalKeyboard();
     if (!kb || !Array.isArray(kb.keyboard)) return kb;
-
     const rows = kb.keyboard.map((row) => Array.isArray(row) ? [...row] : row);
-    const targetLabel = "🧺 Accumulation Scan";
-    const exists = rows.some((row) => Array.isArray(row) && row.includes(targetLabel));
-    if (!exists) {
-      rows.splice(6, 0, [targetLabel, "🔎 Scan CA"]);
-    }
+    const label = "🧺 Accumulation Scan";
+    const exists = rows.some((row) => Array.isArray(row) && row.includes(label));
+    if (!exists) rows.splice(6, 0, [label, "🔎 Scan CA"]);
     return { ...kb, keyboard: rows };
   };
 
@@ -374,14 +354,9 @@ export function applyAccumulationScanHotfix(router, kernel) {
   router.handleMessage = async function patchedHandleMessage(msg) {
     const chatId = msg?.chat?.id;
     const text = String(msg?.text || "").trim();
+    if (!chatId || !text) return originalHandleMessage(msg);
 
-    if (!chatId || !text) {
-      return originalHandleMessage(msg);
-    }
-
-    const mode = typeof router.getChatMode === "function"
-      ? router.getChatMode(chatId)
-      : { mode: "idle" };
+    const mode = typeof router.getChatMode === "function" ? router.getChatMode(chatId) : { mode: "idle" };
 
     if (mode?.mode === "awaiting_accum_ca") {
       if (!isLikelyCA(text)) {
@@ -393,9 +368,7 @@ export function applyAccumulationScanHotfix(router, kernel) {
         return;
       }
 
-      if (typeof router.clearChatMode === "function") {
-        router.clearChatMode(chatId);
-      }
+      if (typeof router.clearChatMode === "function") router.clearChatMode(chatId);
 
       await router.sendMessage(
         chatId,
@@ -405,27 +378,19 @@ export function applyAccumulationScanHotfix(router, kernel) {
 
       try {
         let result = await performScanCA(kernel, text);
-
         if (!result && typeof kernel.scanCA === "function") {
           const send = router.createSendBridge(chatId);
           await kernel.scanCA(text, send);
           return;
         }
-
         if (!result) {
-          await router.sendMessage(
-            chatId,
-            "❌ Не удалось получить данные по этому контракту.",
-            { reply_markup: router.keyboard() }
-          );
+          await router.sendMessage(chatId, "❌ Не удалось получить данные по этому контракту.", { reply_markup: router.keyboard() });
           return;
         }
 
         const enableMonitor = isWatchworthy(result);
         const caption = buildAccumulationReport(result, enableMonitor);
-        await router.sendPhotoOrText(chatId, result?.heroImage || null, caption, {
-          reply_markup: router.keyboard()
-        });
+        await router.sendPhotoOrText(chatId, result?.heroImage || null, caption, { reply_markup: router.keyboard() });
 
         if (enableMonitor) {
           const metrics = extractMetrics(result);
@@ -457,13 +422,11 @@ export function applyAccumulationScanHotfix(router, kernel) {
       }
     }
 
-    if (matchesAccumulationScan(text)) {
-      if (typeof router.setChatMode === "function") {
-        router.setChatMode(chatId, "awaiting_accum_ca");
-      }
+    if (text === "🧺 Accumulation Scan") {
+      if (typeof router.setChatMode === "function") router.setChatMode(chatId, "awaiting_accum_ca");
       await router.sendMessage(
         chatId,
-        `🧺 <b>Accumulation Scan</b>\nПришли Solana CA, и я проверю накопление, удержание, cohort и признаки складского набора. Если увижу начальную фазу накопления, включу временный авто-монитор важных изменений.`,
+        `🧺 <b>Accumulation Scan</b>\nПришли Solana CA, и я проверю накопление, удержание, когорту и признаки складского набора. Если увижу начальную фазу накопления, включу временный авто-монитор важных изменений.`,
         { reply_markup: router.keyboard() }
       );
       return;
