@@ -8,10 +8,13 @@ import BotRouter from "./core/bot-router.js";
 import RuntimePersistence from "./core/runtime-persistence.js";
 import WebhookServer from "./core/webhook-server.js";
 import XPublicFeed from "./core/x-public-feed.js";
+import { applyRuntimeHotfixes } from "./core/runtime-hotfix.js";
 
 import GMGNWalletService from "./gmgn/gmgn-wallet-service.js";
 import GMGNOrderStateStore from "./gmgn/gmgn-order-state-store.js";
 import GMGNExecutionService from "./gmgn/gmgn-execution-service.js";
+
+applyRuntimeHotfixes();
 
 const TOKEN = process.env.BOT_TOKEN;
 const PORT = Number(process.env.PORT || 3000);
