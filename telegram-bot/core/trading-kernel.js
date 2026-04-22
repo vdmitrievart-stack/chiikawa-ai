@@ -5,10 +5,7 @@ import {
   resetPortfolio,
   setStrategyConfig,
   getClosedTrades,
-  hydratePortfolioSnapshot,
-  depositVirtualBalance as depositVirtualBalanceInPortfolio,
-  withdrawVirtualBalance as withdrawVirtualBalanceInPortfolio,
-  getVirtualBase
+  hydratePortfolioSnapshot
 } from "../portfolio.js";
 
 import {
@@ -392,22 +389,9 @@ export default class TradingKernel {
     startRuntime(this.runtime, { mode, strategyScope, chatId, userId });
     this.previousReportEquity = null;
     this.syncPortfolioStrategyBudget();
+    resetPortfolio(this.startBalanceSol, getStrategyConfig());
     void this.persistSnapshot();
     return this.runtime;
-  }
-
-  depositVirtualBalance(amountSol = 0) {
-    const result = depositVirtualBalanceInPortfolio(amountSol);
-    this.startBalanceSol = getVirtualBase();
-    void this.persistSnapshot();
-    return result;
-  }
-
-  withdrawVirtualBalance(amountSol = 0) {
-    const result = withdrawVirtualBalanceInPortfolio(amountSol);
-    this.startBalanceSol = getVirtualBase();
-    void this.persistSnapshot();
-    return result;
   }
 
   requestSoftStop() {
@@ -636,20 +620,13 @@ export default class TradingKernel {
     });
 
     if (!result) {
-      const noCandidateText = "Пока не вижу нормального кандидата. Продолжаю сканировать рынок.";
-
       if (
         this.runtime.strategyScope === "scalp" &&
-        this.canEmitNotice("scalp:no_candidate", 20 * 60 * 1000)
+        this.canEmitNotice("scalp:no_candidate", 5 * 60 * 1000)
       ) {
-        await notificationService.sendText(`🫧 <b>SCALP</b>\n${noCandidateText}`);
-      }
-
-      if (
-        this.runtime.strategyScope === "reversal" &&
-        this.canEmitNotice("reversal:no_candidate", 20 * 60 * 1000)
-      ) {
-        await notificationService.sendText(`↩️ <b>REVERSAL</b>\n${noCandidateText}`);
+        await notificationService.sendText(
+          "🫧 <b>SCALP</b>\nПока не вижу нормального кандидата. Фильтры активны, жду что-то живое."
+        );
       }
 
       await this.persistSnapshot();
@@ -939,6 +916,32 @@ negative pnlHintSol: ${negativeSol.toFixed(4)}
 avg pnlHintPct: ${avgPct.toFixed(2)}%`;
   }
 
+  buildRadarSummaryText() {
+    const t = this.candidateService?.getRadarTelemetry?.() || {};
+    const byBucket = t?.byBucket || {};
+    return `📡 <b>Radar</b>
+scanned raw: ${safeNum(t?.scannedRaw, 0)}
+unique pairs: ${safeNum(t?.uniquePairs, 0)}
+after analysis: ${safeNum(t?.candidatesAfterAnalysis, 0)}
+filtered noise: ${safeNum(t?.filteredNoise, 0)}
+deep analyzed: ${safeNum(t?.deepAnalyzed, 0)}
+watchlist: ${safeNum(t?.watchlist, 0)} | priority: ${safeNum(t?.priorityWatch, 0)}
+packaging: ${safeNum(t?.packagingDetected, 0)} | probe: ${safeNum(t?.packagingProbe, 0)}
+reversal watch: ${safeNum(t?.reversalWatch, 0)} | runner-like: ${safeNum(t?.runnerLike, 0)}
+migration structure: ${safeNum(t?.migrationStructure, 0)}
+trap rejected: ${safeNum(t?.trapRejected, 0)} | trade-ready: ${safeNum(t?.tradeReady, 0)}
+buckets fresh/packaging/migration/momentum/forgotten: ${safeNum(byBucket?.fresh, 0)} / ${safeNum(byBucket?.packaging, 0)} / ${safeNum(byBucket?.migration, 0)} / ${safeNum(byBucket?.momentum, 0)} / ${safeNum(byBucket?.forgotten, 0)}`;
+  }
+
+  buildNoCandidateNotice() {
+    const scope = String(this.runtime?.strategyScope || "all").toUpperCase();
+    const t = this.candidateService?.getRadarTelemetry?.() || {};
+    return `📡 <b>${escapeHtml(scope)}</b>
+Пока не вижу нормального кандидата. Продолжаю сканировать рынок.
+
+scanned: ${safeNum(t?.uniquePairs, 0)} | watchlist: ${safeNum(t?.watchlist, 0)} | packaging: ${safeNum(t?.packagingDetected, 0)} | migration: ${safeNum(t?.migrationStructure, 0)} | trap rejected: ${safeNum(t?.trapRejected, 0)} | trade-ready: ${safeNum(t?.tradeReady, 0)}`;
+  }
+
   buildStatusText() {
     const base = buildDashboard(
       this.runtime,
@@ -946,6 +949,8 @@ avg pnlHintPct: ${avgPct.toFixed(2)}%`;
       this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
     );
     return `${base}
+
+${this.buildRadarSummaryText()}
 
 ${this.buildCopytradeStatusSummary()}
 
@@ -963,6 +968,8 @@ ${this.buildRecentGMGNEventsSummary()}`;
       getPortfolio(),
       this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
     )}
+
+${this.buildRadarSummaryText()}
 
 ${this.buildGMGNPnlHintSummary()}`;
   }
