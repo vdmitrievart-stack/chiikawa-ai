@@ -1,10 +1,9 @@
-
 function escapeHtml(input) {
   return String(input ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/\"/g, "&quot;");
 }
 
 function safeNum(v, fallback = 0) {
@@ -46,16 +45,70 @@ function matchesAccumulationScan(text) {
 
 function normalizeCategory(plans = [], analyzed = {}) {
   const keys = Array.isArray(plans) ? plans.map((p) => p?.strategyKey).filter(Boolean) : [];
+  if (keys.includes("packaging")) return "PACKAGING";
   if (keys.includes("reversal")) return "REVERSAL";
   if (keys.includes("runner")) return "RUNNER";
   if (keys.includes("migration_survivor")) return "MIGRATION_SURVIVOR";
   if (keys.includes("scalp")) return "SCALP";
   if (keys.includes("copytrade")) return "COPYTRADE";
 
+  if (analyzed?.holderAccumulation?.warehouseStoragePass) return "PACKAGING";
   if (analyzed?.reversal?.allow) return "REVERSAL";
   if (analyzed?.migration?.passes) return "MIGRATION_SURVIVOR";
   if (analyzed?.scalp?.allow) return "SCALP";
   return "WATCH";
+}
+
+function deriveCohortArchetype(holder = {}) {
+  const fresh = safeNum(holder.freshWalletBuyCount, 0);
+  const ret30 = safeNum(holder.retention30mPct, 0);
+  const ret2h = safeNum(holder.retention2hPct, 0);
+  const ret6h = safeNum(holder.historicalRetention6hPct ?? holder.retention6hPct, 0);
+  const netControl = safeNum(holder.netControlPct, 0);
+  const netAccum = safeNum(holder.netAccumulationPct, 0);
+  const reload = safeNum(holder.reloadCount, 0);
+  const dip = safeNum(holder.dipBuyRatio, 0);
+  const quiet = Boolean(holder.quietAccumulationPass);
+  const wh = Boolean(holder.warehouseStoragePass);
+  const active = Boolean(holder.activeReaccumulationPass);
+
+  if (wh || (fresh >= 10 && quiet && netControl >= 60 && netAccum >= 70 && ret30 >= 45 && ret2h >= 30 && reload <= 2 && dip <= 0.18)) {
+    return {
+      key: "warehouse_storage",
+      label: "warehouse storage",
+      note: "похоже на складскую упаковку: много кошельков, высокое удержание, низкая суета"
+    };
+  }
+
+  if (active || (fresh >= 8 && (reload >= 3 || dip >= 0.35) && ret30 >= 35 && netAccum >= 40)) {
+    return {
+      key: "active_reaccumulation",
+      label: "active reaccumulation",
+      note: "похоже на активный добор/реаккумуляцию: есть повторные покупки на проливах"
+    };
+  }
+
+  if (fresh >= 8 && (reload >= 3 || dip >= 0.2) && netControl < 60 && (ret6h < 50 || ret2h < 45)) {
+    return {
+      key: "speculative_dca",
+      label: "speculative dca",
+      note: "похоже на усредняющихся игроков, а не на упаковщиков"
+    };
+  }
+
+  if (fresh >= 6 && ret30 < 25 && ret2h < 15 && netAccum <= 20) {
+    return {
+      key: "weak_or_noise",
+      label: "weak / noisy",
+      note: "скорее шумный поток, а не устойчивая когорта"
+    };
+  }
+
+  return {
+    key: "mixed_watch",
+    label: "mixed watch",
+    note: "есть интересные признаки, но архетип пока смешанный"
+  };
 }
 
 function buildAccumulationReport(result, monitorEnabled = false) {
@@ -66,10 +119,11 @@ function buildAccumulationReport(result, monitorEnabled = false) {
   const migration = analyzed?.migration || {};
   const plans = result?.plans || [];
   const category = normalizeCategory(plans, analyzed);
+  const archetype = deriveCohortArchetype(holder);
 
   const lines = [
     `🧺 <b>ACCUMULATION SCAN — ${escapeHtml(category)}</b>`,
-    ``,
+    "",
     `<b>Token:</b> <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>`,
     `<b>CA:</b> <code>${escapeHtml(token.ca || "")}</code>`,
     `<b>Chain:</b> ${escapeHtml(token.chainId || "-")}`,
@@ -80,11 +134,12 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `<b>Txns 1h:</b> ${safeNum(token.txnsH1 ?? token.txns, 0)}`,
     `<b>Txns 24h:</b> ${safeNum(token.txnsH24 ?? token.txns, 0)}`,
     `<b>FDV:</b> ${safeNum(token.fdv, 0)}`,
-    ``,
+    "",
     `<b>Holder accumulation</b>`,
     `tracked wallets: ${safeNum(holder.trackedWallets, 0)}`,
     `fresh wallet cohort: ${safeNum(holder.freshWalletBuyCount, 0)}`,
-    `retention 30m / 2h / 6h: ${fmtPct(holder.retention30mPct)} / ${fmtPct(holder.retention2hPct)} / ${fmtPct(holder.retention6hPct)}`,
+    `retention 30m / 2h / 6h: ${fmtPct(holder.retention30mPct)} / ${fmtPct(holder.retention2hPct)} / ${fmtPct(holder.historicalRetention6hPct ?? holder.retention6hPct)}`,
+    `historical retention 24h: ${fmtPct(holder.historicalRetention24hPct)}`,
     `net accumulation pct: ${fmtPct(holder.netAccumulationPct)}`,
     `net control pct: ${fmtPct(holder.netControlPct)}`,
     `reload count: ${safeNum(holder.reloadCount, 0)}`,
@@ -95,21 +150,23 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `quiet accumulation pass: ${holder.quietAccumulationPass ? "yes" : "no"}`,
     `bottom-pack reversal pass: ${holder.bottomPackReversalPass ? "yes" : "no"}`,
     `phase age h: ${round(holder.accumulationPhaseAgeHours, 1)}`,
-    ``,
+    `cohort archetype: ${escapeHtml(archetype.label)}`,
+    `archetype note: ${escapeHtml(archetype.note)}`,
+    "",
     `<b>Reversal structure</b>`,
     `allow: ${reversal.allow ? "yes" : "no"}`,
     `score: ${safeNum(reversal.score, 0)}`,
     `mode: ${escapeHtml(reversal.primaryMode || "-")}`,
     `passed: ${escapeHtml(Array.isArray(reversal.passedModes) ? reversal.passedModes.join(", ") : "-")}`,
     `flush/base/exhaust/reclaim: ${reversal.flushDetected ? "yes" : "no"} / ${reversal.baseForming ? "yes" : "no"} / ${reversal.sellerExhaustion ? "yes" : "no"} / ${reversal.reclaimPressure ? "yes" : "no"}`,
-    ``,
+    "",
     `<b>Migration</b>`,
     `pair age min: ${round(migration.pairAgeMin, 1)}`,
     `survivor score: ${safeNum(migration.survivorScore, 0)}`,
     `liq/mcap %: ${round(migration.liqToMcapPct, 1)}`,
     `vol/liq %: ${round(migration.volToLiqPct, 1)}`,
     `passes: ${migration.passes ? "yes" : "no"}`,
-    ``,
+    "",
     `<b>Plans:</b> ${escapeHtml(plans.map((p) => p?.strategyKey).filter(Boolean).join(", ") || "none")}`,
     `<b>URL:</b> ${escapeHtml(token.url || "-")}`
   ];
@@ -125,6 +182,7 @@ function extractMetrics(result) {
   const analyzed = result?.analyzed || {};
   const holder = analyzed?.holderAccumulation || {};
   const reversal = analyzed?.reversal || {};
+  const archetype = deriveCohortArchetype(holder);
   return {
     tokenName: analyzed?.token?.name || analyzed?.token?.symbol || '-',
     ca: analyzed?.token?.ca || '',
@@ -132,7 +190,7 @@ function extractMetrics(result) {
     netAccumulationPct: safeNum(holder?.netAccumulationPct, 0),
     retention30mPct: safeNum(holder?.retention30mPct, 0),
     retention2hPct: safeNum(holder?.retention2hPct, 0),
-    retention6hPct: safeNum(holder?.retention6hPct, 0),
+    retention6hPct: safeNum(holder?.historicalRetention6hPct ?? holder?.retention6hPct, 0),
     freshWalletBuyCount: safeNum(holder?.freshWalletBuyCount, 0),
     reloadCount: safeNum(holder?.reloadCount, 0),
     bottomTouches: safeNum(holder?.bottomTouches, 0),
@@ -144,7 +202,8 @@ function extractMetrics(result) {
     reversalScore: safeNum(reversal?.score, 0),
     reversalMode: reversal?.primaryMode || '-',
     plansText: Array.isArray(result?.plans) ? result.plans.map((p) => p?.strategyKey).filter(Boolean).join(', ') : '',
-    url: analyzed?.token?.url || '-'
+    url: analyzed?.token?.url || '-',
+    archetype: archetype.label,
   };
 }
 
@@ -169,6 +228,7 @@ function buildDeltaMessage(prev, next) {
   const bullish = [];
   const bearish = [];
 
+  if (prev.archetype !== next.archetype) bullish.push(`cohort archetype → ${next.archetype}`);
   if (!prev.quietAccumulationPass && next.quietAccumulationPass) bullish.push('quiet accumulation confirmed');
   if (!prev.warehouseStoragePass && next.warehouseStoragePass) bullish.push('warehouse storage confirmed');
   if (!prev.bottomPackReversalPass && next.bottomPackReversalPass) bullish.push('bottom-pack reversal confirmed');
@@ -194,6 +254,7 @@ function buildDeltaMessage(prev, next) {
   lines.push(`<b>Retention 30m / 2h / 6h:</b> ${fmtPct(next.retention30mPct)} / ${fmtPct(next.retention2hPct)} / ${fmtPct(next.retention6hPct)}`);
   lines.push(`<b>Fresh cohort:</b> ${next.freshWalletBuyCount}`);
   lines.push(`<b>Warehouse / active:</b> ${next.warehouseStoragePass ? 'yes' : 'no'} / ${next.activeReaccumulationPass ? 'yes' : 'no'}`);
+  lines.push(`<b>Archetype:</b> ${escapeHtml(next.archetype)}`);
   if (bullish.length) {
     lines.push('', `<b>Bullish changes</b>`);
     for (const item of bullish) lines.push(`• ${escapeHtml(item)}`);
@@ -206,6 +267,48 @@ function buildDeltaMessage(prev, next) {
   lines.push('', `<b>Plans now:</b> ${escapeHtml(next.plansText || 'none')}`);
   lines.push(`<b>URL:</b> ${escapeHtml(next.url || '-')}`);
   return lines.join("\n");
+}
+
+async function performScanCA(kernel, ca) {
+  const cs = kernel?.candidateService;
+  if (!cs || typeof kernel?.fetchTokenByCA !== 'function') return null;
+
+  const runtime = typeof kernel.getRuntime === 'function' ? kernel.getRuntime() : {};
+
+  if (typeof cs.scanCA === 'function') {
+    try {
+      return await cs.scanCA.call(cs, {
+        runtime,
+        fetchTokenByCA: (value) => kernel.fetchTokenByCA(value),
+        ca,
+      });
+    } catch (error) {
+      const message = String(error?.message || error || '');
+      const hasThisBug = message.includes('analyzeToken is not a function');
+      if (!hasThisBug) throw error;
+    }
+  }
+
+  const token = await kernel.fetchTokenByCA(ca);
+  if (!token) return null;
+  if (String(token?.chainId || '').toLowerCase() !== 'solana') return null;
+  if (typeof cs.analyzeToken !== 'function') {
+    throw new Error('candidateService.analyzeToken unavailable');
+  }
+  const analyzed = await cs.analyzeToken.call(cs, token);
+  if (!analyzed || String(analyzed?.token?.chainId || '').toLowerCase() !== 'solana') return null;
+  if (typeof cs.enrichCandidateWithHolderLive === 'function') {
+    await cs.enrichCandidateWithHolderLive.call(cs, analyzed);
+  }
+  const plans = typeof cs.buildPlans === 'function'
+    ? cs.buildPlans.call(cs, analyzed, runtime?.strategyScope || 'all')
+    : [];
+
+  return {
+    analyzed,
+    plans,
+    heroImage: token?.imageUrl || null,
+  };
 }
 
 export function applyAccumulationScanHotfix(router, kernel) {
@@ -229,14 +332,7 @@ export function applyAccumulationScanHotfix(router, kernel) {
         if (now - safeNum(item?.lastCheckedAt, 0) < WATCH_INTERVAL_MS - 5000) continue;
         item.lastCheckedAt = now;
         try {
-          let result = null;
-          if (kernel?.candidateService?.scanCA && typeof kernel.fetchTokenByCA === 'function') {
-            result = await kernel.candidateService.scanCA({
-              runtime: typeof kernel.getRuntime === 'function' ? kernel.getRuntime() : {},
-              fetchTokenByCA: (value) => kernel.fetchTokenByCA(value),
-              ca: item.ca
-            });
-          }
+          const result = await performScanCA(kernel, item.ca);
           if (!result) continue;
           const nextMetrics = extractMetrics(result);
           const text = buildDeltaMessage(item.lastMetrics, nextMetrics);
@@ -291,8 +387,7 @@ export function applyAccumulationScanHotfix(router, kernel) {
       if (!isLikelyCA(text)) {
         await router.sendMessage(
           chatId,
-          `🧺 <b>Accumulation Scan</b>
-Пришли Solana CA, чтобы проверить накопление, удержание и признаки складского набора.`,
+          `🧺 <b>Accumulation Scan</b>\nПришли Solana CA, чтобы проверить накопление, удержание и признаки складского набора.`,
           { reply_markup: router.keyboard() }
         );
         return;
@@ -304,21 +399,14 @@ export function applyAccumulationScanHotfix(router, kernel) {
 
       await router.sendMessage(
         chatId,
-        `🧺 <b>Accumulation Scan started</b>
-<code>${escapeHtml(text)}</code>`,
+        `🧺 <b>Accumulation Scan started</b>\n<code>${escapeHtml(text)}</code>`,
         { reply_markup: router.keyboard() }
       );
 
       try {
-        let result = null;
+        let result = await performScanCA(kernel, text);
 
-        if (kernel?.candidateService?.scanCA && typeof kernel.fetchTokenByCA === "function") {
-          result = await kernel.candidateService.scanCA({
-            runtime: typeof kernel.getRuntime === "function" ? kernel.getRuntime() : {},
-            fetchTokenByCA: (value) => kernel.fetchTokenByCA(value),
-            ca: text
-          });
-        } else if (typeof kernel.scanCA === "function") {
+        if (!result && typeof kernel.scanCA === "function") {
           const send = router.createSendBridge(chatId);
           await kernel.scanCA(text, send);
           return;
@@ -354,9 +442,7 @@ export function applyAccumulationScanHotfix(router, kernel) {
           ensureWatchLoop();
           await router.sendMessage(
             chatId,
-            `🔔 <b>Accumulation monitor enabled</b>
-<code>${escapeHtml(text)}</code>
-Буду следить примерно 8 часов и сообщать только о значимых изменениях накопления. Небольшие снижения контроля во время упаковки я игнорирую.`,
+            `🔔 <b>Accumulation monitor enabled</b>\n<code>${escapeHtml(text)}</code>\nБуду следить примерно 8 часов и сообщать только о значимых изменениях накопления. Небольшие снижения контроля во время упаковки я игнорирую.`,
             { reply_markup: router.keyboard() }
           );
         }
@@ -364,8 +450,7 @@ export function applyAccumulationScanHotfix(router, kernel) {
       } catch (error) {
         await router.sendMessage(
           chatId,
-          `❌ <b>Accumulation Scan error</b>
-<code>${escapeHtml(error?.message || String(error))}</code>`,
+          `❌ <b>Accumulation Scan error</b>\n<code>${escapeHtml(error?.message || String(error))}</code>`,
           { reply_markup: router.keyboard() }
         );
         return;
@@ -378,8 +463,7 @@ export function applyAccumulationScanHotfix(router, kernel) {
       }
       await router.sendMessage(
         chatId,
-        `🧺 <b>Accumulation Scan</b>
-Пришли Solana CA, и я проверю накопление, удержание, cohort и признаки складского набора. Если увижу начальную фазу накопления, включу временный авто-монитор важных изменений.`,
+        `🧺 <b>Accumulation Scan</b>\nПришли Solana CA, и я проверю накопление, удержание, cohort и признаки складского набора. Если увижу начальную фазу накопления, включу временный авто-монитор важных изменений.`,
         { reply_markup: router.keyboard() }
       );
       return;
