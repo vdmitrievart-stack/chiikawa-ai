@@ -73,11 +73,14 @@ export default class CandidateService {
       "pumpfun solana",
       "cto solana",
       "memecoin solana",
-      "solana community takeover"
+      "solana community takeover",
+      "solana revival",
+      "cto revival solana",
+      "solana accumulation"
     ];
     this.holderAccumulationEngine = options.holderAccumulationEngine || null;
-    this.maxHolderEnrichPerPass = Number(options.maxHolderEnrichPerPass || 8);
-    this.dexEnrichLimit = Number(options.dexEnrichLimit || process.env.DEX_ENRICH_LIMIT || 18);
+    this.maxHolderEnrichPerPass = Number(options.maxHolderEnrichPerPass || process.env.HOLDER_ENRICH_TOP_N || 24);
+    this.dexEnrichLimit = Number(options.dexEnrichLimit || process.env.DEX_ENRICH_LIMIT || 36);
     this.gmgnDiscovery = options.gmgnDiscovery || new GMGNMarketDiscoveryService({ logger: this.logger });
   }
 
@@ -582,240 +585,277 @@ export default class CandidateService {
     const holder = candidate?.holderAccumulation || {};
     const migration = candidate?.migration || {};
     const scalpMetrics = candidate?.scalp?.metrics || {};
-    const discovery = candidate?.discovery || {};
+    const trap = candidate?.trap || {};
 
     const priceM5 = safeNum(candidate?.delta?.priceM5Pct, safeNum(token?.priceChangeM5, 0));
     const priceH1 = safeNum(candidate?.delta?.priceH1Pct, safeNum(token?.priceChangeH1, 0));
     const priceH6 = safeNum(candidate?.delta?.priceH6Pct, safeNum(token?.priceChangeH6, 0));
     const priceH24 = safeNum(candidate?.delta?.priceH24Pct, safeNum(token?.priceChangeH24, 0));
 
-    const buyPressureM5 = safeNum(scalpMetrics?.buyPressureM5, 0);
-    const buyPressureH1 = safeNum(scalpMetrics?.buyPressureH1, 0);
-    const buyPressureH24 = safeNum(scalpMetrics?.buyPressureH24, 0);
+    const buyPressureM5 = safeNum(scalpMetrics?.buyPressureM5, buyPressurePct(token?.buysM5, token?.sellsM5));
+    const buyPressureH1 = safeNum(scalpMetrics?.buyPressureH1, buyPressurePct(token?.buysH1, token?.sellsH1));
+    const buyPressureH24 = safeNum(scalpMetrics?.buyPressureH24, buyPressurePct(token?.buys, token?.sells));
 
     const liquidity = safeNum(token?.liquidity, 0);
     const volumeH1 = safeNum(token?.volumeH1, 0);
     const txnsH1 = safeNum(token?.txnsH1, 0);
     const socialCount = safeNum(candidate?.socials?.socialCount, 0);
+    const marketCap = safeNum(token?.fdv, 0) > 0 ? safeNum(token?.fdv, 0) : safeNum(token?.marketCap, 0);
 
-    const flushDetected = priceH6 <= -10 || priceH24 <= -18 || (safeNum(migration?.pairAgeMin, 0) <= 720 && priceH1 < 0);
-    const baseForming = priceH1 > -12 && priceM5 > -4 && Math.abs(priceM5) <= 7;
-    const sellerExhaustion = buyPressureM5 >= 52 && buyPressureM5 >= (buyPressureH1 - 2);
-    const reclaimPressure = priceM5 > 0 && buyPressureM5 >= 55 && buyPressureH1 >= 50;
+    const pairAgeMin = safeNum(migration?.pairAgeMin, 0);
+    const pairAgeHours = pairAgeMin / 60;
+    const tacticalAgeWindow = pairAgeHours >= 1 && pairAgeHours <= 24 * 10;
+    const forgottenAgeWindow = pairAgeHours > 24 * 10;
+    const tacticalMcWindow = marketCap >= 5000 && marketCap <= 30000;
+    const acceptableMcWindow = marketCap >= 5000 && marketCap <= 90000;
+
+    const classicalFlush = priceH6 <= -12 || priceH24 <= -22 || (pairAgeMin <= 720 && priceH1 <= -5);
+    const softFlush = priceH6 <= -6 || priceH24 <= -10 || priceH1 <= -3;
+    const baseForming = priceH1 > -12 && priceM5 > -5 && Math.abs(priceM5) <= 8;
+    const sellerExhaustion = buyPressureM5 >= 51 && buyPressureM5 >= (buyPressureH1 - 2);
+    const reclaimPressure = priceM5 > -1 && buyPressureM5 >= 54 && buyPressureH1 >= 50;
     const accumulationBase = safeNum(candidate?.accumulation?.score, 0) >= 10 || safeNum(candidate?.absorption?.score, 0) >= 10;
-    const liquidityAlive = liquidity >= 12000 && volumeH1 >= 2500 && txnsH1 >= 30;
-    const quietAccumulation = Boolean(holder?.quietAccumulationPass);
-    const bottomPack = Boolean(holder?.bottomPackReversalPass);
-    const discoverySupport = safeNum(discovery?.attentionScore, 0) >= 46;
+    const liquidityAlive = liquidity >= 9000 && volumeH1 >= 1500 && txnsH1 >= 20;
+
+    const warehouseWalletCount = safeNum(holder?.freshWalletBuyCount, 0);
+    const warehouseRetention30m = safeNum(holder?.retention30mPct, 0);
+    const warehouseRetention2h = safeNum(holder?.retention2hPct, 0);
+    const warehouseReloadCount = safeNum(holder?.reloadCount, 0);
+    const warehouseDipBuyRatio = safeNum(holder?.dipBuyRatio, 0);
+    const warehouseBottomTouches = safeNum(holder?.bottomTouches, 0);
+    const warehouseNetAccumulationPct = safeNum(holder?.netAccumulationPct, 0);
+    const warehouseNetControlPct = safeNum(holder?.netControlPct, 0);
+
+    const warehouseWalletsStrong = warehouseWalletCount >= 12;
+    const warehouseRetentionStrong = warehouseRetention30m >= 35 || warehouseRetention2h >= 22;
+    const warehouseReloadStrong = warehouseReloadCount >= 3 && warehouseDipBuyRatio >= 0.45;
+    const warehouseBottomStructure = warehouseBottomTouches >= 2;
+    const warehouseStorageBehavior = warehouseWalletsStrong && (warehouseRetentionStrong || warehouseReloadStrong || warehouseBottomStructure);
+    const quietAccumulation = Boolean(holder?.quietAccumulationPass) || warehouseStorageBehavior;
+    const bottomPack = Boolean(holder?.bottomPackReversalPass) || (warehouseStorageBehavior && warehouseReloadStrong && warehouseBottomStructure);
+
+    const warehouseBaseCandidate = tacticalAgeWindow && acceptableMcWindow && warehouseStorageBehavior && liquidityAlive;
+    const forgottenRevivalCandidate = forgottenAgeWindow && warehouseStorageBehavior && liquidityAlive && baseForming && sellerExhaustion;
+    const storageCohortReversal = warehouseStorageBehavior && (baseForming || warehouseBottomStructure) && reclaimPressure && acceptableMcWindow;
+
+    const runnerLikeContinuation = Boolean(
+      !forgottenAgeWindow &&
+      (priceH1 >= 18 || priceH6 >= 60 || priceH24 >= 140) &&
+      priceM5 > -4 &&
+      buyPressureH1 >= 52 &&
+      buyPressureH24 >= 50
+    );
+
+    const migrationBaseReversal = Boolean(
+      migration?.passes &&
+      classicalFlush &&
+      baseForming &&
+      reclaimPressure &&
+      !runnerLikeContinuation
+    );
+
+    const olderBaseCandidate = forgottenAgeWindow || forgottenRevivalCandidate;
 
     let score = 0;
-    if (flushDetected) score += 16;
+    if (classicalFlush) score += 18;
+    else if (softFlush) score += 9;
     if (baseForming) score += 14;
     if (sellerExhaustion) score += 14;
     if (reclaimPressure) score += 18;
     if (accumulationBase) score += 10;
     if (liquidityAlive) score += 10;
     if (socialCount >= 1) score += 4;
-    if (safeNum(migration?.retainedLiquidity, false)) score += 6;
-    if (safeNum(migration?.retainedFlow, false)) score += 6;
+    if (tacticalMcWindow) score += 12;
+    else if (acceptableMcWindow) score += 6;
+    if (tacticalAgeWindow) score += 8;
+    if (warehouseWalletsStrong) score += 8;
+    if (warehouseRetentionStrong) score += 10;
+    if (warehouseReloadStrong) score += 10;
+    if (warehouseBottomStructure) score += 10;
     if (quietAccumulation) score += 12;
-    if (bottomPack) score += 16;
-    if (discoverySupport) score += 8;
+    if (bottomPack) score += 14;
+    if (forgottenRevivalCandidate) score += 12;
+    if (storageCohortReversal) score += 10;
+    if (migrationBaseReversal) score += 8;
+    if (runnerLikeContinuation) score -= 18;
     if (buyPressureH24 < 45) score -= 8;
-    if (priceM5 > 10) score -= 8;
+    if (priceM5 > 12) score -= 6;
+    if (trap?.reject) score -= 50;
 
-    const notScamEnough =
-      safeNum(candidate?.rug?.risk, 0) < 65 &&
-      asText(candidate?.developer?.verdict, "Neutral") !== "Bad" &&
-      !candidate?.corpse?.isCorpse;
+    const notScamEnough = !trap?.reject && safeNum(candidate?.rug?.risk, 0) < 65 && asText(candidate?.developer?.verdict, 'Neutral') !== 'Bad' && !candidate?.corpse?.isCorpse;
 
-    const bottomPackReversal = notScamEnough && flushDetected && baseForming && quietAccumulation && bottomPack && reclaimPressure && score >= 66;
-    const migrationBaseReversal = notScamEnough && migration?.passes && baseForming && sellerExhaustion && reclaimPressure && score >= 60;
-    const baseReclaimReversal = notScamEnough && flushDetected && baseForming && sellerExhaustion && reclaimPressure && liquidityAlive && score >= 58;
+    const allow = Boolean(
+      notScamEnough &&
+      liquidityAlive &&
+      !runnerLikeContinuation &&
+      score >= 60 &&
+      (
+        migrationBaseReversal ||
+        (classicalFlush && baseForming && reclaimPressure) ||
+        storageCohortReversal ||
+        warehouseBaseCandidate ||
+        forgottenRevivalCandidate ||
+        (quietAccumulation && baseForming && sellerExhaustion && reclaimPressure)
+      )
+    );
 
-    const modeScores = {
-      bottom_pack_reversal: bottomPackReversal ? score + 10 : 0,
-      migration_base_reversal: migrationBaseReversal ? score + 4 : 0,
-      base_reclaim_reversal: baseReclaimReversal ? score : 0
-    };
+    const passedModes = [];
+    if (migrationBaseReversal && allow) passedModes.push('migration_base_reversal');
+    if (storageCohortReversal && allow) passedModes.push('storage_cohort_reversal');
+    if (warehouseBaseCandidate && allow) passedModes.push('warehouse_base_reversal');
+    if (forgottenRevivalCandidate && allow) passedModes.push('forgotten_revival_reversal');
+    if (allow && passedModes.length === 0) passedModes.push('base_reclaim_reversal');
 
-    const passedModes = Object.entries({
-      bottom_pack_reversal: bottomPackReversal,
-      migration_base_reversal: migrationBaseReversal,
-      base_reclaim_reversal: baseReclaimReversal
-    })
-      .filter(([, pass]) => pass)
-      .map(([key]) => key);
+    const primaryMode = passedModes[0] || (migrationBaseReversal ? 'migration_base_reversal' : forgottenRevivalCandidate ? 'forgotten_revival_reversal' : warehouseBaseCandidate ? 'warehouse_base_reversal' : storageCohortReversal ? 'storage_cohort_reversal' : 'base_reclaim_reversal');
 
     return {
-      allow: passedModes.length > 0,
-      score: clamp(score, 0, 99),
-      primaryMode: passedModes.sort((a, b) => safeNum(modeScores[b], 0) - safeNum(modeScores[a], 0))[0] || "",
+      allow,
+      score: clamp(Math.round(score), 0, 99),
+      primaryMode,
       passedModes,
-      flushDetected,
+      quietAccumulation,
+      bottomPack,
+      olderBaseCandidate,
+      warehouseBaseCandidate,
+      forgottenRevivalCandidate,
+      storageCohortReversal,
+      flushDetected: classicalFlush || softFlush,
+      classicFlush: classicalFlush,
+      softFlush,
       baseForming,
       sellerExhaustion,
       reclaimPressure,
-      quietAccumulation,
-      bottomPack,
-      discoverySupport
+      runnerLikeContinuation,
+      metrics: {
+        priceM5,
+        priceH1,
+        priceH6,
+        priceH24,
+        buyPressureM5,
+        buyPressureH1,
+        buyPressureH24,
+        pairAgeHours,
+        marketCap,
+        retention30m: warehouseRetention30m,
+        retention2h: warehouseRetention2h,
+        netAccumulationPct: warehouseNetAccumulationPct,
+        netControlPct: warehouseNetControlPct,
+        freshWalletBuyCount: warehouseWalletCount,
+        reloadCount: warehouseReloadCount,
+        dipBuyRatio: warehouseDipBuyRatio,
+        bottomTouches: warehouseBottomTouches,
+        warehouseWalletsStrong,
+        warehouseStorageBehavior,
+        tacticalMcWindow,
+        tacticalAgeWindow,
+        forgottenAgeWindow
+      }
     };
   }
 
-  analyzeToken(token, discoveryMeta = {}) {
-    const links = Array.isArray(token?.links) ? token.links : [];
-    const linksMap = this.buildLinksMap(links);
-    const socialCount = Object.values(linksMap).filter(Boolean).length;
+  buildTrapSignals(candidate = {}, liveToken = null) {
+    const baseline = candidate?.token || {};
+    const latest = liveToken || baseline;
+    const baselineLiquidity = safeNum(baseline?.liquidity, 0);
+    const latestLiquidity = safeNum(latest?.liquidity, baselineLiquidity);
+    const liqDropPct = baselineLiquidity > 0
+      ? ((baselineLiquidity - latestLiquidity) / Math.max(baselineLiquidity, 1)) * 100
+      : 0;
 
-    const txns = safeNum(token?.txnsH24, token?.txns, 0);
-    const liquidity = safeNum(token?.liquidity, 0);
-    const fdv = safeNum(token?.fdv, 0);
+    const removeUsd = safeNum(candidate?.gmgn?.recentRemoveUsd, safeNum(candidate?.discovery?.recentRemoveUsd, 0));
+    const removeFlag = Boolean(candidate?.gmgn?.hasRecentRemove || candidate?.discovery?.hasRecentRemove || candidate?.token?.hasRecentRemove);
+    const freshLargeRemove = removeFlag && (removeUsd >= 5000 || removeUsd >= baselineLiquidity * 0.2);
+    const lowLiquidity = latestLiquidity < 8000;
+    const microLiquidity = latestLiquidity < 1500;
+    const liquidityCollapse = baselineLiquidity >= 15000 && latestLiquidity <= baselineLiquidity * 0.25;
+    const extremeFdvToLiq = latestLiquidity > 0 && safeNum(latest?.fdv, safeNum(baseline?.fdv, 0)) / Math.max(latestLiquidity, 1) > 35;
+    const suspiciousCollapse = liqDropPct >= 55 && extremeFdvToLiq;
 
-    const buysH24 = safeNum(token?.buys, 0);
-    const sellsH24 = safeNum(token?.sells, 0);
-    const buysH1 = safeNum(token?.buysH1, 0);
-    const sellsH1 = safeNum(token?.sellsH1, 0);
-    const buysM5 = safeNum(token?.buysM5, 0);
-    const sellsM5 = safeNum(token?.sellsM5, 0);
+    const reasons = [];
+    if (freshLargeRemove) reasons.push('recent large liquidity remove detected');
+    if (microLiquidity) reasons.push('live liquidity is near zero');
+    else if (lowLiquidity) reasons.push('live liquidity too low');
+    if (liquidityCollapse) reasons.push('live liquidity collapsed versus discovery snapshot');
+    if (suspiciousCollapse) reasons.push('fdv/liquidity profile collapsed into trap shape');
 
-    const buyPressureH24 = buyPressurePct(buysH24, sellsH24);
-    const buyPressureH1 = buyPressurePct(buysH1, sellsH1);
-    const buyPressureM5 = buyPressurePct(buysM5, sellsM5);
+    const severityScore =
+      (freshLargeRemove ? 45 : 0) +
+      (microLiquidity ? 40 : 0) +
+      (lowLiquidity ? 20 : 0) +
+      (liquidityCollapse ? 30 : 0) +
+      (suspiciousCollapse ? 20 : 0);
 
-    const priceDeltaPct = safeNum(token?.priceChangeH1, 0);
-    const narrativeText = shortText(token?.description || "", 240);
-    const narrativeVerdict = narrativeText || socialCount >= 2 ? "good" : "weak";
-    const fdvLiquidityRatio = liquidity > 0 && fdv > 0 ? fdv / Math.max(liquidity, 1) : 4;
-    const proxyConcentration = Math.round(Math.min(65, Math.max(18, fdvLiquidityRatio * 2)));
-
-    const rugRisk = Math.max(
-      5,
-      Math.min(
-        85,
-        Math.round(
-          (liquidity < 8000 ? 18 : 8) +
-          (socialCount === 0 ? 12 : 0) +
-          (fdv > liquidity * 20 ? 12 : 0) +
-          (safeNum(token?.volumeH24, token?.volume, 0) < 5000 ? 8 : 0)
-        )
-      )
-    );
-
-    const corpseScore = Math.max(
-      0,
-      Math.min(
-        100,
-        Math.round(
-          (safeNum(token?.volumeH24, token?.volume, 0) < 3000 ? 25 : 5) +
-          (txns < 25 ? 20 : 0) +
-          (buyPressureH24 < 45 ? 10 : 0)
-        )
-      )
-    );
-
-    const isCorpse = corpseScore >= 70;
-    const falseBounceRejected = buyPressureH24 < 42 && txns < 40 && safeNum(token?.volumeH24, token?.volume, 0) < 4000;
-    const distributionScore = Math.max(0, Math.min(100, Math.round(proxyConcentration / 2)));
-    const accumulationScore = buyPressureH1 >= 56 ? 18 : buyPressureH24 >= 52 ? 10 : 0;
-    const absorptionScore = safeNum(token?.txnsH1, 0) >= 80 && safeNum(token?.volumeH1, 0) >= 10000 ? 14 : safeNum(token?.txnsH1, 0) >= 40 ? 8 : 0;
-    const botActivity = 0;
-
-    let developerVerdict = "Neutral";
-    if (rugRisk >= 65 || (socialCount === 0 && liquidity < 8000)) developerVerdict = "Bad";
-    else if (rugRisk >= 45 || (socialCount === 0 && liquidity < 12000)) developerVerdict = "Risky";
-
-    const discovery = this.buildDiscoverySignals(token, discoveryMeta?.gmgn || {});
-    const migration = this.buildMigrationSignals(token, { socialCount, buyPressureH24, priceDeltaPct });
-    const baseScore = this.computeBaseScore(token, {
-      socialCount,
-      buyPressureH24,
-      buyPressureH1,
-      buyPressureM5,
-      gmgnDiscoveryScore: safeNum(discoveryMeta?.gmgn?.discoveryScore, 0)
-    });
-
-    const scalp = this.buildScalpSignals(token, {
-      socialCount,
-      rugRisk,
-      developerVerdict,
-      pairAgeMin: migration?.pairAgeMin,
-      migration,
-      buyPressureH24,
-      buyPressureH1,
-      buyPressureM5,
-      discovery
-    });
-
-    let score = baseScore;
-    if (scalp.allow) score = Math.max(score, Math.round(baseScore * 0.55 + safeNum(scalp.score, 0) * 0.45));
-    if (migration.passes) score = Math.max(score, Math.round(score * 0.7 + safeNum(migration?.survivorScore, 0) * 0.3));
-    score = clamp(score, 0, 99);
-
-    const reasons = [
-      "solana chain only",
-      liquidity >= 15000 ? "liquidity acceptable" : "liquidity moderate",
-      socialCount > 0 ? "socials detected" : "no socials",
-      buyPressureH24 >= 50 ? "buy pressure acceptable" : "buy pressure weak"
-    ];
-    if (migration.passes) reasons.push("post-migration survivor profile");
-    if (scalp.allow) reasons.push(`scalp mode ${scalp.primaryMode}`);
-    if (discovery.impulsePass) reasons.push(`gmgn discovery ${discovery.primary}`);
+    const reject = freshLargeRemove || microLiquidity || lowLiquidity || liquidityCollapse || suspiciousCollapse;
 
     return {
-      token,
-      score,
-      strategy: "solana_only",
-      rug: { risk: rugRisk },
-      corpse: { score: corpseScore, isCorpse },
-      falseBounce: { rejected: falseBounceRejected },
-      developer: { verdict: developerVerdict },
-      wallet: { concentration: proxyConcentration },
-      holders: { concentration: null },
-      bots: { botActivity },
-      distribution: { score: distributionScore },
-      accumulation: { score: accumulationScore },
-      absorption: { score: absorptionScore },
-      delta: {
-        priceDeltaPct,
-        priceM5Pct: safeNum(token?.priceChangeM5, 0),
-        priceH1Pct: safeNum(token?.priceChangeH1, 0),
-        priceH6Pct: safeNum(token?.priceChangeH6, 0),
-        priceH24Pct: safeNum(token?.priceChangeH24, 0),
-        volumeDeltaPct: 0,
-        txnsDeltaPct: 0,
-        liquidityDeltaPct: 0,
-        buyPressureDelta: safeNum(buyPressureM5 - buyPressureH1, 0)
-      },
-      socials: { socialCount, links: linksMap },
-      narrative: { verdict: narrativeVerdict, summary: narrativeText || "No narrative available." },
-      mechanics: { tokenType: "meme", rewardModel: "None" },
-      migration,
-      scalp,
-      reversal: null,
-      discovery,
-      gmgn: discoveryMeta?.gmgn || null,
-      dexPaid: false,
-      holderAccumulation: null,
-      copytradeMeta: {
-        followDelaySec: 0,
-        priceExtensionPct: Math.max(0, priceDeltaPct)
-      },
-      reasons,
-      discoverySource: asText(discoveryMeta?.discoverySource, token?.sourceFlags?.gmgn ? "gmgn_first" : "dex_search"),
-      discoveryPrimary: asText(discoveryMeta?.discoveryPrimary, token?.sourceFlags?.gmgn ? "gmgn" : "dex")
+      reject,
+      severity: severityScore >= 70 ? 'high' : severityScore >= 40 ? 'medium' : 'low',
+      lowLiquidity,
+      microLiquidity,
+      liquidityCollapse,
+      freshLargeRemove,
+      baselineLiquidity,
+      latestLiquidity,
+      liqDropPct,
+      removeUsd,
+      reasons
     };
   }
 
-  analyzePair(pair, discoveryMeta = {}) {
-    const token = this.toTokenFromPair(pair);
-    const analyzed = this.analyzeToken(token, discoveryMeta);
-    const boostsActive = safeNum(pair?.boosts?.active, 0);
-    analyzed.dexPaid = boostsActive > 0;
-    if (boostsActive > 0) {
-      analyzed.reasons.push(`dex boost active ${boostsActive}`);
-      analyzed.score = clamp(safeNum(analyzed.score, 0) + 2, 0, 99);
-    }
-    return analyzed;
+  buildRunnerSignals(candidate = {}) {
+    const token = candidate?.token || {};
+    const migration = candidate?.migration || {};
+    const reversal = candidate?.reversal || {};
+    const trap = candidate?.trap || {};
+    const scalpMetrics = candidate?.scalp?.metrics || {};
+
+    const priceM5 = safeNum(candidate?.delta?.priceM5Pct, safeNum(token?.priceChangeM5, 0));
+    const priceH1 = safeNum(candidate?.delta?.priceH1Pct, safeNum(token?.priceChangeH1, 0));
+    const priceH6 = safeNum(candidate?.delta?.priceH6Pct, safeNum(token?.priceChangeH6, 0));
+    const priceH24 = safeNum(candidate?.delta?.priceH24Pct, safeNum(token?.priceChangeH24, 0));
+    const buyPressureH1 = safeNum(scalpMetrics?.buyPressureH1, buyPressurePct(token?.buysH1, token?.sellsH1));
+    const buyPressureH24 = safeNum(scalpMetrics?.buyPressureH24, buyPressurePct(token?.buys, token?.sells));
+    const liquidity = safeNum(token?.liquidity, 0);
+    const volumeH1 = safeNum(token?.volumeH1, 0);
+    const txnsH1 = safeNum(token?.txnsH1, 0);
+
+    const pairAgeMin = safeNum(migration?.pairAgeMin, 0);
+    const strongContinuation = priceH1 >= 18 || priceH6 >= 55 || priceH24 >= 120;
+    const demandStrong = buyPressureH1 >= 52 && buyPressureH24 >= 50;
+    const healthyPullback = priceM5 > -4 && priceM5 <= 12;
+    const liquidityAlive = liquidity >= 12000 && volumeH1 >= 2500 && txnsH1 >= 30;
+    const olderBaseCandidate = pairAgeMin >= 3 * 24 * 60;
+    const postMigrationContinuation = migration?.passes && pairAgeMin <= 6 * 60 && !reversal?.flushDetected && strongContinuation && demandStrong && healthyPullback;
+    const classicRunner = !olderBaseCandidate && safeNum(candidate?.score, 0) >= 84 && priceH1 > 0 && safeNum(candidate?.absorption?.score, 0) >= 8 && strongContinuation && healthyPullback && demandStrong;
+
+    let score = 0;
+    if (strongContinuation) score += 24;
+    if (demandStrong) score += 18;
+    if (healthyPullback) score += 14;
+    if (liquidityAlive) score += 12;
+    if (postMigrationContinuation) score += 20;
+    if (classicRunner) score += 12;
+    if (priceM5 > 14) score -= 10;
+    if (trap?.reject) score -= 40;
+
+    const allow =
+      !trap?.reject &&
+      !olderBaseCandidate &&
+      safeNum(candidate?.rug?.risk, 0) < 65 &&
+      asText(candidate?.developer?.verdict, 'Neutral') !== 'Bad' &&
+      !candidate?.corpse?.isCorpse &&
+      (postMigrationContinuation || classicRunner) &&
+      score >= 62;
+
+    return {
+      allow,
+      score: clamp(Math.round(score), 0, 99),
+      primaryMode: postMigrationContinuation ? 'migration_continuation_runner' : 'runner_continuation',
+      strongContinuation,
+      demandStrong,
+      healthyPullback,
+      postMigrationContinuation
+    };
   }
 
   recomputeCompositeScore(candidate = {}) {
@@ -826,61 +866,45 @@ export default class CandidateService {
     if (candidate?.reversal?.allow) {
       score = Math.max(score, Math.round(score * 0.55 + safeNum(candidate?.reversal?.score, 0) * 0.45));
     }
+    if (candidate?.runner?.allow) {
+      score = Math.max(score, Math.round(score * 0.55 + safeNum(candidate?.runner?.score, 0) * 0.45));
+    }
     if (candidate?.migration?.passes) {
       score = Math.max(score, Math.round(score * 0.7 + safeNum(candidate?.migration?.survivorScore, 0) * 0.3));
-    }
-    if (candidate?.discovery?.impulsePass) {
-      score = Math.max(score, Math.round(score * 0.78 + safeNum(candidate?.discovery?.attentionScore, 0) * 0.22));
     }
     candidate.score = clamp(score, 0, 99);
     return candidate;
   }
 
   async enrichCandidateWithHolderLive(candidate = {}) {
-    if (!candidate || !this.holderAccumulationEngine) {
-      candidate.reversal = this.buildReversalSignals(candidate);
-      return this.recomputeCompositeScore(candidate);
+    if (!candidate) return candidate;
+
+    if (this.holderAccumulationEngine) {
+      try {
+        const holderAccumulation = await this.holderAccumulationEngine.trackCandidate(candidate);
+        candidate.holderAccumulation = holderAccumulation || null;
+      } catch (error) {
+        this.logger.log('holder enrich failed:', error.message);
+      }
     }
 
-    try {
-      const holderAccumulation = await this.holderAccumulationEngine.trackCandidate(candidate);
-      candidate.holderAccumulation = holderAccumulation || null;
-    } catch (error) {
-      this.logger.log("holder enrich failed:", error.message);
+    const ca = asText(candidate?.token?.ca);
+    if (ca) {
+      try {
+        const livePair = await this.fetchDexTokenByCA(ca);
+        if (livePair) {
+          const liveToken = this.toTokenFromPair(livePair);
+          this.applyLiveTokenSnapshot(candidate, liveToken);
+        }
+      } catch (error) {
+        this.logger.log('live dex refresh failed:', error.message);
+      }
     }
 
+    candidate.trap = this.buildTrapSignals(candidate, candidate?.liveToken || null);
     candidate.reversal = this.buildReversalSignals(candidate);
+    candidate.runner = this.buildRunnerSignals(candidate);
     return this.recomputeCompositeScore(candidate);
-  }
-
-  buildScalpPlan(candidate = {}) {
-    const scalp = candidate?.scalp || {};
-    const mode = asText(scalp?.primaryMode, "");
-
-    const base = {
-      strategyKey: "scalp",
-      thesis: "GMGN-first volume/rebound scalp on Solana",
-      plannedHoldMs: 6 * 60 * 1000,
-      stopLossPct: 3.2,
-      takeProfitPct: 4.8,
-      runnerTargetsPct: [],
-      signalScore: safeNum(scalp?.score, safeNum(candidate?.score, 0)),
-      expectedEdgePct: 5,
-      entryMode: "SCALED",
-      planName: "Scalp",
-      objective: "quick rebound capture"
-    };
-
-    if (mode === "hype_burst") {
-      return { ...base, thesis: "High-volume attention burst scalp", plannedHoldMs: 5 * 60 * 1000, stopLossPct: 3, takeProfitPct: 4.5, expectedEdgePct: 5.5, planName: "Hype Burst Scalp", objective: "attention burst" };
-    }
-    if (mode === "migration_rebound") {
-      return { ...base, thesis: "Post-migration flush rebound scalp", plannedHoldMs: 7 * 60 * 1000, stopLossPct: 3.4, takeProfitPct: 5.2, expectedEdgePct: 6, entryMode: "PROBE", planName: "Migration Rebound Scalp", objective: "post-migration rebound" };
-    }
-    if (mode === "volatility_reclaim") {
-      return { ...base, thesis: "Fresh volatility reclaim scalp", plannedHoldMs: 6 * 60 * 1000, stopLossPct: 3.2, takeProfitPct: 5, expectedEdgePct: 5.8, planName: "Volatility Reclaim Scalp", objective: "bottom reclaim" };
-    }
-    return base;
   }
 
   buildReversalPlan(candidate = {}) {
@@ -910,7 +934,61 @@ export default class CandidateService {
     return base;
   }
 
+  buildRunnerPlan(candidate = {}) {
+    const runner = candidate?.runner || {};
+    const mode = asText(runner?.primaryMode, 'runner_continuation');
+
+    const base = {
+      strategyKey: 'runner',
+      thesis: 'Strong Solana continuation runner',
+      plannedHoldMs: 4 * 60 * 60 * 1000,
+      stopLossPct: 7,
+      takeProfitPct: 24,
+      runnerTargetsPct: [12, 22, 35],
+      signalScore: safeNum(runner?.score, safeNum(candidate?.score, 0)),
+      expectedEdgePct: 18,
+      entryMode: 'SCALED',
+      planName: 'Runner',
+      objective: 'trend expansion'
+    };
+
+    if (mode === 'migration_continuation_runner') {
+      return {
+        ...base,
+        thesis: 'Post-migration continuation runner',
+        plannedHoldMs: 3 * 60 * 60 * 1000,
+        stopLossPct: 6.5,
+        takeProfitPct: 22,
+        runnerTargetsPct: [10, 18, 30],
+        expectedEdgePct: 17,
+        planName: 'Migration Continuation Runner',
+        objective: 'post-migration continuation'
+      };
+    }
+
+    return base;
+  }
+
+  getPrimaryCategory(candidate = {}, plans = []) {
+    const keys = new Set((plans || []).map((p) => asText(p?.strategyKey)));
+    const reversal = candidate?.reversal || {};
+    const runner = candidate?.runner || {};
+
+    if (candidate?.trap?.reject) return 'TRAP';
+    if (reversal?.allow && (reversal?.olderBaseCandidate || reversal?.warehouseBaseCandidate || reversal?.forgottenRevivalCandidate || reversal?.storageCohortReversal || reversal?.bottomPack)) return 'REVERSAL';
+    if (keys.has('runner') || runner?.allow) return 'RUNNER';
+    if (keys.has('migration_survivor') || candidate?.migration?.passes) return 'MIGRATION_SURVIVOR';
+    if (keys.has('reversal') || reversal?.allow) return 'REVERSAL';
+    if (keys.has('scalp') || candidate?.scalp?.allow) return 'SCALP';
+    if (keys.has('copytrade')) return 'COPYTRADE';
+    return 'WATCH';
+  }
+
   buildPlans(candidate, strategyScope = "all") {
+    if (candidate?.trap?.reject) {
+      return [];
+    }
+
     const plans = [];
     const score = safeNum(candidate?.score, 0);
 
@@ -930,8 +1008,17 @@ export default class CandidateService {
       });
     }
 
-    if (candidate?.scalp?.allow) plans.push(this.buildScalpPlan(candidate));
-    if (candidate?.reversal?.allow) plans.push(this.buildReversalPlan(candidate));
+    if (candidate?.scalp?.allow) {
+      plans.push(this.buildScalpPlan(candidate));
+    }
+
+    if (candidate?.reversal?.allow) {
+      plans.push(this.buildReversalPlan(candidate));
+    }
+
+    if (candidate?.runner?.allow) {
+      plans.push(this.buildRunnerPlan(candidate));
+    }
 
     if (candidate?.migration?.passes) {
       plans.push({
@@ -949,22 +1036,6 @@ export default class CandidateService {
       });
     }
 
-    if (score >= 84 && safeNum(candidate?.delta?.priceH1Pct, 0) > 0 && safeNum(candidate?.absorption?.score, 0) >= 8) {
-      plans.push({
-        strategyKey: "runner",
-        thesis: "Strong Solana runner",
-        plannedHoldMs: 4 * 60 * 60 * 1000,
-        stopLossPct: 7,
-        takeProfitPct: 24,
-        runnerTargetsPct: [12, 22, 35],
-        signalScore: score,
-        expectedEdgePct: 18,
-        entryMode: "SCALED",
-        planName: "Runner",
-        objective: "trend expansion"
-      });
-    }
-
     if (strategyScope && strategyScope !== "all") {
       return plans.filter((p) => p.strategyKey === strategyScope);
     }
@@ -974,81 +1045,69 @@ export default class CandidateService {
 
   getRelevantRank(candidate, strategyScope = "all") {
     if (!candidate) return 0;
+
     if (strategyScope === "scalp") {
-      return candidate?.scalp?.allow ? safeNum(candidate?.scalp?.score, 0) + safeNum(candidate?.discovery?.attentionScore, 0) * 0.25 : 0;
+      return candidate?.scalp?.allow
+        ? safeNum(candidate?.scalp?.score, 0) + safeNum(candidate?.discovery?.attentionScore, 0) * 0.2
+        : 0;
     }
+
     if (strategyScope === "reversal") {
-      return candidate?.reversal?.allow ? safeNum(candidate?.reversal?.score, 0) + safeNum(candidate?.holderAccumulation?.netControlPct, 0) * 0.4 : 0;
+      const reversal = candidate?.reversal || {};
+      const holder = candidate?.holderAccumulation || {};
+      const tacticalMcBonus = reversal?.metrics?.tacticalMcWindow ? 10 : reversal?.metrics?.marketCap >= 5000 && reversal?.metrics?.marketCap <= 90000 ? 4 : -6;
+      const ageBonus = reversal?.metrics?.tacticalAgeWindow ? 8 : reversal?.olderBaseCandidate ? 5 : 0;
+      const storageBonus = safeNum(holder?.freshWalletBuyCount, 0) * 0.6 + safeNum(holder?.reloadCount, 0) * 1.2 + safeNum(holder?.bottomTouches, 0) * 2;
+      return reversal?.allow
+        ? safeNum(reversal?.score, 0) + tacticalMcBonus + ageBonus + storageBonus + safeNum(holder?.netControlPct, 0) * 0.6
+        : 0;
     }
+
     if (strategyScope === "migration_survivor") {
-      return candidate?.migration?.passes ? safeNum(candidate?.migration?.survivorScore, 0) : 0;
+      return candidate?.migration?.passes && !candidate?.trap?.reject
+        ? safeNum(candidate?.migration?.survivorScore, 0)
+        : 0;
     }
+
     if (strategyScope === "runner") {
-      return safeNum(candidate?.score, 0) + Math.max(0, safeNum(candidate?.delta?.priceH1Pct, 0));
+      return candidate?.runner?.allow
+        ? safeNum(candidate?.runner?.score, 0) + safeNum(candidate?.discovery?.attentionScore, 0) * 0.35
+        : 0;
     }
+
     if (strategyScope === "copytrade") {
       return safeNum(candidate?.score, 0);
     }
-    return Math.max(safeNum(candidate?.score, 0), safeNum(candidate?.migration?.survivorScore, 0), safeNum(candidate?.scalp?.score, 0), safeNum(candidate?.reversal?.score, 0));
-  }
 
-  async buildAnalyzedFromGMGN() {
-    if (!this.gmgnDiscovery) return [];
-    const discoveryRows = await this.gmgnDiscovery.getDiscoveryCandidates();
-    if (!discoveryRows.length) return [];
-
-    const out = [];
-    const enrichRows = discoveryRows.slice(0, this.dexEnrichLimit);
-
-    for (const row of enrichRows) {
-      const ca = asText(row?.token?.ca);
-      if (!ca) continue;
-      const dexPair = await this.fetchDexTokenByCA(ca);
-      if (dexPair) {
-        const enrichedToken = this.mergeTokenData(this.toTokenFromDiscovery(row), this.toTokenFromPair(dexPair));
-        const analyzed = this.analyzeToken(enrichedToken, {
-          gmgn: row?.gmgn || {},
-          discoverySource: row?.discoverySource || "gmgn_first",
-          discoveryPrimary: row?.discoveryPrimary || "gmgn"
-        });
-        analyzed.dexPaid = safeNum(dexPair?.boosts?.active, 0) > 0;
-        out.push(analyzed);
-      } else {
-        const analyzed = this.analyzeToken(this.toTokenFromDiscovery(row), {
-          gmgn: row?.gmgn || {},
-          discoverySource: row?.discoverySource || "gmgn_first",
-          discoveryPrimary: row?.discoveryPrimary || "gmgn"
-        });
-        out.push(analyzed);
-      }
-    }
-
-    return out;
-  }
-
-  async buildAnalyzedFromDexFallback() {
-    const chunks = await Promise.all(this.searchQueries.map((q) => this.fetchDexSearch(q)));
-    const pairs = dedupeByCA(chunks.flat()).filter((p) => isSolanaChain(p?.chainId));
-    return pairs.slice(0, 60).map((pair) => this.analyzePair(pair, { discoverySource: "dex_search", discoveryPrimary: "dex:search" }));
+    return Math.max(
+      safeNum(candidate?.score, 0),
+      safeNum(candidate?.migration?.survivorScore, 0),
+      safeNum(candidate?.scalp?.score, 0),
+      safeNum(candidate?.reversal?.score, 0),
+      safeNum(candidate?.runner?.score, 0)
+    );
   }
 
   async fetchMarketCandidates() {
-    let candidates = await this.buildAnalyzedFromGMGN();
-    if (candidates.length < 8) {
-      const fallback = await this.buildAnalyzedFromDexFallback();
-      const merged = new Map();
-      for (const row of [...candidates, ...fallback]) {
-        const ca = asText(row?.token?.ca);
-        if (!ca) continue;
-        const prev = merged.get(ca);
-        if (!prev || safeNum(row?.score, 0) > safeNum(prev?.score, 0)) merged.set(ca, row);
-      }
-      candidates = [...merged.values()];
+    const gmgnCandidates = await this.buildAnalyzedFromGMGN();
+    const dexFallback = await this.buildAnalyzedFromDexFallback();
+
+    const merged = new Map();
+    for (const row of [...gmgnCandidates, ...dexFallback]) {
+      const ca = asText(row?.token?.ca);
+      if (!ca) continue;
+      const prev = merged.get(ca);
+      if (!prev || safeNum(row?.score, 0) > safeNum(prev?.score, 0)) merged.set(ca, row);
     }
 
-    const preliminary = candidates
+    const preliminary = [...merged.values()]
       .filter((candidate) => isSolanaChain(candidate?.token?.chainId))
-      .filter((candidate) => safeNum(candidate?.score, 0) >= 60 || Boolean(candidate?.migration?.passes) || Boolean(candidate?.scalp?.allow) || Boolean(candidate?.discovery?.impulsePass))
+      .filter((candidate) => {
+        const fdv = safeNum(candidate?.token?.fdv, 0);
+        const pairAgeHours = safeNum(candidate?.migration?.pairAgeMin, 0) / 60;
+        const reversalWatch = (fdv >= 5000 && fdv <= 90000 && pairAgeHours <= 24 * 10) || safeNum(candidate?.accumulation?.score, 0) >= 8 || safeNum(candidate?.absorption?.score, 0) >= 8;
+        return safeNum(candidate?.score, 0) >= 56 || Boolean(candidate?.migration?.passes) || Boolean(candidate?.scalp?.allow) || Boolean(candidate?.discovery?.impulsePass) || reversalWatch;
+      })
       .sort((a, b) => this.getRelevantRank(b, "all") - this.getRelevantRank(a, "all"));
 
     const topForHolder = preliminary.slice(0, this.maxHolderEnrichPerPass);
@@ -1056,7 +1115,9 @@ export default class CandidateService {
       await this.enrichCandidateWithHolderLive(candidate);
     }
     for (const candidate of preliminary.slice(this.maxHolderEnrichPerPass)) {
+      candidate.trap = this.buildTrapSignals(candidate, candidate?.liveToken || null);
       candidate.reversal = this.buildReversalSignals(candidate);
+      candidate.runner = this.buildRunnerSignals(candidate);
       this.recomputeCompositeScore(candidate);
     }
 
@@ -1070,13 +1131,34 @@ export default class CandidateService {
     const recentCA = new Set((recentlyTraded || []).map((x) => asText(x)).filter(Boolean));
     const strategyScope = runtime?.strategyScope || "all";
 
-    const ranked = candidates
+    let ranked = candidates
       .filter((row) => {
         const ca = asText(row?.token?.ca);
         if (!ca) return false;
         if (!isSolanaChain(row?.token?.chainId)) return false;
         if (openCA.has(ca)) return false;
         if (recentCA.has(ca)) return false;
+        return true;
+      })
+      .sort((a, b) => this.getRelevantRank(b, strategyScope) - this.getRelevantRank(a, strategyScope));
+
+    const enrichCount = strategyScope === 'reversal'
+      ? Math.max(this.maxHolderEnrichPerPass, 40)
+      : Math.max(this.maxHolderEnrichPerPass, 12);
+
+    for (const candidate of ranked.slice(0, enrichCount)) {
+      await this.enrichCandidateWithHolderLive(candidate);
+    }
+    for (const candidate of ranked.slice(enrichCount)) {
+      candidate.trap = this.buildTrapSignals(candidate, candidate?.liveToken || null);
+      candidate.reversal = this.buildReversalSignals(candidate);
+      candidate.runner = this.buildRunnerSignals(candidate);
+      this.recomputeCompositeScore(candidate);
+    }
+
+    ranked = ranked
+      .filter((row) => !row?.trap?.reject)
+      .filter((row) => {
         const plans = this.buildPlans(row, strategyScope);
         return plans.length > 0;
       })
@@ -1097,14 +1179,19 @@ export default class CandidateService {
 
   buildHeroCaption(candidate) {
     const token = candidate?.token || {};
+    const category = this.getPrimaryCategory(candidate, this.buildPlans(candidate, 'all'));
     return `🧭 <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
+category: ${escapeHtml(category)}
 source: ${escapeHtml(candidate?.discoverySource || "-")}
 primary: ${escapeHtml(candidate?.discoveryPrimary || "-")}
 score: ${safeNum(candidate?.score, 0)}
 reversal score: ${safeNum(candidate?.reversal?.score, 0)}
 reversal mode: ${escapeHtml(candidate?.reversal?.primaryMode || "-")}
+runner score: ${safeNum(candidate?.runner?.score, 0)}
+runner mode: ${escapeHtml(candidate?.runner?.primaryMode || "-")}
 scalp score: ${safeNum(candidate?.scalp?.score, 0)}
 scalp mode: ${escapeHtml(candidate?.scalp?.primaryMode || "-")}
+trap: ${candidate?.trap?.reject ? 'YES' : 'no'}
 gmgn attention: ${safeNum(candidate?.discovery?.attentionScore, 0)}
 price: ${safeNum(token.price, 0)}
 liquidity: ${safeNum(token.liquidity, 0)}
@@ -1121,46 +1208,59 @@ url: ${escapeHtml(token.url || "-")}`;
   buildAnalysisText(candidate, plans = []) {
     const token = candidate?.token || {};
     const socials = candidate?.socials?.links || {};
-    const planLine = plans.map((p) => p.strategyKey).join(", ") || "none";
+    const planLine = plans.length
+      ? plans.map((p) => String(p?.strategyKey || '').toUpperCase()).join(', ')
+      : 'none';
     const migration = candidate?.migration || {};
     const scalp = candidate?.scalp || {};
     const scalpMetrics = scalp?.metrics || {};
     const holder = candidate?.holderAccumulation || {};
     const reversal = candidate?.reversal || {};
     const discovery = candidate?.discovery || {};
+    const runner = candidate?.runner || {};
+    const trap = candidate?.trap || {};
+    const category = this.getPrimaryCategory(candidate, plans);
 
-    return `🔎 <b>ANALYSIS</b>
+    return `🔎 <b>ANALYSIS • CATEGORY: ${escapeHtml(category)}</b>
 
-Token: ${escapeHtml(token.name || token.symbol || "UNKNOWN")}
-CA: <code>${escapeHtml(token.ca || "-")}</code>
-Chain: ${escapeHtml(token.chainId || "-")}
-Score: ${safeNum(candidate?.score, 0)}
+<b>Token:</b> <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
+📋 <b>CONTRACT</b>
+<code>${escapeHtml(token.ca || "-")}</code>
+<b>Chain:</b> ${escapeHtml(token.chainId || "-")}
+<b>Score:</b> ${safeNum(candidate?.score, 0)}
 
-Discovery source: ${escapeHtml(candidate?.discoverySource || "-")}
-Discovery primary: ${escapeHtml(candidate?.discoveryPrimary || "-")}
-GMGN attention: ${safeNum(discovery?.attentionScore, 0)}
-GMGN smart money: ${safeNum(discovery?.smartMoney, 0)}
-GMGN holder count: ${safeNum(discovery?.holderCount, 0)}
-Volume spike m5/h1: ${safeNum(discovery?.volumeSpike, 0).toFixed(2)}
-Txns spike m5/h1: ${safeNum(discovery?.txnsSpike, 0).toFixed(2)}
+<b>Discovery source:</b> ${escapeHtml(candidate?.discoverySource || "-")}
+<b>Discovery primary:</b> ${escapeHtml(candidate?.discoveryPrimary || "-")}
+<b>GMGN attention:</b> ${safeNum(discovery?.attentionScore, 0)}
+<b>GMGN smart money:</b> ${safeNum(discovery?.smartMoney, 0)}
+<b>GMGN holder count:</b> ${safeNum(discovery?.holderCount, 0)}
+<b>Volume spike m5/h1:</b> ${safeNum(discovery?.volumeSpike, 0).toFixed(2)}
+<b>Txns spike m5/h1:</b> ${safeNum(discovery?.txnsSpike, 0).toFixed(2)}
 
-Price: ${safeNum(token.price, 0)}
-Liquidity: ${safeNum(token.liquidity, 0)}
-Volume 1h: ${safeNum(token.volumeH1, 0)}
-Volume 24h: ${safeNum(token.volumeH24, token.volume, 0)}
-Txns 1h: ${safeNum(token.txnsH1, 0)}
-Txns 24h: ${safeNum(token.txnsH24, token.txns, 0)}
-FDV: ${safeNum(token.fdv, 0)}
+<b>Price:</b> ${safeNum(token.price, 0)}
+<b>Liquidity:</b> ${safeNum(token.liquidity, 0)}
+<b>Volume 1h:</b> ${safeNum(token.volumeH1, 0)}
+<b>Volume 24h:</b> ${safeNum(token.volumeH24, token.volume, 0)}
+<b>Txns 1h:</b> ${safeNum(token.txnsH1, 0)}
+<b>Txns 24h:</b> ${safeNum(token.txnsH24, token.txns, 0)}
+<b>FDV:</b> ${safeNum(token.fdv, 0)}
 
-⚠️ Rug: ${safeNum(candidate?.rug?.risk, 0)}
-🧟 Corpse: ${safeNum(candidate?.corpse?.score, 0)}
-👥 Concentration: ${safeNum(candidate?.wallet?.concentration, 0)}
-🤖 Bot Activity: ${safeNum(candidate?.bots?.botActivity, 0)}
-🧠 Narrative: ${escapeHtml(candidate?.narrative?.verdict || "-")}
-🌐 Socials: ${safeNum(candidate?.socials?.socialCount, 0)}
-💵 Dex Paid: ${candidate?.dexPaid ? "yes" : "no"}
+⚠️ <b>Rug:</b> ${safeNum(candidate?.rug?.risk, 0)}
+🧟 <b>Corpse:</b> ${safeNum(candidate?.corpse?.score, 0)}
+👥 <b>Concentration:</b> ${safeNum(candidate?.wallet?.concentration, 0)}
+🤖 <b>Bot Activity:</b> ${safeNum(candidate?.bots?.botActivity, 0)}
+🧠 <b>Narrative:</b> ${escapeHtml(candidate?.narrative?.verdict || "-")}
+🌐 <b>Socials:</b> ${safeNum(candidate?.socials?.socialCount, 0)}
+💵 <b>Dex Paid:</b> ${candidate?.dexPaid ? "yes" : "no"}
 
-🫧 Scalp:
+🧨 <b>Trap</b>
+reject: ${trap?.reject ? 'yes' : 'no'}
+severity: ${escapeHtml(trap?.severity || '-')}
+live liquidity: ${safeNum(trap?.latestLiquidity, safeNum(token.liquidity, 0))}
+liquidity drop: ${safeNum(trap?.liqDropPct, 0).toFixed(1)}%
+reason: ${escapeHtml((trap?.reasons || []).join(' | ') || '-')}
+
+🫧 <b>Scalp</b>
 allow: ${scalp?.allow ? "yes" : "no"}
 score: ${safeNum(scalp?.score, 0)}
 mode: ${escapeHtml(scalp?.primaryMode || "-")}
@@ -1169,14 +1269,22 @@ buy pressure m5/h1/h24: ${safeNum(scalpMetrics?.buyPressureM5, 0).toFixed(1)} / 
 price m5/h1/h6/h24: ${safeNum(scalpMetrics?.priceM5, 0).toFixed(1)} / ${safeNum(scalpMetrics?.priceH1, 0).toFixed(1)} / ${safeNum(scalpMetrics?.priceH6, 0).toFixed(1)} / ${safeNum(scalpMetrics?.priceH24, 0).toFixed(1)}
 vol/liq m5/h1/h24: ${safeNum(scalpMetrics?.volToLiqM5, 0).toFixed(1)} / ${safeNum(scalpMetrics?.volToLiqH1, 0).toFixed(1)} / ${safeNum(scalpMetrics?.volToLiqH24, 0).toFixed(1)}
 
-🔁 Reversal:
+🏃 <b>Runner</b>
+allow: ${runner?.allow ? 'yes' : 'no'}
+score: ${safeNum(runner?.score, 0)}
+mode: ${escapeHtml(runner?.primaryMode || '-')}
+continuation/demand/pullback: ${runner?.strongContinuation ? 'yes' : 'no'} / ${runner?.demandStrong ? 'yes' : 'no'} / ${runner?.healthyPullback ? 'yes' : 'no'}
+
+🔁 <b>Reversal</b>
 allow: ${reversal?.allow ? "yes" : "no"}
 score: ${safeNum(reversal?.score, 0)}
 mode: ${escapeHtml(reversal?.primaryMode || "-")}
 passed: ${escapeHtml((reversal?.passedModes || []).join(", ") || "-")}
 flush/base/exhaust/reclaim: ${reversal?.flushDetected ? "yes" : "no"} / ${reversal?.baseForming ? "yes" : "no"} / ${reversal?.sellerExhaustion ? "yes" : "no"} / ${reversal?.reclaimPressure ? "yes" : "no"}
+warehouse/faded-old: ${reversal?.warehouseBaseCandidate ? "yes" : "no"} / ${reversal?.forgottenRevivalCandidate ? "yes" : "no"}
+mc window / age window: ${reversal?.metrics?.tacticalMcWindow ? "yes" : "no"} / ${reversal?.metrics?.tacticalAgeWindow ? "yes" : "no"}
 
-🧺 Holder accumulation:
+🧺 <b>Holder accumulation</b>
 tracked wallets: ${safeNum(holder?.trackedWallets, 0)}
 fresh wallet cohort: ${safeNum(holder?.freshWalletBuyCount, 0)}
 retention 30m: ${safeNum(holder?.retention30mPct, 0).toFixed(1)}%
@@ -1189,20 +1297,20 @@ bottom touches: ${safeNum(holder?.bottomTouches, 0)}
 quiet accumulation pass: ${holder?.quietAccumulationPass ? "yes" : "no"}
 bottom-pack reversal pass: ${holder?.bottomPackReversalPass ? "yes" : "no"}
 
-🌊 Migration:
+🌊 <b>Migration</b>
 pair age min: ${safeNum(migration?.pairAgeMin, 0).toFixed(1)}
 survivor score: ${safeNum(migration?.survivorScore, 0)}
 liq/mcap %: ${safeNum(migration?.liqToMcapPct, 0).toFixed(1)}
 vol/liq %: ${safeNum(migration?.volToLiqPct, 0).toFixed(1)}
 passes: ${migration?.passes ? "yes" : "no"}
 
-Narrative summary:
+<b>Narrative summary:</b>
 ${escapeHtml(candidate?.narrative?.summary || "No narrative available.")}
 
-Plans:
+<b>Plans:</b>
 ${escapeHtml(planLine)}
 
-Links:
+<b>Links:</b>
 twitter: ${escapeHtml(socials.twitter || "-")}
 telegram: ${escapeHtml(socials.telegram || "-")}
 website: ${escapeHtml(socials.website || "-")}`;

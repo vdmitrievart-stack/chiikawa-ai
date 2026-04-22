@@ -5,7 +5,9 @@ import {
   resetPortfolio,
   setStrategyConfig,
   getClosedTrades,
-  hydratePortfolioSnapshot
+  hydratePortfolioSnapshot,
+  depositVirtualBalance as depositVirtualBalanceInPortfolio,
+  withdrawVirtualBalance as withdrawVirtualBalanceInPortfolio
 } from "../portfolio.js";
 
 import {
@@ -39,7 +41,6 @@ import CopytradeService from "./copytrade-service.js";
 import NotificationService from "./notification-service.js";
 import HolderAccumulationStore from "./holder-accumulation-store.js";
 import HolderAccumulationEngine from "./holder-accumulation-engine.js";
-import GMGNMarketDiscoveryService from "./gmgn-market-discovery-service.js";
 
 import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
 import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
@@ -101,7 +102,10 @@ function normalizeRestoredStrategyBudget(raw = {}) {
     reversal: safeNum(raw?.reversal, DEFAULT_STRATEGY_BUDGET.reversal),
     runner: safeNum(raw?.runner, DEFAULT_STRATEGY_BUDGET.runner),
     copytrade: safeNum(raw?.copytrade, DEFAULT_STRATEGY_BUDGET.copytrade),
-    migration_survivor: safeNum(raw?.migration_survivor, DEFAULT_STRATEGY_BUDGET.migration_survivor)
+    migration_survivor: safeNum(
+      raw?.migration_survivor,
+      DEFAULT_STRATEGY_BUDGET.migration_survivor
+    )
   };
 }
 
@@ -202,14 +206,9 @@ export default class TradingKernel {
       rpcUrl: process.env.SOLANA_RPC_URL
     });
 
-    this.gmgnDiscovery = new GMGNMarketDiscoveryService({
-      logger: this.logger
-    });
-
     this.candidateService = new CandidateService({
       logger: this.logger,
-      holderAccumulationEngine: this.holderAccumulationEngine,
-      gmgnDiscovery: this.gmgnDiscovery
+      holderAccumulationEngine: this.holderAccumulationEngine
     });
 
     this.positionService = new PositionService({
@@ -392,9 +391,30 @@ export default class TradingKernel {
     startRuntime(this.runtime, { mode, strategyScope, chatId, userId });
     this.previousReportEquity = null;
     this.syncPortfolioStrategyBudget();
-    resetPortfolio(this.startBalanceSol, getStrategyConfig());
+    this.startBalanceSol = safeNum(getPortfolio()?.startBalance, this.startBalanceSol);
+    this.runtime.activeConfig.startBalanceSol = this.startBalanceSol;
     void this.persistSnapshot();
     return this.runtime;
+  }
+
+  async depositVirtualBalance(amountSol = 0) {
+    const result = depositVirtualBalanceInPortfolio(amountSol);
+    if (!result?.ok) return result;
+
+    this.startBalanceSol = safeNum(result?.portfolio?.startBalance, this.startBalanceSol);
+    this.runtime.activeConfig.startBalanceSol = this.startBalanceSol;
+    await this.persistSnapshot();
+    return result;
+  }
+
+  async withdrawVirtualBalance(amountSol = 0) {
+    const result = withdrawVirtualBalanceInPortfolio(amountSol);
+    if (!result?.ok) return result;
+
+    this.startBalanceSol = safeNum(result?.portfolio?.startBalance, this.startBalanceSol);
+    this.runtime.activeConfig.startBalanceSol = this.startBalanceSol;
+    await this.persistSnapshot();
+    return result;
   }
 
   requestSoftStop() {
@@ -624,11 +644,20 @@ export default class TradingKernel {
 
     if (!result) {
       if (
-        ["scalp", "reversal"].includes(this.runtime.strategyScope) &&
-        this.canEmitNotice(`${this.runtime.strategyScope}:no_candidate`, 5 * 60 * 1000)
+        this.runtime.strategyScope === "scalp" &&
+        this.canEmitNotice("scalp:no_candidate", 5 * 60 * 1000)
       ) {
         await notificationService.sendText(
-          `🫧 <b>${escapeHtml(String(this.runtime.strategyScope).toUpperCase())}</b>\nПока не вижу нормального кандидата. Жду живой GMGN-first сигнал.`
+          "🫧 <b>SCALP</b>\nПока не вижу нормального кандидата. Продолжаю сканировать рынок."
+        );
+      }
+
+      if (
+        this.runtime.strategyScope === "reversal" &&
+        this.canEmitNotice("reversal:no_candidate", 5 * 60 * 1000)
+      ) {
+        await notificationService.sendText(
+          "🔁 <b>REVERSAL</b>\nПока не вижу нормального кандидата. Продолжаю сканировать рынок."
         );
       }
 
@@ -655,8 +684,11 @@ export default class TradingKernel {
     );
 
     for (const rawPlan of plans) {
-      const alreadyOpenSameStrategy = getPositions().some((p) => p.strategy === rawPlan.strategyKey);
+      const alreadyOpenSameStrategy = getPositions().some(
+        (p) => p.strategy === rawPlan.strategyKey
+      );
       if (alreadyOpenSameStrategy) continue;
+
       if (!isSolanaChain(candidate?.token?.chainId)) continue;
       if (candidate.corpse?.isCorpse && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
       if (candidate.falseBounce?.rejected && !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)) continue;
@@ -664,13 +696,14 @@ export default class TradingKernel {
 
       const minScoreByStrategy = {
         scalp: 68,
-        reversal: 72,
+        reversal: 78,
         runner: 82,
         copytrade: 0,
         migration_survivor: 0
       };
 
       const minScore = minScoreByStrategy[rawPlan.strategyKey] ?? 85;
+
       if (
         candidate.score < minScore &&
         !["copytrade", "migration_survivor"].includes(rawPlan.strategyKey)
@@ -709,9 +742,13 @@ export default class TradingKernel {
           const isNoLeader = copyVerdict.reason === "NO_LEADER";
 
           let shouldNotifyReject = false;
+
           if (isNoLeader) {
             if (isCopyOnlyMode) {
-              shouldNotifyReject = this.canEmitNotice("copytrade:no_leader", 30 * 60 * 1000);
+              shouldNotifyReject = this.canEmitNotice(
+                "copytrade:no_leader",
+                30 * 60 * 1000
+              );
             }
           } else {
             shouldNotifyReject = this.canEmitNotice(
@@ -722,7 +759,12 @@ export default class TradingKernel {
 
           if (shouldNotifyReject) {
             await notificationService.sendText(
-              `🚫 <b>COPYTRADE REJECTED</b>\n\n<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}\n<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}\n<b>Details:</b>\n${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
+              `🚫 <b>COPYTRADE REJECTED</b>
+
+<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}
+<b>Details:</b>
+${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
             );
           }
 
@@ -741,10 +783,18 @@ export default class TradingKernel {
 
         if (
           copyVerdict.mode === "probe_only" &&
-          this.canEmitNotice(`copytrade:probe:${candidate?.token?.ca || "unknown"}`, 20 * 60 * 1000)
+          this.canEmitNotice(
+            `copytrade:probe:${candidate?.token?.ca || "unknown"}`,
+            20 * 60 * 1000
+          )
         ) {
           await notificationService.sendText(
-            `⚠️ <b>COPYTRADE PROBE MODE</b>\n\n<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}\n<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}\n<b>Details:</b>\n${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
+            `⚠️ <b>COPYTRADE PROBE MODE</b>
+
+<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
+<b>Details:</b>
+${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
           );
         }
       }
@@ -800,31 +850,62 @@ export default class TradingKernel {
   buildCopytradeStatusSummary() {
     const leaders = this.runtime.activeConfig?.copytrade?.leaders || [];
     if (!leaders.length) {
-      return `📋 <b>Copytrade status</b>\nleader: -\nstate: -\nscore: 0\nrejected traps: 0\naccepted good: 0\nopen gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
+      return `📋 <b>Copytrade status</b>
+leader: -
+state: -
+score: 0
+rejected traps: 0
+accepted good: 0
+open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
     }
 
-    const sorted = [...leaders].sort((a, b) => safeNum(b?.score, 0) - safeNum(a?.score, 0));
+    const sorted = [...leaders].sort(
+      (a, b) => safeNum(b?.score, 0) - safeNum(a?.score, 0)
+    );
     const leader = sorted[0] || {};
 
-    return `📋 <b>Copytrade status</b>\nleader: ${escapeHtml(leader.address || "-")}\nstate: ${escapeHtml(leader.state || "-")}\nscore: ${safeNum(leader.score, 0)}\nrejected traps: ${safeNum(leader.rejectedTrapCount, 0)}\naccepted good: ${safeNum(leader.acceptedGoodCount, 0)}\nopen gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
+    return `📋 <b>Copytrade status</b>
+leader: ${escapeHtml(leader.address || "-")}
+state: ${escapeHtml(leader.state || "-")}
+score: ${safeNum(leader.score, 0)}
+rejected traps: ${safeNum(leader.rejectedTrapCount, 0)}
+accepted good: ${safeNum(leader.acceptedGoodCount, 0)}
+open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
   }
 
   buildExecutionModelSummary() {
     const r = this.copytradeService?.rules || {};
-    return `🧠 <b>Execution model</b>\nentry by leader: ${r.entryUsesLeader ? "yes" : "no"}\nexit by bot strategy: yes\nleader sell mode: ${escapeHtml(String(r.exitUsesLeaderMode || "soft_only"))}\nleader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}\nleader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}\nown TP priority: ${r.ownTpPriority ? "yes" : "no"}\nown trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
+    return `🧠 <b>Execution model</b>
+entry by leader: ${r.entryUsesLeader ? "yes" : "no"}
+exit by bot strategy: yes
+leader sell mode: ${escapeHtml(String(r.exitUsesLeaderMode || "soft_only"))}
+leader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}
+leader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}
+own TP priority: ${r.ownTpPriority ? "yes" : "no"}
+own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
   }
 
   buildRecentGMGNEventsSummary(limit = 3) {
     const rows = this.gmgnOrderStore.listRecentOrders(limit);
-    if (!rows.length) return `🕘 <b>Recent GMGN events</b>\nnone`;
+
+    if (!rows.length) {
+      return `🕘 <b>Recent GMGN events</b>
+none`;
+    }
 
     const lines = ["🕘 <b>Recent GMGN events</b>", ""];
+
     for (const row of rows) {
       lines.push(
-        `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}\nstrategy: ${escapeHtml(row.strategy || "-")}\ntoken: ${escapeHtml(row?.token?.symbol || row?.token?.name || row?.token?.ca || "-")}\nnote: ${escapeHtml(row.note || "-")}\nupdated: ${escapeHtml(row.updatedAt || "-")}`
+        `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}
+strategy: ${escapeHtml(row.strategy || "-")}
+token: ${escapeHtml(row?.token?.symbol || row?.token?.name || row?.token?.ca || "-")}
+note: ${escapeHtml(row.note || "-")}
+updated: ${escapeHtml(row.updatedAt || "-")}`
       );
       lines.push("");
     }
+
     return lines.join("\n");
   }
 
@@ -835,10 +916,17 @@ export default class TradingKernel {
         const mode = String(row?.mode || "").toLowerCase();
         const status = String(row?.status || "").toLowerCase();
         const op = String(row?.operation || "").toLowerCase();
-        return mode === "dry_run" && status === "filled" && (op === "close" || op === "partial");
+        return (
+          mode === "dry_run" &&
+          status === "filled" &&
+          (op === "close" || op === "partial")
+        );
       });
 
-    const totalSol = rows.reduce((sum, row) => sum + safeNum(row?.metrics?.pnlHintSol, 0), 0);
+    const totalSol = rows.reduce(
+      (sum, row) => sum + safeNum(row?.metrics?.pnlHintSol, 0),
+      0
+    );
     const positiveSol = rows.reduce((sum, row) => {
       const v = safeNum(row?.metrics?.pnlHintSol, 0);
       return v > 0 ? sum + v : sum;
@@ -847,9 +935,17 @@ export default class TradingKernel {
       const v = safeNum(row?.metrics?.pnlHintSol, 0);
       return v < 0 ? sum + v : sum;
     }, 0);
-    const avgPct = rows.length > 0 ? rows.reduce((sum, row) => sum + safeNum(row?.metrics?.pnlHintPct, 0), 0) / rows.length : 0;
+    const avgPct =
+      rows.length > 0
+        ? rows.reduce((sum, row) => sum + safeNum(row?.metrics?.pnlHintPct, 0), 0) / rows.length
+        : 0;
 
-    return `💡 <b>Simulated GMGN close hints</b>\nfilled close/partial: ${rows.length}\nsum pnlHintSol: ${totalSol.toFixed(4)}\npositive pnlHintSol: ${positiveSol.toFixed(4)}\nnegative pnlHintSol: ${negativeSol.toFixed(4)}\navg pnlHintPct: ${avgPct.toFixed(2)}%`;
+    return `💡 <b>Simulated GMGN close hints</b>
+filled close/partial: ${rows.length}
+sum pnlHintSol: ${totalSol.toFixed(4)}
+positive pnlHintSol: ${positiveSol.toFixed(4)}
+negative pnlHintSol: ${negativeSol.toFixed(4)}
+avg pnlHintPct: ${avgPct.toFixed(2)}%`;
   }
 
   buildStatusText() {
@@ -858,18 +954,32 @@ export default class TradingKernel {
       getPortfolio(),
       this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
     );
-    return `${base}\n\n${this.buildCopytradeStatusSummary()}\n\n${this.buildExecutionModelSummary()}\n\n${this.buildGMGNExecutionText()}\n\n${this.buildGMGNPnlHintSummary()}\n\n${this.buildRecentGMGNEventsSummary()}`;
+    return `${base}
+
+${this.buildCopytradeStatusSummary()}
+
+${this.buildExecutionModelSummary()}
+
+${this.buildGMGNExecutionText()}
+
+${this.buildGMGNPnlHintSummary()}
+
+${this.buildRecentGMGNEventsSummary()}`;
   }
 
   buildBalanceText() {
     return `${buildPortfolioBalanceText(
       getPortfolio(),
       this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
-    )}\n\n${this.buildGMGNPnlHintSummary()}`;
+    )}
+
+${this.buildGMGNPnlHintSummary()}`;
   }
 
   buildWalletsText() {
-    return `${this.gmgnWalletService.buildWalletSummaryText(this.runtime.activeConfig)}\n\n${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}`;
+    return `${this.gmgnWalletService.buildWalletSummaryText(this.runtime.activeConfig)}
+
+${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}`;
   }
 
   buildCopytradeText() {
@@ -877,10 +987,20 @@ export default class TradingKernel {
   }
 
   buildBudgetText() {
-    const current = this.runtime.activeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
+    const current =
+      this.runtime.activeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
     const pending = this.runtime.pendingConfig?.strategyBudget || null;
 
-    return `🧮 <b>Budget</b>\n\n<b>Current</b>\n${formatBudgetLines(current)}\n\n<b>Pending</b>\n${pending ? formatBudgetLines(pending) : "none"}\n\nSend:\n<code>budget 20 20 20 20 20</code>`;
+    return `🧮 <b>Budget</b>
+
+<b>Current</b>
+${formatBudgetLines(current)}
+
+<b>Pending</b>
+${pending ? formatBudgetLines(pending) : "none"}
+
+Send:
+<code>budget 20 20 20 20 20</code>`;
   }
 
   buildGmgnStatusText() {
@@ -888,7 +1008,9 @@ export default class TradingKernel {
   }
 
   buildGMGNExecutionText() {
-    return this.gmgnExecutionService.buildExecutionSummaryText(this.runtime.activeConfig);
+    return this.gmgnExecutionService.buildExecutionSummaryText(
+      this.runtime.activeConfig
+    );
   }
 
   buildGMGNOrdersText(limit = 15) {
@@ -896,11 +1018,17 @@ export default class TradingKernel {
   }
 
   async buildLeaderHealthText() {
-    return this.copytradeService.buildLeaderHealthText(this.runtime.activeConfig);
+    return this.copytradeService.buildLeaderHealthText(
+      this.runtime.activeConfig
+    );
   }
 
   addLeader(address) {
-    const row = this.copytradeManager.addLeader(this.runtime.activeConfig, address, "manual");
+    const row = this.copytradeManager.addLeader(
+      this.runtime.activeConfig,
+      address,
+      "manual"
+    );
     void this.persistSnapshot();
     return row;
   }
@@ -932,12 +1060,24 @@ export default class TradingKernel {
 
     if (!isSolanaChain(bestRaw?.chainId)) return null;
 
-    const socials = Array.isArray(bestRaw?.info?.socials) ? bestRaw.info.socials : [];
-    const websites = Array.isArray(bestRaw?.info?.websites) ? bestRaw.info.websites : [];
+    const socials = Array.isArray(bestRaw?.info?.socials)
+      ? bestRaw.info.socials
+      : [];
+    const websites = Array.isArray(bestRaw?.info?.websites)
+      ? bestRaw.info.websites
+      : [];
 
     const links = [
-      ...socials.map((x) => ({ type: x?.type || "", label: x?.type || "", url: x?.url || "" })),
-      ...websites.map((x) => ({ type: "website", label: "website", url: x?.url || "" }))
+      ...socials.map((x) => ({
+        type: x?.type || "",
+        label: x?.type || "",
+        url: x?.url || ""
+      })),
+      ...websites.map((x) => ({
+        type: "website",
+        label: "website",
+        url: x?.url || ""
+      }))
     ];
 
     return {
@@ -950,33 +1090,18 @@ export default class TradingKernel {
       price: safeNum(bestRaw?.priceUsd),
       liquidity: safeNum(bestRaw?.liquidity?.usd),
       volume: safeNum(bestRaw?.volume?.h24),
-      volumeH24: safeNum(bestRaw?.volume?.h24),
-      volumeH6: safeNum(bestRaw?.volume?.h6),
-      volumeH1: safeNum(bestRaw?.volume?.h1),
-      volumeM5: safeNum(bestRaw?.volume?.m5),
       buys: safeNum(bestRaw?.txns?.h24?.buys),
       sells: safeNum(bestRaw?.txns?.h24?.sells),
-      buysH1: safeNum(bestRaw?.txns?.h1?.buys),
-      sellsH1: safeNum(bestRaw?.txns?.h1?.sells),
-      buysM5: safeNum(bestRaw?.txns?.m5?.buys),
-      sellsM5: safeNum(bestRaw?.txns?.m5?.sells),
       txns:
         safeNum(bestRaw?.txns?.h24?.buys) +
         safeNum(bestRaw?.txns?.h24?.sells),
-      txnsH24: safeNum(bestRaw?.txns?.h24?.buys) + safeNum(bestRaw?.txns?.h24?.sells),
-      txnsH6: safeNum(bestRaw?.txns?.h6?.buys) + safeNum(bestRaw?.txns?.h6?.sells),
-      txnsH1: safeNum(bestRaw?.txns?.h1?.buys) + safeNum(bestRaw?.txns?.h1?.sells),
-      txnsM5: safeNum(bestRaw?.txns?.m5?.buys) + safeNum(bestRaw?.txns?.m5?.sells),
       fdv: safeNum(bestRaw?.fdv),
       pairCreatedAt: safeNum(bestRaw?.pairCreatedAt),
       url: bestRaw?.url || "",
       imageUrl: bestRaw?.info?.imageUrl || null,
-      description: bestRaw?.info?.description || bestRaw?.info?.header || "",
-      links,
-      priceChangeM5: safeNum(bestRaw?.priceChange?.m5),
-      priceChangeH1: safeNum(bestRaw?.priceChange?.h1),
-      priceChangeH6: safeNum(bestRaw?.priceChange?.h6),
-      priceChangeH24: safeNum(bestRaw?.priceChange?.h24)
+      description:
+        bestRaw?.info?.description || bestRaw?.info?.header || "",
+      links
     };
   }
 
@@ -996,7 +1121,10 @@ export default class TradingKernel {
 
     if (!isSolanaChain(result?.analyzed?.token?.chainId)) {
       await send.text(
-        `🚫 <b>CHAIN REJECTED</b>\n\nchain: ${escapeHtml(result?.analyzed?.token?.chainId || "-")}\nallowed: solana only`
+        `🚫 <b>CHAIN REJECTED</b>
+
+chain: ${escapeHtml(result?.analyzed?.token?.chainId || "-")}
+allowed: solana only`
       );
       return;
     }
