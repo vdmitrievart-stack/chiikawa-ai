@@ -98,6 +98,9 @@ export default class HolderAccumulationEngine {
       accumulationPhaseAgeHours: 0,
       warehouseSimilarityScore: 0,
       warehouseChurnScore: 100,
+      warehouseStoragePass: false,
+      activeReaccumulationPass: false,
+      warehouseMode: 'none',
       updatedAt: Date.now()
     };
   }
@@ -279,19 +282,48 @@ export default class HolderAccumulationEngine {
     const accumulationPhaseAgeHours = earliestBuyAt > 0 ? (now - earliestBuyAt) / 3600000 : 0;
     const warehouseSimilarityScore = this.estimateSimilarityScore(freshCohort, candidate);
 
-    const quietAccumulationPass =
+    const warehouseStoragePass =
       freshWalletBuyCount >= 10 &&
-      netControlPct >= 20 &&
-      (retention30mPct >= 30 || retention2hPct >= 18 || retention6hPct >= 10) &&
-      (reloadCount >= 2 || bottomTouches >= 2);
+      netAccumulationPct >= 70 &&
+      netControlPct >= 45 &&
+      avgChurn <= 45 &&
+      (retention30mPct >= 45 || retention2hPct >= 28 || retention6hPct >= 16) &&
+      (warehouseWallets.length >= 6 || warehouseSimilarityScore >= 32 || bottomTouches >= 2);
+
+    const activeReaccumulationPass =
+      freshWalletBuyCount >= 8 &&
+      (retention30mPct >= 25 || retention2hPct >= 12) &&
+      (reloadCount >= 2 || avgDipBuy >= 0.18) &&
+      bottomTouches >= 2;
+
+    const quietAccumulationPass =
+      warehouseStoragePass ||
+      activeReaccumulationPass ||
+      (
+        freshWalletBuyCount >= 10 &&
+        netControlPct >= 20 &&
+        (retention30mPct >= 30 || retention2hPct >= 18 || retention6hPct >= 10) &&
+        (bottomTouches >= 2)
+      );
 
     const bottomPackReversalPass =
-      quietAccumulationPass &&
-      (freshWalletBuyCount >= 14 || warehouseWallets.length >= 8) &&
-      retention2hPct >= 12 &&
-      avgDipBuy >= 0.18 &&
-      bottomTouches >= 2 &&
-      avgChurn <= 45;
+      (
+        warehouseStoragePass &&
+        (freshWalletBuyCount >= 14 || warehouseWallets.length >= 8) &&
+        bottomTouches >= 2 &&
+        (retention2hPct >= 12 || accumulationPhaseAgeHours >= 2)
+      ) || (
+        activeReaccumulationPass &&
+        avgDipBuy >= 0.16 &&
+        bottomTouches >= 2 &&
+        avgChurn <= 50
+      );
+
+    const warehouseMode = warehouseStoragePass
+      ? 'warehouse_storage_accumulation'
+      : activeReaccumulationPass
+        ? 'active_reaccumulation'
+        : 'none';
 
     return {
       tokenName,
@@ -314,6 +346,9 @@ export default class HolderAccumulationEngine {
       accumulationPhaseAgeHours: roundNum(accumulationPhaseAgeHours, 2),
       warehouseSimilarityScore: roundNum(warehouseSimilarityScore, 2),
       warehouseChurnScore: roundNum(100 - avgChurn, 2),
+      warehouseStoragePass,
+      activeReaccumulationPass,
+      warehouseMode,
       updatedAt: now
     };
   }
