@@ -87,6 +87,10 @@ function getCategory(result) {
   const keys = plans.map((p) => p?.strategyKey).filter(Boolean);
   const holder = analyzed?.holderAccumulation || {};
 
+  if (analyzed?.liquidityTrap?.veto) {
+    return "TRAP";
+  }
+
   if (
     (holder?.quietAccumulationPass ||
       holder?.warehouseStoragePass ||
@@ -224,6 +228,8 @@ function extractMetrics(result) {
     reversalMode: reversal?.primaryMode || "-",
     archetype: deriveCohortArchetype(holder).label,
     packagingProbeReady: derivePackagingProbeReady(analyzed),
+    liquidityTrapVeto: Boolean(analyzed?.liquidityTrap?.veto),
+    liquidityTrapScore: safeNum(analyzed?.liquidityTrap?.score, 0),
   };
 }
 
@@ -330,6 +336,9 @@ function updateSignalRegistry(signalRegistry, result) {
 
 function deriveDisplayHeader(result) {
   const category = getCategory(result);
+  if (category === "TRAP") {
+    return `🚩🚩🚩 <b>LP / LIQUIDITY TRAP</b>`;
+  }
   if (category === "PACKAGING") {
     return `📦📦📦📦📦👀📢👀📦📦📦📦📦 <b>PACKAGING DETECTED</b>`;
   }
@@ -345,6 +354,7 @@ function buildAccumulationReport(result, monitorEnabled = false) {
   const holder = analyzed?.holderAccumulation || {};
   const reversal = analyzed?.reversal || {};
   const migration = analyzed?.migration || {};
+  const trap = analyzed?.liquidityTrap || {};
   const plans = result?.plans || [];
   const category = getCategory(result);
   const archetype = deriveCohortArchetype(holder);
@@ -363,12 +373,16 @@ function buildAccumulationReport(result, monitorEnabled = false) {
   const lines = [
     deriveDisplayHeader(result),
     `🧺 <b>ACCUMULATION SCAN — ${escapeHtml(category)}</b>`,
-    category === 'PACKAGING'
-      ? `🟡 Ранняя стадия упаковки. Это watchlist/ранний вход, а не поздний подтвержденный reversal.`
-      : ``,
-    packagingProbeReady
-      ? green('Packaging probe: можно брать небольшую пробную позицию')
-      : yellow('Packaging probe: пока только наблюдение'),
+    category === 'TRAP'
+      ? `🚩 Обнаружен критический риск по LP/ликвидности. Такой токен бот не должен предлагать к входу.`
+      : category === 'PACKAGING'
+        ? `🟡 Ранняя стадия упаковки. Это watchlist/ранний вход, а не поздний подтвержденный reversal.`
+        : ``,
+    category === 'TRAP'
+      ? red('Trade veto: вход запрещен до нормализации LP/ликвидности')
+      : packagingProbeReady
+        ? green('Packaging probe: можно брать небольшую пробную позицию')
+        : yellow('Packaging probe: пока только наблюдение'),
     ``,
     `<b>${escapeHtml(token.name || token.symbol || 'UNKNOWN')}</b>`,
     `<code>${escapeHtml(token.ca || '')}</code>`,
@@ -377,15 +391,11 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     ``,
     `<b>📦 Holder accumulation</b>`,
     `${safeNum(holder.trackedWallets, 0) > 0 ? green('Кошельков отслежено') : red('Кошельков отслежено')} — ${safeNum(holder.trackedWallets, 0)}`,
-    `${safeNum(holder.meaningfulWalletCount ?? 0, 0) >= 10 ? green('Значимые self-buy холдеры') : yellow('Значимые self-buy холдеры')} — ${safeNum(holder.meaningfulWalletCount ?? 0, 0)}`,
     `${safeNum(holder.freshWalletBuyCount, 0) >= 10 ? green('Новая когорта') : yellow('Новая когорта')} — ${safeNum(holder.freshWalletBuyCount, 0)}`,
-    `${yellow('Self-buy / transfer-only / dust')} — ${safeNum(holder.selfBuyWalletCount ?? 0, 0)} / ${safeNum(holder.transferOnlyWalletCount ?? 0, 0)} / ${safeNum(holder.dustFilteredWalletCount ?? 0, 0)}`,
-    `${yellow('Порог значимого холдера')} — >= ${fmtPct(holder.minimumMeaningfulSharePct ?? 0.4, 2)} от отслеживаемой базы + сам купил` ,
     `${safeNum(holder.retention30mPct, 0) >= 50 ? green('Удержание 30м / 2ч') : yellow('Удержание 30м / 2ч')} — ${fmtPct(holder.retention30mPct)} / ${fmtPct(holder.retention2hPct)}`,
     `${safeNum(holder.historicalRetention6hPct ?? holder.retention6hPct, 0) > 0 ? green('Историческое удержание 6ч / 24ч') : yellow('Историческое удержание 6ч / 24ч')} — ${fmtPct(holder.historicalRetention6hPct ?? holder.retention6hPct)} / ${fmtPct(holder.historicalRetention24hPct)}`,
     `${safeNum(holder.netAccumulationPct, 0) > 0 ? green('Чистое накопление') : yellow('Чистое накопление')} — ${fmtPct(holder.netAccumulationPct)}`,
-    `${safeNum(holder.netControlPct, 0) >= 65 ? green('Оценочная доля когорты (среди значимых отслеж.)') : yellow('Оценочная доля когорты (среди значимых отслеж.)')} — ${fmtApproxPct(Math.min(safeNum(holder.netControlPct, 0), 95), 2)}`,
-    `${yellow('Покрытие значимых холдеров')} — ${fmtPct(holder.meaningfulCoveragePct ?? 0, 2)}`,
+    `${safeNum(holder.netControlPct, 0) >= 65 ? green('Оценочный контроль когорты (в отслеж. объёме)') : yellow('Оценочный контроль когорты (в отслеж. объёме)')} — ${fmtApproxPct(Math.min(safeNum(holder.netControlPct, 0), 95), 2)}`,
     `${safeNum(holder.reloadCount, 0) >= 2 ? green('Reload count') : yellow('Reload count')} — ${safeNum(holder.reloadCount, 0)} | Dip-buy ${fmtNum(holder.dipBuyRatio, 2)} | Bottom touches ${safeNum(holder.bottomTouches, 0)}`,
     `${holder?.quietAccumulationPass ? green('Тихое накопление') : red('Тихое накопление')} | ${holder?.warehouseStoragePass ? green('Складская упаковка') : yellow('Складская упаковка')} | ${holder?.activeReaccumulationPass ? green('Активный добор') : yellow('Активный добор')}`,
     `${holder?.bottomPackReversalPass ? green('Нижняя упаковка') : red('Нижняя упаковка')} | ${archetype.key === 'warehouse_storage' ? green('Архетип') : yellow('Архетип')} — ${escapeHtml(archetype.label)}`,
@@ -394,6 +404,12 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `<b>🔁 Структура разворота</b>`,
     `${reversal?.allow ? green('Reversal confirmed') : red('Reversal confirmed')} | score ${safeNum(structureScore, 0)} | mode ${escapeHtml(reversal?.primaryMode || '-')}`,
     `${flush ? green('flush') : red('flush')} / ${base ? green('base') : red('base')} / ${exhaust ? green('exhaustion') : red('exhaustion')} / ${reclaim ? green('reclaim') : red('reclaim')}`,
+    ``,
+    `<b>🚩 LP / liquidity risk</b>`,
+    `${trap?.veto ? red('LP trap veto') : green('LP trap veto')} — ${trap?.veto ? 'да' : 'нет'}`,
+    `${yellow('liq/mcap / vol/liq')} — ${fmtPct(trap?.liqToMcapPct)} / ${fmtPct(trap?.volToLiqPct)}`,
+    `${yellow('LP metadata')} — ${trap?.lpMetadataAvailable ? 'доступны' : 'нет данных о lock/burn'}`,
+    `${yellow('Причины')} — ${escapeHtml((trap?.reasons || []).join('; ') || 'не найдено')}`,
     ``,
     `<b>🌊 Миграция</b>`,
     `Возраст пары ${fmtNum(migration?.pairAgeMin, 1)}м | Survivor ${safeNum(migration?.survivorScore, 0)} | liq/mcap ${fmtPct(migration?.liqToMcapPct)} | vol/liq ${fmtPct(migration?.volToLiqPct)}`,
@@ -418,6 +434,8 @@ function buildDeltaMessage(prev, next) {
   const deltaFresh = next.freshWalletBuyCount - prev.freshWalletBuyCount;
   const bullish = [];
   const bearish = [];
+  const trapTurnedOn = !prev.liquidityTrapVeto && next.liquidityTrapVeto;
+  const trapCleared = prev.liquidityTrapVeto && !next.liquidityTrapVeto;
 
   if (!prev.packagingProbeReady && next.packagingProbeReady) bullish.push(green('packaging probe ready'));
   if (!prev.quietAccumulationPass && next.quietAccumulationPass) bullish.push(green('quiet accumulation confirmed'));
@@ -428,11 +446,13 @@ function buildDeltaMessage(prev, next) {
   if (deltaAccum >= 4.0) bullish.push(green(`net accumulation +${deltaAccum}%`));
   if (deltaRet2h >= 10.0) bullish.push(green(`retention 2h +${deltaRet2h}%`));
   if (deltaFresh >= 3) bullish.push(green(`fresh cohort +${deltaFresh}`));
+  if (trapCleared) bullish.push(green('LP/liquidity trap veto cleared'));
 
   if (deltaControl <= -6.0) bearish.push(red(`cohort control ${deltaControl}%`));
   if (deltaAccum <= -10.0) bearish.push(red(`net accumulation ${deltaAccum}%`));
   if (deltaRet2h <= -15.0) bearish.push(red(`retention 2h ${deltaRet2h}%`));
   if (prev.quietAccumulationPass && !next.quietAccumulationPass && next.netControlPct < 60) bearish.push(red('quiet accumulation weakened'));
+  if (trapTurnedOn) bearish.push(red('LP/liquidity trap veto activated'));
 
   if (!bullish.length && !bearish.length) return '';
 
@@ -447,6 +467,7 @@ function buildDeltaMessage(prev, next) {
     `<b>Новая когорта:</b> ${next.freshWalletBuyCount}`,
     `<b>Склад / активно:</b> ${next.warehouseStoragePass ? 'да' : 'нет'} / ${next.activeReaccumulationPass ? 'да' : 'нет'}`,
     `<b>Архетип:</b> ${escapeHtml(next.archetype || '-')}`,
+    `<b>LP trap veto:</b> ${next.liquidityTrapVeto ? 'да' : 'нет'}`,
   ];
 
   if (bullish.length) {

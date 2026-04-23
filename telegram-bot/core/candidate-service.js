@@ -178,6 +178,7 @@ export default class CandidateService {
     const txnsH24 = safeNum(token?.txnsH24, token?.txns, 0);
     const rugRisk = safeNum(candidate?.rug?.risk, 0);
 
+    if (candidate?.liquidityTrap?.veto) return true;
     if (rugRisk >= 80) return true;
     if (candidate?.corpse?.isCorpse && liquidity < 12000) return true;
     if (fdv < 5000 && liquidity < 5000) return true;
@@ -189,6 +190,7 @@ export default class CandidateService {
     const token = candidate?.token || {};
     const holder = candidate?.holderAccumulation || {};
     const migration = candidate?.migration || {};
+    const trap = candidate?.liquidityTrap || {};
 
     const fdv = safeNum(token?.fdv, 0);
     const pairAgeMin = safeNum(migration?.pairAgeMin, 0);
@@ -228,7 +230,9 @@ export default class CandidateService {
     if (safeNum(candidate?.rug?.risk, 0) >= 65) score -= 14;
     if (safeNum(candidate?.delta?.priceH1Pct, 0) > 40) score -= 10;
 
-    const detected = score >= 46 && warehouseLike && freshWalletBuyCount >= 8;
+    if (trap?.veto) score -= 32;
+
+    const detected = !trap?.veto && score >= 46 && warehouseLike && freshWalletBuyCount >= 8;
     const priorityWatch = detected && (netControlPct >= 45 || retention2h >= 35 || bottomPack);
     const probeEligible = detected && priorityWatch && netControlPct >= 55 && retention30m >= 55 && !candidate?.corpse?.isCorpse;
 
@@ -255,12 +259,100 @@ export default class CandidateService {
     const priceH24 = safeNum(candidate?.delta?.priceH24Pct, safeNum(token?.priceChangeH24, 0));
     const volToLiq = safeNum(candidate?.migration?.volToLiqPct, 0);
     const linearityRisk = priceH1 > 18 && priceH6 > 45 && priceH24 > 80;
-    const allow = Boolean(linearityRisk || (priceH1 > 10 && volToLiq > 80 && safeNum(candidate?.absorption?.score, 0) >= 8));
+    const allow = !candidate?.liquidityTrap?.veto && Boolean(linearityRisk || (priceH1 > 10 && volToLiq > 80 && safeNum(candidate?.absorption?.score, 0) >= 8));
 
     return {
       allow,
       linearityRisk,
       score: clamp(Math.round((Math.max(priceH1, 0) * 0.4) + (Math.max(priceH6, 0) * 0.2) + safeNum(candidate?.absorption?.score, 0)), 0, 99)
+    };
+  }
+
+  buildLiquidityTrapSignals(candidate = {}) {
+    const token = candidate?.token || {};
+    const migration = candidate?.migration || {};
+    const priceH1 = safeNum(candidate?.delta?.priceH1Pct, safeNum(token?.priceChangeH1, 0));
+    const priceH6 = safeNum(candidate?.delta?.priceH6Pct, safeNum(token?.priceChangeH6, 0));
+    const priceH24 = safeNum(candidate?.delta?.priceH24Pct, safeNum(token?.priceChangeH24, 0));
+
+    const liquidity = safeNum(token?.liquidity, 0);
+    const fdv = safeNum(token?.fdv, 0);
+    const volumeH24 = safeNum(token?.volumeH24, token?.volume, 0);
+    const volumeH1 = safeNum(token?.volumeH1, 0);
+    const txnsH24 = safeNum(token?.txnsH24, token?.txns, 0);
+    const pairAgeMin = safeNum(migration?.pairAgeMin, 0);
+
+    const liqToMcapPct = fdv > 0 ? (liquidity / Math.max(fdv, 1)) * 100 : 0;
+    const volToLiqPct = liquidity > 0 ? (volumeH24 / Math.max(liquidity, 1)) * 100 : 0;
+
+    const reasons = [];
+    let score = 0;
+
+    const highMcThin = fdv >= 100000 && liquidity < 12000;
+    const veryHighMcThin = fdv >= 500000 && liquidity < 25000;
+    const extremeHighMcThin = fdv >= 1000000 && liquidity < 50000;
+    const criticalRatio = fdv >= 100000 && liqToMcapPct < 8;
+    const severeRatio = fdv >= 500000 && liqToMcapPct < 4;
+    const churnOnThin = volumeH24 >= 150000 && liquidity < 15000;
+    const hotButFragile = priceH1 > 8 && priceH24 > 40 && liqToMcapPct < 10 && liquidity < 20000;
+    const earlyThinMigration = pairAgeMin > 0 && pairAgeMin <= 1440 && fdv >= 80000 && liquidity < 15000;
+    const oversizedStructure = txnsH24 >= 800 && volToLiqPct >= 250 && liqToMcapPct < 12;
+
+    if (highMcThin) {
+      score += 16;
+      reasons.push('thin liquidity for current FDV/MC');
+    }
+    if (veryHighMcThin) {
+      score += 20;
+      reasons.push('very thin liquidity for a six-figure+ token');
+    }
+    if (extremeHighMcThin) {
+      score += 24;
+      reasons.push('extreme FDV with critically low liquidity');
+    }
+    if (criticalRatio) {
+      score += 14;
+      reasons.push('liq/MC ratio too low');
+    }
+    if (severeRatio) {
+      score += 16;
+      reasons.push('liq/MC ratio critically low');
+    }
+    if (churnOnThin) {
+      score += 10;
+      reasons.push('large turnover on thin liquidity');
+    }
+    if (hotButFragile) {
+      score += 8;
+      reasons.push('hot move on fragile liquidity structure');
+    }
+    if (earlyThinMigration) {
+      score += 10;
+      reasons.push('early migration token with fragile core liquidity');
+    }
+    if (oversizedStructure) {
+      score += 10;
+      reasons.push('activity too large for available liquidity');
+    }
+
+    const veto = Boolean(
+      extremeHighMcThin ||
+      severeRatio ||
+      veryHighMcThin ||
+      (criticalRatio && churnOnThin) ||
+      score >= 34
+    );
+
+    return {
+      veto,
+      score: clamp(Math.round(score), 0, 99),
+      liqToMcapPct,
+      volToLiqPct,
+      currentLiquidity: liquidity,
+      fdv,
+      lpMetadataAvailable: false,
+      lockStatus: 'unknown',
+      reasons
     };
   }
 
@@ -790,6 +882,16 @@ export default class CandidateService {
       priceDeltaPct
     });
 
+    const liquidityTrap = this.buildLiquidityTrapSignals({
+      token,
+      migration,
+      delta: {
+        priceH1Pct: safeNum(token?.priceChangeH1, 0),
+        priceH6Pct: safeNum(token?.priceChangeH6, 0),
+        priceH24Pct: safeNum(token?.priceChangeH24, 0)
+      }
+    });
+
     const baseScore = this.computeBaseScore(token, {
       socialCount,
       buyPressureH24,
@@ -815,6 +917,9 @@ export default class CandidateService {
     if (migration.passes) {
       score = Math.max(score, Math.round((score * 0.7) + (safeNum(migration?.survivorScore, 0) * 0.3)));
     }
+    if (liquidityTrap?.veto) {
+      score = Math.max(0, score - 26);
+    }
     score = clamp(score, 0, 99);
 
     const reasons = [
@@ -830,6 +935,10 @@ export default class CandidateService {
 
     if (scalp.allow) {
       reasons.push(`scalp mode ${scalp.primaryMode}`);
+    }
+
+    if (liquidityTrap?.veto) {
+      reasons.push(`LP/liquidity trap veto: ${liquidityTrap.reasons.join(', ') || 'liquidity trap'}`);
     }
 
     return {
@@ -982,6 +1091,7 @@ export default class CandidateService {
     const holder = candidate?.holderAccumulation || {};
     const migration = candidate?.migration || {};
     const scalpMetrics = candidate?.scalp?.metrics || {};
+    const trap = candidate?.liquidityTrap || {};
 
     const priceM5 = safeNum(candidate?.delta?.priceM5Pct, safeNum(token?.priceChangeM5, 0));
     const priceH1 = safeNum(candidate?.delta?.priceH1Pct, safeNum(token?.priceChangeH1, 0));
@@ -1024,6 +1134,7 @@ export default class CandidateService {
     if (priceM5 > 10) score -= 8;
     if (linearityRisk) score -= 18;
     if (liquidityWeakeningRisk) score -= 10;
+    if (trap?.veto) score -= 30;
 
     const notScamEnough =
       safeNum(candidate?.rug?.risk, 0) < 65 &&
@@ -1043,6 +1154,7 @@ export default class CandidateService {
       (reclaimPressure || quietAccumulation) &&
       liquidityAlive &&
       !linearityRisk &&
+      !trap?.veto &&
       score >= 58;
 
     return {
@@ -1067,7 +1179,9 @@ export default class CandidateService {
         dipBuyRatio: safeNum(holder?.dipBuyRatio, 0),
         bottomTouches: safeNum(holder?.bottomTouches, 0),
         linearityRisk,
-        liquidityWeakeningRisk
+        liquidityWeakeningRisk,
+        liquidityTrapVeto: Boolean(trap?.veto),
+        liquidityTrapScore: safeNum(trap?.score, 0)
       }
     };
   }
@@ -1179,6 +1293,10 @@ export default class CandidateService {
   }
 
   buildPlans(candidate, strategyScope = "all") {
+    if (candidate?.liquidityTrap?.veto) {
+      return [];
+    }
+
     const plans = [];
     const score = safeNum(candidate?.score, 0);
 
@@ -1321,6 +1439,9 @@ export default class CandidateService {
       this.bumpBucket(bucket, 1);
 
       if (!isSolanaChain(candidate?.token?.chainId)) continue;
+      if (candidate?.liquidityTrap?.veto) {
+        this.lastRadarTelemetry.trapRejected += 1;
+      }
       if (this.isNoiseCandidate(candidate)) {
         this.lastRadarTelemetry.filteredNoise += 1;
         continue;
@@ -1447,6 +1568,8 @@ reversal score: ${safeNum(candidate?.reversal?.score, 0)}
 reversal mode: ${escapeHtml(candidate?.reversal?.primaryMode || "-")}
 quiet accumulation: ${candidate?.holderAccumulation?.quietAccumulationPass ? "yes" : "no"}
 control pct: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFixed(2)}
+LP trap veto: ${candidate?.liquidityTrap?.veto ? 'yes' : 'no'}
+LP trap score: ${safeNum(candidate?.liquidityTrap?.score, 0)}
 migration score: ${safeNum(candidate?.migration?.survivorScore, 0)}
 price: ${safeNum(token.price, 0)}
 liquidity: ${safeNum(token.liquidity, 0)}
@@ -1470,6 +1593,7 @@ url: ${escapeHtml(token.url || "-")}`;
     const holder = candidate?.holderAccumulation || {};
     const scalpMetrics = scalp?.metrics || {};
     const reversalMetrics = reversal?.metrics || {};
+    const trap = candidate?.liquidityTrap || {};
 
     return `🔎 <b>ANALYSIS</b>
 
@@ -1527,6 +1651,14 @@ dip-buy ratio: ${safeNum(holder?.dipBuyRatio, 0).toFixed(2)}
 bottom touches: ${safeNum(holder?.bottomTouches, 0)}
 quiet accumulation pass: ${holder?.quietAccumulationPass ? "yes" : "no"}
 bottom-pack reversal pass: ${holder?.bottomPackReversalPass ? "yes" : "no"}
+
+🚩 LP / Liquidity trap:
+veto: ${trap?.veto ? "yes" : "no"}
+score: ${safeNum(trap?.score, 0)}
+liq/mcap %: ${safeNum(trap?.liqToMcapPct, 0).toFixed(2)}
+vol/liq %: ${safeNum(trap?.volToLiqPct, 0).toFixed(1)}
+lock metadata: ${trap?.lpMetadataAvailable ? "available" : "unavailable"}
+reasons: ${escapeHtml((trap?.reasons || []).join('; ') || '-') }
 
 🌊 Migration:
 pair age min: ${safeNum(migration?.pairAgeMin, 0).toFixed(1)}
