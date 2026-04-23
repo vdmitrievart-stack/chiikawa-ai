@@ -199,6 +199,274 @@ function deriveCohortArchetype(holder = {}) {
   };
 }
 
+
+function normalizeNarrativeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/[^\p{L}\p{N}\$#@]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeTokenName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '')
+    .trim();
+}
+
+function extractLinksMapSimple(links = []) {
+  const map = { twitter: '', telegram: '', website: '' };
+  const rows = Array.isArray(links) ? links : [];
+  for (const row of rows) {
+    const type = String(row?.type || '').toLowerCase();
+    const url = String(row?.url || '').trim();
+    if (!url) continue;
+    if (!map.twitter && (type === 'x' || type.includes('twitter'))) map.twitter = url;
+    else if (!map.telegram && type.includes('telegram')) map.telegram = url;
+    else if (!map.website && type.includes('website')) map.website = url;
+    else if (!map.website) map.website = url;
+  }
+  return map;
+}
+
+function socialCountFromLinks(links = []) {
+  const map = extractLinksMapSimple(links);
+  return Object.values(map).filter(Boolean).length;
+}
+
+function buildNarrativeTags(token = {}) {
+  const name = String(token?.name || '').trim();
+  const symbol = String(token?.symbol || '').trim();
+  const tags = [];
+  if (symbol) tags.push(`$${symbol}`);
+  if (symbol) tags.push(symbol);
+  if (name) tags.push(name);
+  return [...new Set(tags.filter(Boolean))].slice(0, 4);
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 4500) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal, headers: { accept: 'application/json', ...(options.headers || {}) } });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_) {
+    return null;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+function dedupeDexPairs(rows = []) {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const ca = String(row?.baseToken?.address || row?.token?.ca || '').trim();
+    if (!ca || seen.has(ca)) continue;
+    seen.add(ca);
+    out.push(row);
+  }
+  return out;
+}
+
+function sameNameFamily(token = {}, other = {}) {
+  const nameA = normalizeTokenName(token?.name);
+  const symA = normalizeTokenName(token?.symbol);
+  const nameB = normalizeTokenName(other?.baseToken?.name || other?.name);
+  const symB = normalizeTokenName(other?.baseToken?.symbol || other?.symbol);
+  if (!nameA && !symA) return false;
+  return Boolean(
+    (nameA && nameB && nameA === nameB) ||
+    (symA && symB && symA === symB) ||
+    (nameA && symB && nameA === symB) ||
+    (symA && nameB && symA === nameB)
+  );
+}
+
+function scoreOgCandidate(token = {}, pair = {}) {
+  const liquidity = safeNum(pair?.liquidity?.usd || pair?.liquidity, 0);
+  const volume = safeNum(pair?.volume?.h24 || pair?.volume, 0);
+  const txns = safeNum(pair?.txns?.h24?.buys, 0) + safeNum(pair?.txns?.h24?.sells, 0) + safeNum(pair?.txns, 0);
+  const pairCreatedAt = safeNum(pair?.pairCreatedAt, 0);
+  const ageScore = pairCreatedAt > 0 ? Math.max(0, (Date.now() - pairCreatedAt) / 3600000) : 0;
+  const socials = socialCountFromLinks([
+    ...(Array.isArray(pair?.info?.socials) ? pair.info.socials.map((x) => ({ type: x?.type || '', url: x?.url || '' })) : []),
+    ...(Array.isArray(pair?.info?.websites) ? pair.info.websites.map((x) => ({ type: 'website', url: x?.url || '' })) : []),
+  ]);
+  let score = 0;
+  if (sameNameFamily(token, pair)) score += 25;
+  if (normalizeTokenName(token?.name) === normalizeTokenName(pair?.baseToken?.name)) score += 18;
+  if (normalizeTokenName(token?.symbol) === normalizeTokenName(pair?.baseToken?.symbol)) score += 14;
+  score += Math.min(30, ageScore / 8);
+  score += Math.min(20, liquidity / 25000);
+  score += Math.min(18, volume / 50000);
+  score += Math.min(14, txns / 300);
+  score += socials * 4;
+  return score;
+}
+
+async function detectNameCollisionIntel(token = {}) {
+  const name = String(token?.name || '').trim();
+  const symbol = String(token?.symbol || '').trim();
+  const ca = String(token?.ca || '').trim();
+  if (!name && !symbol) {
+    return { collisionDetected: false, sameNameCount: 0, likelyOg: true, verdict: 'no_name', note: 'Нет данных имени/тикера' };
+  }
+
+  const queries = [...new Set([name, symbol, `${name} ${symbol}`].filter(Boolean))].slice(0, 3);
+  const allPairs = [];
+  for (const q of queries) {
+    const json = await fetchJsonWithTimeout(`https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(q)}`);
+    const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
+    allPairs.push(...pairs.filter((p) => String(p?.chainId || '').toLowerCase() === 'solana'));
+  }
+  const family = dedupeDexPairs(allPairs).filter((p) => sameNameFamily(token, p));
+  const familyCount = family.length;
+  if (!familyCount) {
+    return { collisionDetected: false, sameNameCount: 0, likelyOg: true, verdict: 'unique', note: 'Одноимённых конкурентов не найдено' };
+  }
+
+  const ranked = family.map((p) => ({
+    ca: String(p?.baseToken?.address || '').trim(),
+    name: String(p?.baseToken?.name || '').trim(),
+    symbol: String(p?.baseToken?.symbol || '').trim(),
+    pairCreatedAt: safeNum(p?.pairCreatedAt, 0),
+    liquidity: safeNum(p?.liquidity?.usd, 0),
+    volume24h: safeNum(p?.volume?.h24, 0),
+    txns24h: safeNum(p?.txns?.h24?.buys, 0) + safeNum(p?.txns?.h24?.sells, 0),
+    score: scoreOgCandidate(token, p),
+  })).sort((a, b) => b.score - a.score || a.pairCreatedAt - b.pairCreatedAt);
+
+  const top = ranked[0] || null;
+  const likelyOg = !top || top.ca === ca;
+  const primaryOrganicSupport = likelyOg ? 'this_token' : 'other_same_name_token';
+  return {
+    collisionDetected: familyCount > 1,
+    sameNameCount: familyCount,
+    likelyOg,
+    top,
+    alternatives: ranked.filter((x) => x.ca !== ca).slice(0, 3),
+    primaryOrganicSupport,
+    verdict: likelyOg ? (familyCount > 1 ? 'likely_og' : 'unique') : 'likely_clone',
+    note: likelyOg
+      ? (familyCount > 1 ? 'Есть одноимённые токены, но этот выглядит как OG/основной' : 'Одноимённых конкурентов не найдено')
+      : 'Есть одноимённый более сильный/старый кандидат, это может быть клон или испорченный дубль',
+  };
+}
+
+function extractPostsFromJson(node, out = [], depth = 0) {
+  if (!node || depth > 6 || out.length >= 120) return out;
+  if (Array.isArray(node)) {
+    for (const item of node) extractPostsFromJson(item, out, depth + 1);
+    return out;
+  }
+  if (typeof node !== 'object') return out;
+
+  const text = String(node?.text || node?.content || node?.body || node?.message || '').trim();
+  const author = String(
+    node?.author || node?.username || node?.handle || node?.screen_name || node?.user?.username || node?.user?.handle || node?.account?.username || ''
+  ).trim();
+  if (text) out.push({ text, author });
+  for (const value of Object.values(node)) {
+    if (typeof value === 'object') extractPostsFromJson(value, out, depth + 1);
+  }
+  return out;
+}
+
+async function detectNarrativeMentions(token = {}) {
+  const templates = String(process.env.NARRATIVE_QUERY_URLS || '').split(/[\n,;]/).map((x) => x.trim()).filter(Boolean);
+  const tags = buildNarrativeTags(token);
+  if (!templates.length || !tags.length) {
+    return {
+      feedConfigured: false,
+      tags,
+      mentionCount: 0,
+      uniqueAuthors: 0,
+      diversityScore: 0,
+      botLikeRatio: 0,
+      authenticityScore: 0,
+      sentiment: 'unknown',
+      verdict: 'no_feed',
+      note: 'Источник публичных упоминаний не настроен'
+    };
+  }
+
+  const headers = {};
+  if (process.env.NARRATIVE_QUERY_API_KEY) headers.authorization = `Bearer ${process.env.NARRATIVE_QUERY_API_KEY}`;
+  const posts = [];
+  for (const template of templates.slice(0, 3)) {
+    for (const tag of tags.slice(0, 3)) {
+      const url = template.replace(/\{q\}/g, encodeURIComponent(tag));
+      const json = await fetchJsonWithTimeout(url, { headers }, 4000);
+      if (json) posts.push(...extractPostsFromJson(json));
+    }
+  }
+
+  const dedup = [];
+  const seen = new Set();
+  for (const row of posts) {
+    const key = `${normalizeNarrativeText(row.text)}::${String(row.author || '').toLowerCase()}`;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    dedup.push(row);
+  }
+
+  const mentionCount = dedup.length;
+  const uniqueAuthors = new Set(dedup.map((x) => String(x.author || '').toLowerCase()).filter(Boolean)).size;
+  const uniqueTexts = new Set(dedup.map((x) => normalizeNarrativeText(x.text)).filter(Boolean)).size;
+  const repetitiveRatio = mentionCount > 0 ? Math.max(0, 1 - uniqueTexts / mentionCount) : 0;
+  const diversityScore = mentionCount > 0 ? Math.min(100, round((uniqueAuthors / mentionCount) * 100, 2)) : 0;
+  const botLikeRatio = Math.min(100, round((repetitiveRatio * 65) + ((mentionCount > 0 ? 1 - uniqueAuthors / Math.max(mentionCount, 1) : 0) * 35), 2));
+
+  const joined = dedup.map((x) => normalizeNarrativeText(x.text)).join(' ');
+  const positiveLex = ['bullish', 'send', 'runner', 'based', 'og', 'cto', 'gem', 'packaging', 'accumulation', 'reversal'];
+  const negativeLex = ['scam', 'rug', 'farm', 'dead', 'avoid', 'dump', 'fake', 'clone'];
+  const pos = positiveLex.reduce((s, k) => s + (joined.includes(k) ? 1 : 0), 0);
+  const neg = negativeLex.reduce((s, k) => s + (joined.includes(k) ? 1 : 0), 0);
+  const sentiment = pos > neg ? 'positive' : neg > pos ? 'negative' : 'mixed';
+
+  let authenticityScore = 0;
+  authenticityScore += Math.min(35, mentionCount * 2.5);
+  authenticityScore += Math.min(30, diversityScore * 0.3);
+  authenticityScore += Math.max(0, 30 - botLikeRatio * 0.3);
+  if (sentiment === 'positive') authenticityScore += 8;
+  if (sentiment === 'negative') authenticityScore -= 10;
+  authenticityScore = Math.max(0, Math.min(100, round(authenticityScore, 2)));
+
+  const verdict = authenticityScore >= 65 ? 'organic' : authenticityScore >= 40 ? 'mixed' : mentionCount > 0 ? 'manufactured' : 'quiet';
+  return {
+    feedConfigured: true,
+    tags,
+    mentionCount,
+    uniqueAuthors,
+    uniqueTexts,
+    diversityScore,
+    botLikeRatio,
+    authenticityScore,
+    sentiment,
+    verdict,
+    note: verdict === 'organic'
+      ? 'Упоминания выглядят живыми и разнообразными'
+      : verdict === 'manufactured'
+        ? 'Упоминания выглядят однотипно или ботоподобно'
+        : verdict === 'quiet'
+          ? 'Публичный нарратив пока тихий'
+          : 'Нарратив есть, но смешанный по качеству'
+  };
+}
+
+async function buildNarrativeOgIntel(result = {}) {
+  const token = result?.analyzed?.token || result?.token || {};
+  const [collision, mentions] = await Promise.all([
+    detectNameCollisionIntel(token),
+    detectNarrativeMentions(token),
+  ]);
+  return { collision, mentions, tags: buildNarrativeTags(token) };
+}
+
 function extractMetrics(result) {
   const analyzed = result?.analyzed || {};
   const token = analyzed?.token || {};
@@ -235,12 +503,6 @@ function extractMetrics(result) {
     priceSinceLastSummaryPct: safeNum(holder?.priceSinceLastSummaryPct, 0),
     bullishHolderGrowthOnWeakness: Boolean(holder?.bullishHolderGrowthOnWeakness),
     holderGrowthWindowMin: safeNum(holder?.holderGrowthWindowMin, 0),
-    insiderRebuyWalletCount: safeNum(holder?.insiderRebuyWalletCount, 0),
-    insiderRebuyClusterSize: safeNum(holder?.insiderRebuyClusterSize, 0),
-    insiderRebuyScore: safeNum(holder?.insiderRebuyScore, 0),
-    insiderRebuyGapHoursAvg: safeNum(holder?.insiderRebuyGapHoursAvg, 0),
-    insiderRebuyEqualSizeScore: safeNum(holder?.insiderRebuyEqualSizeScore, 0),
-    insiderStyleRebuyPass: Boolean(holder?.insiderStyleRebuyPass),
   };
 }
 
@@ -410,9 +672,6 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `${holder?.quietAccumulationPass ? green('Тихое накопление') : red('Тихое накопление')} | ${holder?.warehouseStoragePass ? green('Складская упаковка') : yellow('Складская упаковка')} | ${holder?.activeReaccumulationPass ? green('Активный добор') : yellow('Активный добор')}`,
     `${holder?.bottomPackReversalPass ? green('Нижняя упаковка') : red('Нижняя упаковка')} | ${archetype.key === 'warehouse_storage' ? green('Архетип') : yellow('Архетип')} — ${escapeHtml(archetype.label)}`,
     `🟡 ${escapeHtml(archetype.note)}`,
-    `${holder?.insiderStyleRebuyPass ? green('Инсайдерский/координированный перезаход') : yellow('Инсайдерский/координированный перезаход')} — ${holder?.insiderStyleRebuyPass ? 'да' : 'нет'}`,
-    `${yellow('Кошельки / кластер / gap / схожесть размеров')} — ${safeNum(holder.insiderRebuyWalletCount ?? 0, 0)} / ${safeNum(holder.insiderRebuyClusterSize ?? 0, 0)} / ${fmtNum(holder.insiderRebuyGapHoursAvg ?? 0, 1)}ч / ${fmtNum(holder.insiderRebuyEqualSizeScore ?? 0, 0)}`,
-    `${safeNum(holder.insiderRebuyScore ?? 0, 0) >= 50 ? green('Bullish intelligence score') : yellow('Bullish intelligence score')} — ${fmtNum(holder.insiderRebuyScore ?? 0, 0)}`,
     ``,
     `<b>🔁 Структура разворота</b>`,
     `${reversal?.allow ? green('Reversal confirmed') : red('Reversal confirmed')} | score ${safeNum(structureScore, 0)} | mode ${escapeHtml(reversal?.primaryMode || '-')}`,
@@ -421,6 +680,16 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `<b>🌊 Миграция</b>`,
     `Возраст пары ${fmtNum(migration?.pairAgeMin, 1)}м | Survivor ${safeNum(migration?.survivorScore, 0)} | liq/mcap ${fmtPct(migration?.liqToMcapPct)} | vol/liq ${fmtPct(migration?.volToLiqPct)}`,
     `${migration?.passes ? green('Migration pass') : yellow('Migration pass')} — ${migration?.passes ? 'да' : 'нет'}`,
+    ``,
+    `<b>🧠 Narrative / OG</b>`,
+    `${Array.isArray(result?.narrativeOg?.tags) && result.narrativeOg.tags.length ? yellow('Теги наблюдения') + ' — ' + escapeHtml(result.narrativeOg.tags.join(' / ')) : yellow('Теги наблюдения') + ' — -'}`,
+    `${result?.narrativeOg?.collision?.collisionDetected ? red('Коллизия имени') : green('Коллизия имени')} — ${result?.narrativeOg?.collision?.collisionDetected ? 'да' : 'нет'}${result?.narrativeOg?.collision?.sameNameCount ? ' (' + safeNum(result?.narrativeOg?.collision?.sameNameCount, 0) + ')' : ''}`,
+    `${result?.narrativeOg?.collision?.likelyOg ? green('OG статус') : red('OG статус')} — ${result?.narrativeOg?.collision?.likelyOg ? 'похоже на OG' : 'похоже на клон/испорченный дубль'}`,
+    `${result?.narrativeOg?.collision?.top && !result?.narrativeOg?.collision?.likelyOg ? yellow('Более сильный одноимённый кандидат') + ' — ' + escapeHtml(result.narrativeOg.collision.top.name || '-') + ' / <code>' + escapeHtml(result.narrativeOg.collision.top.ca || '-') + '</code>' : yellow('Комментарий OG') + ' — ' + escapeHtml(result?.narrativeOg?.collision?.note || '-')}`,
+    `${result?.narrativeOg?.mentions?.feedConfigured ? green('Фид упоминаний') : yellow('Фид упоминаний')} — ${result?.narrativeOg?.mentions?.feedConfigured ? 'подключен' : 'не настроен'}`,
+    `${result?.narrativeOg?.mentions?.feedConfigured ? ((safeNum(result?.narrativeOg?.mentions?.authenticityScore, 0) >= 65) ? green('Аутентичность нарратива') : (safeNum(result?.narrativeOg?.mentions?.authenticityScore, 0) >= 40 ? yellow('Аутентичность нарратива') : red('Аутентичность нарратива'))) + ' — ' + fmtNum(result?.narrativeOg?.mentions?.authenticityScore, 0) + '/100 | authors ' + safeNum(result?.narrativeOg?.mentions?.uniqueAuthors, 0) + ' | mentions ' + safeNum(result?.narrativeOg?.mentions?.mentionCount, 0) : yellow('Аутентичность нарратива') + ' — нет внешнего фида'}`,
+    `${result?.narrativeOg?.mentions?.feedConfigured ? ((safeNum(result?.narrativeOg?.mentions?.botLikeRatio, 0) <= 35) ? green('Bot-like ratio') : red('Bot-like ratio')) + ' — ' + fmtPct(result?.narrativeOg?.mentions?.botLikeRatio, 1) + ' | diversity ' + fmtPct(result?.narrativeOg?.mentions?.diversityScore, 1) + ' | sentiment ' + escapeHtml(result?.narrativeOg?.mentions?.sentiment || '-') : yellow('Комментарий по нарративу') + ' — ' + escapeHtml(result?.narrativeOg?.mentions?.note || 'Источник упоминаний не настроен')}`,
+    `${yellow('Комментарий')} — ${escapeHtml(result?.narrativeOg?.mentions?.note || result?.narrativeOg?.collision?.note || '-')}`,
     ``,
     `<b>Планы:</b> ${shortPlanList.length ? escapeHtml(shortPlanList.join(', ')) : 'нет'}`,
     `<b>URL:</b> ${escapeHtml(token.url || '-')}`,
@@ -454,15 +723,13 @@ function buildDeltaMessage(prev, next) {
   if (deltaFresh >= 3) bullish.push(green(`fresh cohort +${deltaFresh}`));
   if (deltaMeaningful >= 2) bullish.push(green(`meaningful holders +${deltaMeaningful}`));
   if (next.bullishHolderGrowthOnWeakness) bullish.push(green('реальные холдеры растут на просадке цены'));
-  if (!prev.insiderStyleRebuyPass && next.insiderStyleRebuyPass) bullish.push(green('обнаружен координированный перезаход после старых продаж'));
-  if ((next.insiderRebuyScore - prev.insiderRebuyScore) >= 12) bullish.push(green(`insider reload score +${round(next.insiderRebuyScore - prev.insiderRebuyScore, 0)}`));
 
   if (deltaControl <= -6.0) bearish.push(red(`cohort control ${deltaControl}%`));
   if (deltaAccum <= -10.0) bearish.push(red(`net accumulation ${deltaAccum}%`));
   if (deltaRet2h <= -15.0) bearish.push(red(`retention 2h ${deltaRet2h}%`));
   if (deltaMeaningful <= -2) bearish.push(red(`meaningful holders ${deltaMeaningful}`));
   if (prev.quietAccumulationPass && !next.quietAccumulationPass && next.netControlPct < 60) bearish.push(red('quiet accumulation weakened'));
-  if (prev.insiderStyleRebuyPass && !next.insiderStyleRebuyPass) bearish.push(red('координированный перезаход ослаб'));
+
   if (!bullish.length && !bearish.length) return '';
 
   const lines = [
@@ -478,7 +745,6 @@ function buildDeltaMessage(prev, next) {
     `<b>Новая когорта:</b> ${next.freshWalletBuyCount}`,
     `<b>Склад / активно:</b> ${next.warehouseStoragePass ? 'да' : 'нет'} / ${next.activeReaccumulationPass ? 'да' : 'нет'}`,
     `<b>Архетип:</b> ${escapeHtml(next.archetype || '-')}`,
-    `<b>Инсайдерский перезаход:</b> ${next.insiderStyleRebuyPass ? 'да' : 'нет'} | score ${fmtNum(next.insiderRebuyScore ?? 0, 0)} | cluster ${safeNum(next.insiderRebuyClusterSize ?? 0, 0)}` ,
   ];
 
   if (bullish.length) {
@@ -513,7 +779,7 @@ async function performScanCA(kernel, ca) {
         fetchTokenByCA: (value) => kernel.fetchTokenByCA(value),
         ca,
       });
-      if (result) return result;
+      if (result) { result.narrativeOg = await buildNarrativeOgIntel(result); return result; }
     } catch (_) {}
   }
 
@@ -551,7 +817,9 @@ async function performScanCA(kernel, ca) {
     } catch (_) {}
   }
 
-  return { analyzed, plans, heroImage: token?.imageUrl || null };
+  const result = { analyzed, plans, heroImage: token?.imageUrl || null };
+  result.narrativeOg = await buildNarrativeOgIntel(result);
+  return result;
 }
 
 export function applyAccumulationScanHotfix(router, kernel) {
