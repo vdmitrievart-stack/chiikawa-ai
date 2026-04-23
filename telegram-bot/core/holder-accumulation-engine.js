@@ -34,6 +34,8 @@ export default class HolderAccumulationEngine {
     this.walletTtlMs = Number(options.walletTtlMs || 30 * 60 * 1000);
     this.maxTrackedWallets = Number(options.maxTrackedWallets || 20);
     this.maxHistorySignatures = Number(options.maxHistorySignatures || 18);
+    this.minMeaningfulTrackedSharePct = Number(options.minMeaningfulTrackedSharePct || 0.4);
+    this.minMeaningfulHoldingPct = Number(options.minMeaningfulHoldingPct || 20);
     this.connection = null;
   }
 
@@ -101,6 +103,11 @@ export default class HolderAccumulationEngine {
       warehouseStoragePass: false,
       activeReaccumulationPass: false,
       warehouseMode: 'none',
+      meaningfulWalletCount: 0,
+      selfBuyWalletCount: 0,
+      transferOnlyWalletCount: 0,
+      dustFilteredWalletCount: 0,
+      meaningfulCoveragePct: 0,
       updatedAt: Date.now()
     };
   }
@@ -126,6 +133,15 @@ export default class HolderAccumulationEngine {
       }
     }
     return out;
+  }
+
+  ownerSigned(tx, owner) {
+    const keys = Array.isArray(tx?.transaction?.message?.accountKeys) ? tx.transaction.message.accountKeys : [];
+    return keys.some((row) => {
+      const key = asText(row?.pubkey?.toBase58?.() || row?.pubkey || row || "");
+      const signer = row?.signer === true || row?.signer === 1 || row?.signer === "true";
+      return key === owner && signer;
+    });
   }
 
   async enrichHistoricalWallets(mint, holders = [], candidate = {}) {
@@ -161,9 +177,13 @@ export default class HolderAccumulationEngine {
     let earliestBuyAt = 0;
     let latestBuyAt = 0;
     let latestSellAt = 0;
+    let earliestTransferInAt = 0;
     let totalBought = 0;
     let totalSold = 0;
+    let totalTransferredIn = 0;
     let buyCount = 0;
+    let selfBuyCount = 0;
+    let transferInCount = 0;
     let sellCount = 0;
 
     for (const group of chunk(signatures, 4)) {
@@ -181,11 +201,19 @@ export default class HolderAccumulationEngine {
         if (!tx?.meta) continue;
         const delta = this.computeTokenAccountDelta(tx, mint, tokenAccount, owner);
         if (delta > 0) {
-          totalBought += delta;
-          buyCount += 1;
           const at = safeNum(sigRow?.blockTime, 0) * 1000;
-          if (at > 0 && (!earliestBuyAt || at < earliestBuyAt)) earliestBuyAt = at;
-          if (at > latestBuyAt) latestBuyAt = at;
+          const selfDirectedBuy = this.ownerSigned(tx, owner);
+          if (selfDirectedBuy) {
+            totalBought += delta;
+            buyCount += 1;
+            selfBuyCount += 1;
+            if (at > 0 && (!earliestBuyAt || at < earliestBuyAt)) earliestBuyAt = at;
+            if (at > latestBuyAt) latestBuyAt = at;
+          } else {
+            totalTransferredIn += delta;
+            transferInCount += 1;
+            if (at > 0 && (!earliestTransferInAt || at < earliestTransferInAt)) earliestTransferInAt = at;
+          }
         } else if (delta < 0) {
           totalSold += Math.abs(delta);
           sellCount += 1;
@@ -195,15 +223,18 @@ export default class HolderAccumulationEngine {
       }
     }
 
-    const firstSeenAt = earliestBuyAt || (signatures.length ? safeNum(signatures[signatures.length - 1]?.blockTime, 0) * 1000 : 0) || 0;
-    const holdDurationMinutes = firstSeenAt > 0 ? (now - firstSeenAt) / 60000 : 0;
-    const currentHoldingPct = totalBought > 0 ? clamp((currentTokenAmount / Math.max(totalBought, 0.0000001)) * 100, 0, 100) : (currentTokenAmount > 0 ? 100 : 0);
-    const reloadCount = Math.max(0, buyCount - 1);
-    const churnScore = clamp(totalBought > 0 ? (totalSold / totalBought) * 100 : 0, 0, 100);
-    const storageLike = currentHoldingPct >= 60 && churnScore <= 40 && (sellCount <= 1 || latestSellAt === 0);
+    const firstSeenAt = earliestBuyAt || earliestTransferInAt || (signatures.length ? safeNum(signatures[signatures.length - 1]?.blockTime, 0) * 1000 : 0) || 0;
+    const firstEconomicAt = earliestBuyAt || 0;
+    const holdDurationMinutes = firstEconomicAt > 0 ? (now - firstEconomicAt) / 60000 : 0;
+    const currentHoldingPct = totalBought > 0 ? clamp((currentTokenAmount / Math.max(totalBought, 0.0000001)) * 100, 0, 100) : 0;
+    const reloadCount = Math.max(0, selfBuyCount - 1);
+    const churnScore = clamp(totalBought > 0 ? (totalSold / totalBought) * 100 : 100, 0, 100);
+    const selfBuyer = selfBuyCount > 0;
+    const transferOnly = !selfBuyer && totalTransferredIn > 0;
+    const storageLike = selfBuyer && currentHoldingPct >= 60 && churnScore <= 40 && (sellCount <= 1 || latestSellAt === 0);
 
     const priceWeakness = safeNum(candidate?.delta?.priceH6Pct, 0) < 0 || safeNum(candidate?.delta?.priceH24Pct, 0) < 0;
-    const dipBuyRatio = buyCount > 0 ? clamp((reloadCount / buyCount) * (priceWeakness ? 1 : 0.5), 0, 1) : 0;
+    const dipBuyRatio = selfBuyCount > 0 ? clamp((reloadCount / selfBuyCount) * (priceWeakness ? 1 : 0.5), 0, 1) : 0;
 
     return {
       tokenAccount,
@@ -211,9 +242,12 @@ export default class HolderAccumulationEngine {
       currentTokenAmount,
       totalBought,
       totalSold,
-      buyCount,
+      totalTransferredIn,
+      buyCount: selfBuyCount,
+      selfBuyCount,
+      transferInCount,
       sellCount,
-      firstBuyAt: earliestBuyAt || firstSeenAt || 0,
+      firstBuyAt: earliestBuyAt || 0,
       latestBuyAt,
       latestSellAt,
       firstSeenAt,
@@ -222,6 +256,8 @@ export default class HolderAccumulationEngine {
       reloadCount,
       churnScore,
       dipBuyRatio,
+      selfBuyer,
+      transferOnly,
       storageLike,
       updatedAt: now
     };
@@ -232,7 +268,7 @@ export default class HolderAccumulationEngine {
     const post = Array.isArray(tx?.meta?.postTokenBalances) ? tx.meta.postTokenBalances : [];
 
     const sumFor = (rows) => rows
-      .filter((row) => asText(row?.mint) === mint && (asText(row?.owner) === owner || safeNum(row?.accountIndex, -1) >= 0))
+      .filter((row) => asText(row?.mint) === mint && asText(row?.owner) === owner)
       .reduce((acc, row) => {
         const amt = safeNum(row?.uiTokenAmount?.uiAmount, 0);
         return acc + amt;
@@ -251,7 +287,23 @@ export default class HolderAccumulationEngine {
     const cohortWindowMin = Math.max(60, Math.min(10 * 24 * 60, pairAgeMin > 0 ? pairAgeMin : 10 * 24 * 60));
 
     const trackedWallets = walletRows.length;
-    const freshCohort = walletRows.filter((row) => safeNum(row?.holdDurationMinutes, 0) > 0 && safeNum(row?.holdDurationMinutes, 0) <= cohortWindowMin);
+    const totalCurrentTracked = sum(walletRows, 'currentTokenAmount');
+
+    const normalizedRows = walletRows.map((row) => {
+      const trackedSharePct = totalCurrentTracked > 0 ? (safeNum(row?.currentTokenAmount, 0) / totalCurrentTracked) * 100 : 0;
+      const meaningful = Boolean(row?.selfBuyer) && trackedSharePct >= this.minMeaningfulTrackedSharePct && safeNum(row?.currentHoldingPct, 0) >= this.minMeaningfulHoldingPct;
+      return { ...row, trackedSharePct, meaningful };
+    });
+
+    const meaningfulRows = normalizedRows.filter((row) => row?.meaningful);
+    const meaningfulTrackedCurrent = sum(meaningfulRows, 'currentTokenAmount');
+    const meaningfulWalletCount = meaningfulRows.length;
+    const selfBuyWalletCount = normalizedRows.filter((row) => row?.selfBuyer).length;
+    const transferOnlyWalletCount = normalizedRows.filter((row) => row?.transferOnly).length;
+    const dustFilteredWalletCount = normalizedRows.filter((row) => !row?.meaningful && !row?.transferOnly).length;
+    const meaningfulCoveragePct = totalCurrentTracked > 0 ? (meaningfulTrackedCurrent / totalCurrentTracked) * 100 : 0;
+
+    const freshCohort = meaningfulRows.filter((row) => safeNum(row?.holdDurationMinutes, 0) > 0 && safeNum(row?.holdDurationMinutes, 0) <= cohortWindowMin);
     const freshWalletBuyCount = freshCohort.length;
     const warehouseWallets = freshCohort.filter((row) => row?.storageLike);
 
@@ -260,7 +312,6 @@ export default class HolderAccumulationEngine {
     const retained6h = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 360 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
     const retained24h = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 1440 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
 
-    const totalCurrentTracked = sum(walletRows, 'currentTokenAmount');
     const freshCurrent = sum(freshCohort, 'currentTokenAmount');
     const freshBought = sum(freshCohort, 'totalBought');
     const reloadCount = sum(freshCohort, 'reloadCount');
@@ -277,7 +328,7 @@ export default class HolderAccumulationEngine {
     const retention6hPct = freshWalletBuyCount > 0 ? (retained6h / freshWalletBuyCount) * 100 : 0;
     const retention24hPct = freshWalletBuyCount > 0 ? (retained24h / freshWalletBuyCount) * 100 : 0;
     const netAccumulationPct = freshBought > 0 ? clamp((freshCurrent / freshBought) * 100, 0, 100) : 0;
-    const netControlPct = totalCurrentTracked > 0 ? clamp((freshCurrent / totalCurrentTracked) * 100, 0, 100) : 0;
+    const netControlPct = meaningfulTrackedCurrent > 0 ? clamp((freshCurrent / meaningfulTrackedCurrent) * 100, 0, 100) : 0;
     const bottomTouches = this.estimateBottomTouches(candidate, reloadCount, retention2hPct);
     const accumulationPhaseAgeHours = earliestBuyAt > 0 ? (now - earliestBuyAt) / 3600000 : 0;
     const warehouseSimilarityScore = this.estimateSimilarityScore(freshCohort, candidate);
@@ -286,6 +337,7 @@ export default class HolderAccumulationEngine {
       freshWalletBuyCount >= 10 &&
       netAccumulationPct >= 70 &&
       netControlPct >= 45 &&
+      meaningfulCoveragePct >= 15 &&
       avgChurn <= 45 &&
       (retention30mPct >= 45 || retention2hPct >= 28 || retention6hPct >= 16) &&
       (warehouseWallets.length >= 6 || warehouseSimilarityScore >= 32 || bottomTouches >= 2);
@@ -302,6 +354,7 @@ export default class HolderAccumulationEngine {
       (
         freshWalletBuyCount >= 10 &&
         netControlPct >= 20 &&
+        meaningfulCoveragePct >= 15 &&
         (retention30mPct >= 30 || retention2hPct >= 18 || retention6hPct >= 10) &&
         (bottomTouches >= 2)
       );
@@ -349,6 +402,12 @@ export default class HolderAccumulationEngine {
       warehouseStoragePass,
       activeReaccumulationPass,
       warehouseMode,
+      meaningfulWalletCount,
+      selfBuyWalletCount,
+      transferOnlyWalletCount,
+      dustFilteredWalletCount,
+      meaningfulCoveragePct: roundPct(meaningfulCoveragePct),
+      minimumMeaningfulSharePct: this.minMeaningfulTrackedSharePct,
       updatedAt: now
     };
   }
