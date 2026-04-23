@@ -32,6 +32,11 @@ function fmtApproxPct(v, d = 2) {
   return `≈${round(v, d)}%`;
 }
 
+function fmtSignedPct(v, d = 2) {
+  const n = round(v, d);
+  return `${n > 0 ? '+' : ''}${n}%`;
+}
+
 function isLikelyCA(text) {
   const value = String(text || "").trim();
   return /^[1-9A-HJ-NP-Za-km-z]{32,48}$/.test(value);
@@ -224,6 +229,18 @@ function extractMetrics(result) {
     reversalMode: reversal?.primaryMode || "-",
     archetype: deriveCohortArchetype(holder).label,
     packagingProbeReady: derivePackagingProbeReady(analyzed),
+    meaningfulWalletCount: safeNum(holder?.meaningfulWalletCount, 0),
+    meaningfulHolderGrowthPct: safeNum(holder?.meaningfulHolderGrowthPct, 0),
+    meaningfulHolderDelta: safeNum(holder?.meaningfulHolderDelta, 0),
+    priceSinceLastSummaryPct: safeNum(holder?.priceSinceLastSummaryPct, 0),
+    bullishHolderGrowthOnWeakness: Boolean(holder?.bullishHolderGrowthOnWeakness),
+    holderGrowthWindowMin: safeNum(holder?.holderGrowthWindowMin, 0),
+    insiderRebuyWalletCount: safeNum(holder?.insiderRebuyWalletCount, 0),
+    insiderRebuyClusterSize: safeNum(holder?.insiderRebuyClusterSize, 0),
+    insiderRebuyScore: safeNum(holder?.insiderRebuyScore, 0),
+    insiderRebuyGapHoursAvg: safeNum(holder?.insiderRebuyGapHoursAvg, 0),
+    insiderRebuyEqualSizeScore: safeNum(holder?.insiderRebuyEqualSizeScore, 0),
+    insiderStyleRebuyPass: Boolean(holder?.insiderStyleRebuyPass),
   };
 }
 
@@ -381,6 +398,9 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `${safeNum(holder.freshWalletBuyCount, 0) >= 10 ? green('Новая когорта') : yellow('Новая когорта')} — ${safeNum(holder.freshWalletBuyCount, 0)}`,
     `${yellow('Self-buy / transfer-only / dust')} — ${safeNum(holder.selfBuyWalletCount ?? 0, 0)} / ${safeNum(holder.transferOnlyWalletCount ?? 0, 0)} / ${safeNum(holder.dustFilteredWalletCount ?? 0, 0)}`,
     `${yellow('Порог значимого холдера')} — >= ${fmtPct(holder.minimumMeaningfulSharePct ?? 0.3, 2)} от отслеживаемой базы + сам купил` ,
+    `${safeNum(holder.meaningfulHolderGrowthPct ?? 0, 0) > 0 ? green('Рост реальных холдеров') : safeNum(holder.meaningfulHolderGrowthPct ?? 0, 0) < 0 ? red('Рост реальных холдеров') : yellow('Рост реальных холдеров')} — ${fmtSignedPct(holder.meaningfulHolderGrowthPct ?? 0, 2)}${safeNum(holder.holderGrowthWindowMin ?? 0, 0) > 0 ? ` за ${fmtNum(holder.holderGrowthWindowMin ?? 0, 0)}м` : ''}`,
+    `${safeNum(holder.priceSinceLastSummaryPct ?? 0, 0) !== 0 ? (safeNum(holder.priceSinceLastSummaryPct ?? 0, 0) <= 0 ? yellow('Цена за окно наблюдения') : yellow('Цена за окно наблюдения')) : yellow('Цена за окно наблюдения')} — ${fmtSignedPct(holder.priceSinceLastSummaryPct ?? 0, 2)}`,
+    `${holder?.bullishHolderGrowthOnWeakness ? green('Бычья дивергенция накопления: цена слабеет, а реальные холдеры растут') : yellow('Бычья дивергенция накопления: пока не подтверждена')}`,
     `${safeNum(holder.retention30mPct, 0) >= 50 ? green('Удержание 30м / 2ч') : yellow('Удержание 30м / 2ч')} — ${fmtPct(holder.retention30mPct)} / ${fmtPct(holder.retention2hPct)}`,
     `${safeNum(holder.historicalRetention6hPct ?? holder.retention6hPct, 0) > 0 ? green('Историческое удержание 6ч / 24ч') : yellow('Историческое удержание 6ч / 24ч')} — ${fmtPct(holder.historicalRetention6hPct ?? holder.retention6hPct)} / ${fmtPct(holder.historicalRetention24hPct)}`,
     `${safeNum(holder.netAccumulationPct, 0) > 0 ? green('Чистое накопление') : yellow('Чистое накопление')} — ${fmtPct(holder.netAccumulationPct)}`,
@@ -390,6 +410,9 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `${holder?.quietAccumulationPass ? green('Тихое накопление') : red('Тихое накопление')} | ${holder?.warehouseStoragePass ? green('Складская упаковка') : yellow('Складская упаковка')} | ${holder?.activeReaccumulationPass ? green('Активный добор') : yellow('Активный добор')}`,
     `${holder?.bottomPackReversalPass ? green('Нижняя упаковка') : red('Нижняя упаковка')} | ${archetype.key === 'warehouse_storage' ? green('Архетип') : yellow('Архетип')} — ${escapeHtml(archetype.label)}`,
     `🟡 ${escapeHtml(archetype.note)}`,
+    `${holder?.insiderStyleRebuyPass ? green('Инсайдерский/координированный перезаход') : yellow('Инсайдерский/координированный перезаход')} — ${holder?.insiderStyleRebuyPass ? 'да' : 'нет'}`,
+    `${yellow('Кошельки / кластер / gap / схожесть размеров')} — ${safeNum(holder.insiderRebuyWalletCount ?? 0, 0)} / ${safeNum(holder.insiderRebuyClusterSize ?? 0, 0)} / ${fmtNum(holder.insiderRebuyGapHoursAvg ?? 0, 1)}ч / ${fmtNum(holder.insiderRebuyEqualSizeScore ?? 0, 0)}`,
+    `${safeNum(holder.insiderRebuyScore ?? 0, 0) >= 50 ? green('Bullish intelligence score') : yellow('Bullish intelligence score')} — ${fmtNum(holder.insiderRebuyScore ?? 0, 0)}`,
     ``,
     `<b>🔁 Структура разворота</b>`,
     `${reversal?.allow ? green('Reversal confirmed') : red('Reversal confirmed')} | score ${safeNum(structureScore, 0)} | mode ${escapeHtml(reversal?.primaryMode || '-')}`,
@@ -416,6 +439,7 @@ function buildDeltaMessage(prev, next) {
   const deltaAccum = round(next.netAccumulationPct - prev.netAccumulationPct, 2);
   const deltaRet2h = round(next.retention2hPct - prev.retention2hPct, 2);
   const deltaFresh = next.freshWalletBuyCount - prev.freshWalletBuyCount;
+  const deltaMeaningful = safeNum(next.meaningfulWalletCount, 0) - safeNum(prev.meaningfulWalletCount, 0);
   const bullish = [];
   const bearish = [];
 
@@ -428,12 +452,17 @@ function buildDeltaMessage(prev, next) {
   if (deltaAccum >= 4.0) bullish.push(green(`net accumulation +${deltaAccum}%`));
   if (deltaRet2h >= 10.0) bullish.push(green(`retention 2h +${deltaRet2h}%`));
   if (deltaFresh >= 3) bullish.push(green(`fresh cohort +${deltaFresh}`));
+  if (deltaMeaningful >= 2) bullish.push(green(`meaningful holders +${deltaMeaningful}`));
+  if (next.bullishHolderGrowthOnWeakness) bullish.push(green('реальные холдеры растут на просадке цены'));
+  if (!prev.insiderStyleRebuyPass && next.insiderStyleRebuyPass) bullish.push(green('обнаружен координированный перезаход после старых продаж'));
+  if ((next.insiderRebuyScore - prev.insiderRebuyScore) >= 12) bullish.push(green(`insider reload score +${round(next.insiderRebuyScore - prev.insiderRebuyScore, 0)}`));
 
   if (deltaControl <= -6.0) bearish.push(red(`cohort control ${deltaControl}%`));
   if (deltaAccum <= -10.0) bearish.push(red(`net accumulation ${deltaAccum}%`));
   if (deltaRet2h <= -15.0) bearish.push(red(`retention 2h ${deltaRet2h}%`));
+  if (deltaMeaningful <= -2) bearish.push(red(`meaningful holders ${deltaMeaningful}`));
   if (prev.quietAccumulationPass && !next.quietAccumulationPass && next.netControlPct < 60) bearish.push(red('quiet accumulation weakened'));
-
+  if (prev.insiderStyleRebuyPass && !next.insiderStyleRebuyPass) bearish.push(red('координированный перезаход ослаб'));
   if (!bullish.length && !bearish.length) return '';
 
   const lines = [
@@ -441,12 +470,15 @@ function buildDeltaMessage(prev, next) {
     `<b>Token:</b> <b>${escapeHtml(next.tokenName)}</b>`,
     `<b>CA:</b> <code>${escapeHtml(next.ca)}</code>`,
     `<b>Category:</b> <b>${escapeHtml(next.category)}</b>`,
+    `<b>Рост реальных холдеров:</b> ${fmtSignedPct(next.meaningfulHolderGrowthPct ?? 0, 2)}${safeNum(next.holderGrowthWindowMin ?? 0, 0) > 0 ? ` за ${fmtNum(next.holderGrowthWindowMin ?? 0, 0)}м` : ''}`,
+    `<b>Цена за окно наблюдения:</b> ${fmtSignedPct(next.priceSinceLastSummaryPct ?? 0, 2)}`,
     `<b>Оценочный контроль когорты:</b> ${fmtApproxPct(Math.min(next.netControlPct, 95), 2)} (${deltaControl >= 0 ? '+' : ''}${deltaControl}%)`,
     `<b>Чистое накопление:</b> ${fmtPct(next.netAccumulationPct)} (${deltaAccum >= 0 ? '+' : ''}${deltaAccum}%)`,
     `<b>Удержание 30м / 2ч / 6ч:</b> ${fmtPct(next.retention30mPct)} / ${fmtPct(next.retention2hPct)} / ${fmtPct(next.retention6hPct)}`,
     `<b>Новая когорта:</b> ${next.freshWalletBuyCount}`,
     `<b>Склад / активно:</b> ${next.warehouseStoragePass ? 'да' : 'нет'} / ${next.activeReaccumulationPass ? 'да' : 'нет'}`,
     `<b>Архетип:</b> ${escapeHtml(next.archetype || '-')}`,
+    `<b>Инсайдерский перезаход:</b> ${next.insiderStyleRebuyPass ? 'да' : 'нет'} | score ${fmtNum(next.insiderRebuyScore ?? 0, 0)} | cluster ${safeNum(next.insiderRebuyClusterSize ?? 0, 0)}` ,
   ];
 
   if (bullish.length) {

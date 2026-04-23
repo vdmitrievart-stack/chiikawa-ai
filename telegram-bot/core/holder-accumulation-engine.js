@@ -68,7 +68,7 @@ export default class HolderAccumulationEngine {
     try {
       const holders = await this.fetchTopTokenAccounts(mint);
       const historical = await this.enrichHistoricalWallets(mint, holders, candidate);
-      const summary = this.buildSummary(candidate, historical);
+      const summary = this.buildSummary(candidate, historical, cached);
       await this.store?.setSummary?.(mint, summary);
       return summary;
     } catch (error) {
@@ -108,6 +108,20 @@ export default class HolderAccumulationEngine {
       transferOnlyWalletCount: 0,
       dustFilteredWalletCount: 0,
       meaningfulCoveragePct: 0,
+      currentPrice: safeNum(candidate?.token?.price, 0),
+      holderGrowthWindowMin: 0,
+      meaningfulHolderDelta: 0,
+      meaningfulHolderGrowthPct: 0,
+      meaningfulSelfBuyGrowthPct: 0,
+      priceSinceLastSummaryPct: 0,
+      bullishHolderGrowthOnWeakness: false,
+      insiderRebuyWalletCount: 0,
+      insiderRebuyClusterSize: 0,
+      insiderRebuyScore: 0,
+      insiderRebuyGapHoursAvg: 0,
+      insiderRebuyEqualSizeScore: 0,
+      insiderStyleRebuyPass: false,
+      insiderRebuyNote: 'нет выраженного координированного перезахода',
       updatedAt: Date.now()
     };
   }
@@ -181,6 +195,8 @@ export default class HolderAccumulationEngine {
     let totalBought = 0;
     let totalSold = 0;
     let totalTransferredIn = 0;
+    let latestBuyAmount = 0;
+    let latestSellAmount = 0;
     let buyCount = 0;
     let selfBuyCount = 0;
     let transferInCount = 0;
@@ -218,7 +234,10 @@ export default class HolderAccumulationEngine {
           totalSold += Math.abs(delta);
           sellCount += 1;
           const at = safeNum(sigRow?.blockTime, 0) * 1000;
-          if (at > latestSellAt) latestSellAt = at;
+          if (at > latestSellAt) {
+            latestSellAt = at;
+            latestSellAmount = Math.abs(delta);
+          }
         }
       }
     }
@@ -235,6 +254,8 @@ export default class HolderAccumulationEngine {
 
     const priceWeakness = safeNum(candidate?.delta?.priceH6Pct, 0) < 0 || safeNum(candidate?.delta?.priceH24Pct, 0) < 0;
     const dipBuyRatio = selfBuyCount > 0 ? clamp((reloadCount / selfBuyCount) * (priceWeakness ? 1 : 0.5), 0, 1) : 0;
+    const rebuyGapHours = latestSellAt > 0 && latestBuyAt > latestSellAt ? (latestBuyAt - latestSellAt) / 3600000 : 0;
+    const reboughtAfterSell = rebuyGapHours >= 15 && latestBuyAmount > 0 && currentHoldingPct >= 35;
 
     return {
       tokenAccount,
@@ -248,6 +269,8 @@ export default class HolderAccumulationEngine {
       transferInCount,
       sellCount,
       firstBuyAt: earliestBuyAt || 0,
+      latestBuyAmount,
+      latestSellAmount,
       latestBuyAt,
       latestSellAt,
       firstSeenAt,
@@ -259,6 +282,8 @@ export default class HolderAccumulationEngine {
       selfBuyer,
       transferOnly,
       storageLike,
+      rebuyGapHours: roundNum(rebuyGapHours, 2),
+      reboughtAfterSell,
       updatedAt: now
     };
   }
@@ -279,7 +304,79 @@ export default class HolderAccumulationEngine {
     return postAmt - preAmt;
   }
 
-  buildSummary(candidate = {}, walletRows = []) {
+
+  estimateEqualSizeScore(rows = []) {
+    if (!rows.length) return 0;
+    const sizes = rows.map((row) => safeNum(row?.latestBuyAmount || row?.currentTokenAmount, 0)).filter((x) => x > 0);
+    if (!sizes.length) return 0;
+    const mean = sizes.reduce((a, b) => a + b, 0) / sizes.length;
+    if (mean <= 0) return 0;
+    const variance = sizes.reduce((acc, x) => acc + ((x - mean) ** 2), 0) / sizes.length;
+    const std = Math.sqrt(variance);
+    const cv = std / mean;
+    return clamp(100 - cv * 100, 0, 100);
+  }
+
+  detectInsiderStyleRebuy(rows = []) {
+    const eligible = rows.filter((row) => Boolean(row?.reboughtAfterSell));
+    if (!eligible.length) {
+      return {
+        insiderRebuyWalletCount: 0,
+        insiderRebuyClusterSize: 0,
+        insiderRebuyScore: 0,
+        insiderRebuyGapHoursAvg: 0,
+        insiderRebuyEqualSizeScore: 0,
+        insiderStyleRebuyPass: false,
+        insiderRebuyNote: 'нет выраженного координированного перезахода'
+      };
+    }
+
+    const buckets = new Map();
+    for (const row of eligible) {
+      const bucket = Math.floor(safeNum(row?.latestBuyAt, 0) / (90 * 60 * 1000));
+      const list = buckets.get(bucket) || [];
+      list.push(row);
+      buckets.set(bucket, list);
+    }
+
+    let cluster = eligible;
+    for (const rowsInBucket of buckets.values()) {
+      if (rowsInBucket.length > cluster.length) cluster = rowsInBucket;
+    }
+
+    const insiderRebuyWalletCount = eligible.length;
+    const insiderRebuyClusterSize = cluster.length;
+    const insiderRebuyGapHoursAvg = cluster.length
+      ? cluster.reduce((acc, row) => acc + safeNum(row?.rebuyGapHours, 0), 0) / cluster.length
+      : 0;
+    const insiderRebuyEqualSizeScore = this.estimateEqualSizeScore(cluster);
+    let insiderRebuyScore = 0;
+    if (insiderRebuyWalletCount >= 2) insiderRebuyScore += 22;
+    if (insiderRebuyClusterSize >= 2) insiderRebuyScore += 22;
+    if (insiderRebuyClusterSize >= 3) insiderRebuyScore += 12;
+    if (insiderRebuyGapHoursAvg >= 15) insiderRebuyScore += 14;
+    if (insiderRebuyEqualSizeScore >= 55) insiderRebuyScore += 16;
+    if (insiderRebuyEqualSizeScore >= 75) insiderRebuyScore += 8;
+    insiderRebuyScore = clamp(insiderRebuyScore, 0, 100);
+    const insiderStyleRebuyPass = insiderRebuyClusterSize >= 2 && insiderRebuyGapHoursAvg >= 15 && insiderRebuyEqualSizeScore >= 50;
+    const insiderRebuyNote = insiderStyleRebuyPass
+      ? 'несколько кошельков синхронно перезашли снизу похожими размерами'
+      : insiderRebuyWalletCount > 0
+        ? 'есть перезаходы после старых продаж, но координация пока слабая'
+        : 'нет выраженного координированного перезахода';
+
+    return {
+      insiderRebuyWalletCount,
+      insiderRebuyClusterSize,
+      insiderRebuyScore: roundNum(insiderRebuyScore, 2),
+      insiderRebuyGapHoursAvg: roundNum(insiderRebuyGapHoursAvg, 2),
+      insiderRebuyEqualSizeScore: roundNum(insiderRebuyEqualSizeScore, 2),
+      insiderStyleRebuyPass,
+      insiderRebuyNote
+    };
+  }
+
+  buildSummary(candidate = {}, walletRows = [], previousSummary = null) {
     const mint = asText(candidate?.token?.ca);
     const tokenName = candidate?.token?.name || candidate?.token?.symbol || mint;
     const now = Date.now();
@@ -306,6 +403,7 @@ export default class HolderAccumulationEngine {
     const freshCohort = meaningfulRows.filter((row) => safeNum(row?.holdDurationMinutes, 0) > 0 && safeNum(row?.holdDurationMinutes, 0) <= cohortWindowMin);
     const freshWalletBuyCount = freshCohort.length;
     const warehouseWallets = freshCohort.filter((row) => row?.storageLike);
+    const insiderRebuy = this.detectInsiderStyleRebuy(meaningfulRows);
 
     const retained30m = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 30 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
     const retained2h = freshCohort.filter((row) => safeNum(row?.holdDurationMinutes, 0) >= 120 && safeNum(row?.currentHoldingPct, 0) >= 60).length;
@@ -340,12 +438,12 @@ export default class HolderAccumulationEngine {
       meaningfulCoveragePct >= 15 &&
       avgChurn <= 45 &&
       (retention30mPct >= 45 || retention2hPct >= 28 || retention6hPct >= 16) &&
-      (warehouseWallets.length >= 6 || warehouseSimilarityScore >= 32 || bottomTouches >= 2);
+      (warehouseWallets.length >= 6 || warehouseSimilarityScore >= 32 || bottomTouches >= 2 || insiderRebuy.insiderStyleRebuyPass);
 
     const activeReaccumulationPass =
       freshWalletBuyCount >= 8 &&
       (retention30mPct >= 25 || retention2hPct >= 12) &&
-      (reloadCount >= 2 || avgDipBuy >= 0.18) &&
+      (reloadCount >= 2 || avgDipBuy >= 0.18 || insiderRebuy.insiderStyleRebuyPass) &&
       bottomTouches >= 2;
 
     const quietAccumulationPass =
@@ -370,6 +468,10 @@ export default class HolderAccumulationEngine {
         avgDipBuy >= 0.16 &&
         bottomTouches >= 2 &&
         avgChurn <= 50
+      ) || (
+        insiderRebuy.insiderStyleRebuyPass &&
+        netControlPct >= 20 &&
+        meaningfulCoveragePct >= 10
       );
 
     const warehouseMode = warehouseStoragePass
@@ -377,6 +479,28 @@ export default class HolderAccumulationEngine {
       : activeReaccumulationPass
         ? 'active_reaccumulation'
         : 'none';
+
+    const prevMeaningful = safeNum(previousSummary?.meaningfulWalletCount, 0);
+    const prevSelfBuy = safeNum(previousSummary?.selfBuyWalletCount, 0);
+    const prevPrice = safeNum(previousSummary?.currentPrice, 0);
+    const holderGrowthWindowMin = safeNum(previousSummary?.updatedAt, 0) > 0
+      ? Math.max(0, (now - safeNum(previousSummary?.updatedAt, 0)) / 60000)
+      : 0;
+    const meaningfulHolderDelta = meaningfulWalletCount - prevMeaningful;
+    const meaningfulSelfBuyDelta = selfBuyWalletCount - prevSelfBuy;
+    const meaningfulHolderGrowthPct = prevMeaningful > 0
+      ? ((meaningfulWalletCount - prevMeaningful) / prevMeaningful) * 100
+      : (meaningfulWalletCount > 0 ? 100 : 0);
+    const meaningfulSelfBuyGrowthPct = prevSelfBuy > 0
+      ? ((selfBuyWalletCount - prevSelfBuy) / prevSelfBuy) * 100
+      : (selfBuyWalletCount > 0 ? 100 : 0);
+    const currentPrice = safeNum(candidate?.token?.price, 0);
+    const priceSinceLastSummaryPct = prevPrice > 0
+      ? ((currentPrice - prevPrice) / prevPrice) * 100
+      : 0;
+    const bullishHolderGrowthOnWeakness =
+      meaningfulHolderDelta > 0 &&
+      (priceSinceLastSummaryPct < -1 || safeNum(candidate?.delta?.priceH1Pct, 0) < 0 || safeNum(candidate?.delta?.priceM5Pct, 0) < 0);
 
     return {
       tokenName,
@@ -408,6 +532,14 @@ export default class HolderAccumulationEngine {
       dustFilteredWalletCount,
       meaningfulCoveragePct: roundPct(meaningfulCoveragePct),
       minimumMeaningfulSharePct: this.minMeaningfulTrackedSharePct,
+      currentPrice: roundNum(currentPrice, 10),
+      holderGrowthWindowMin: roundNum(holderGrowthWindowMin, 2),
+      meaningfulHolderDelta,
+      meaningfulHolderGrowthPct: roundPct(meaningfulHolderGrowthPct),
+      meaningfulSelfBuyGrowthPct: roundPct(meaningfulSelfBuyGrowthPct),
+      priceSinceLastSummaryPct: roundPct(priceSinceLastSummaryPct),
+      bullishHolderGrowthOnWeakness,
+      ...insiderRebuy,
       updatedAt: now
     };
   }
