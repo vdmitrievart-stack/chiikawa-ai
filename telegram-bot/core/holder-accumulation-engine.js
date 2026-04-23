@@ -34,7 +34,7 @@ export default class HolderAccumulationEngine {
     this.walletTtlMs = Number(options.walletTtlMs || 30 * 60 * 1000);
     this.maxTrackedWallets = Number(options.maxTrackedWallets || 20);
     this.maxHistorySignatures = Number(options.maxHistorySignatures || 18);
-    this.minMeaningfulTrackedSharePct = Number(options.minMeaningfulTrackedSharePct || 0.4);
+    this.minMeaningfulTrackedSharePct = Number(options.minMeaningfulTrackedSharePct || 0.3);
     this.minMeaningfulHoldingPct = Number(options.minMeaningfulHoldingPct || 20);
     this.connection = null;
   }
