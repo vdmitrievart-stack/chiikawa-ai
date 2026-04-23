@@ -43,6 +43,7 @@ import HolderAccumulationEngine from "./holder-accumulation-engine.js";
 import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
 import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
 import GMGNExecutionService from "../gmgn/gmgn-execution-service.js";
+import GMGNSmartWalletFeed from "./gmgn-smart-wallet-feed.js";
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -204,9 +205,16 @@ export default class TradingKernel {
       rpcUrl: process.env.SOLANA_RPC_URL
     });
 
+    this.gmgnSmartWalletFeed = new GMGNSmartWalletFeed({
+      logger: this.logger,
+      apiKey: process.env.GMGN_API_KEY || '',
+      enabled: process.env.GMGN_SMART_WALLET_ENABLED !== 'false'
+    });
+
     this.candidateService = new CandidateService({
       logger: this.logger,
-      holderAccumulationEngine: this.holderAccumulationEngine
+      holderAccumulationEngine: this.holderAccumulationEngine,
+      smartWalletFeed: this.gmgnSmartWalletFeed
     });
 
     this.positionService = new PositionService({
@@ -916,6 +924,7 @@ negative pnlHintSol: ${negativeSol.toFixed(4)}
 avg pnlHintPct: ${avgPct.toFixed(2)}%`;
   }
 
+
   buildRadarSummaryText() {
     const t = this.candidateService?.getRadarTelemetry?.() || {};
     const byBucket = t?.byBucket || {};
@@ -930,7 +939,9 @@ packaging: ${safeNum(t?.packagingDetected, 0)} | probe: ${safeNum(t?.packagingPr
 reversal watch: ${safeNum(t?.reversalWatch, 0)} | runner-like: ${safeNum(t?.runnerLike, 0)}
 migration structure: ${safeNum(t?.migrationStructure, 0)}
 trap rejected: ${safeNum(t?.trapRejected, 0)} | trade-ready: ${safeNum(t?.tradeReady, 0)}
-buckets fresh/packaging/migration/momentum/forgotten: ${safeNum(byBucket?.fresh, 0)} / ${safeNum(byBucket?.packaging, 0)} / ${safeNum(byBucket?.migration, 0)} / ${safeNum(byBucket?.momentum, 0)} / ${safeNum(byBucket?.forgotten, 0)}`;
+smart-wallet raw/tokens/accepted: ${safeNum(t?.smartWalletFeedRaw, 0)} / ${safeNum(t?.smartWalletTokens, 0)} / ${safeNum(t?.smartWalletAccepted, 0)}
+smart-wallet publish-worthy: ${safeNum(t?.smartWalletPublishWorthy, 0)}
+buckets fresh/packaging/migration/momentum/forgotten/smart: ${safeNum(byBucket?.fresh, 0)} / ${safeNum(byBucket?.packaging, 0)} / ${safeNum(byBucket?.migration, 0)} / ${safeNum(byBucket?.momentum, 0)} / ${safeNum(byBucket?.forgotten, 0)} / ${safeNum(byBucket?.smart_wallets, 0)}`;
   }
 
   buildNoCandidateNotice() {
@@ -939,7 +950,7 @@ buckets fresh/packaging/migration/momentum/forgotten: ${safeNum(byBucket?.fresh,
     return `📡 <b>${escapeHtml(scope)}</b>
 Пока не вижу нормального кандидата. Продолжаю сканировать рынок.
 
-scanned: ${safeNum(t?.uniquePairs, 0)} | watchlist: ${safeNum(t?.watchlist, 0)} | packaging: ${safeNum(t?.packagingDetected, 0)} | migration: ${safeNum(t?.migrationStructure, 0)} | trap rejected: ${safeNum(t?.trapRejected, 0)} | trade-ready: ${safeNum(t?.tradeReady, 0)}`;
+scanned: ${safeNum(t?.uniquePairs, 0)} | watchlist: ${safeNum(t?.watchlist, 0)} | packaging: ${safeNum(t?.packagingDetected, 0)} | migration: ${safeNum(t?.migrationStructure, 0)} | trap rejected: ${safeNum(t?.trapRejected, 0)} | trade-ready: ${safeNum(t?.tradeReady, 0)}\nsmart-wallet accepted/publish-worthy: ${safeNum(t?.smartWalletAccepted, 0)} / ${safeNum(t?.smartWalletPublishWorthy, 0)}`;
   }
 
   buildStatusText() {
