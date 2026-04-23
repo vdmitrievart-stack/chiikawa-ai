@@ -732,8 +732,17 @@ function buildDeltaMessage(prev, next) {
 
   if (!bullish.length && !bearish.length) return '';
 
+  const positiveOnly = bullish.length > 0 && bearish.length === 0;
+  const negativeOnly = bearish.length > 0 && bullish.length === 0;
+  const mixed = bullish.length > 0 && bearish.length > 0;
+  const header = positiveOnly
+    ? `🔼🔼🔼🔼🔼🔼🔼🔔 <b>ACCUMULATION WATCH UPDATE</b>`
+    : negativeOnly
+      ? `🔻🔻🔻🔻🔻🔻🔻🚨 <b>ACCUMULATION RISK UPDATE</b>`
+      : `🔄🔼🔻🔔 <b>ACCUMULATION WATCH UPDATE</b>`;
+
   const lines = [
-    `🔔 <b>ACCUMULATION WATCH UPDATE</b>`,
+    header,
     `<b>Token:</b> <b>${escapeHtml(next.tokenName)}</b>`,
     `<b>CA:</b> <code>${escapeHtml(next.ca)}</code>`,
     `<b>Category:</b> <b>${escapeHtml(next.category)}</b>`,
@@ -748,10 +757,10 @@ function buildDeltaMessage(prev, next) {
   ];
 
   if (bullish.length) {
-    lines.push('', '<b>🟢 Бычьи изменения</b>', ...bullish.map((x) => `• ${x}`));
+    lines.push('', '<b>🟢 Позитивные изменения</b>', ...bullish.map((x) => `• ${x}`));
   }
   if (bearish.length) {
-    lines.push('', '<b>🔴 Медвежьи изменения</b>', ...bearish.map((x) => `• ${x}`));
+    lines.push('', '<b>🔴 Риски / ухудшение</b>', ...bearish.map((x) => `• ${x}`));
   }
   return lines.join('\n');
 }
