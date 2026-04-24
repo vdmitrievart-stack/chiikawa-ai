@@ -43,6 +43,7 @@ let stopTimeoutId = null;
 let currentMode = "stopped";
 let activeChatId = null;
 let activeUserId = null;
+let cycleBusy = false;
 
 let runState = {
   runId: null,
@@ -89,10 +90,11 @@ function escapeHtml(input) {
 function keyboard() {
   return {
     keyboard: [
-      ["▶️ Run 4h", "♾️ Run Infinite"],
-      ["🛑 Stop", "📊 Status"],
-      ["🔎 Scan", "📈 Export CSV"],
-      ["📦 Export JSON", "📊 Export XLSX"]
+      ["🚀 Run Multi", "♾️ Run Infinite"],
+      ["▶️ Run 4h", "🛑 Stop"],
+      ["📊 Status", "🔎 Scan"],
+      ["📈 Export CSV", "📦 Export JSON"],
+      ["📊 Export XLSX"]
     ],
     resize_keyboard: true,
     persistent: true
@@ -106,6 +108,7 @@ function normalizeAction(text) {
   if (raw === "/start" || raw === "/menu") return "start";
   if (raw === "/run4h") return "run4h";
   if (raw === "/runinfinite") return "runinfinite";
+  if (raw === "/runmulti" || raw === "/run") return "runmulti";
   if (raw === "/stop") return "stop";
   if (raw === "/status") return "status";
   if (raw === "/scan") return "scan";
@@ -113,7 +116,8 @@ function normalizeAction(text) {
   if (raw === "/exportjson" || raw === "/exportstats") return "exportjson";
   if (raw === "/exportxlsx") return "exportxlsx";
 
-  if (raw.includes("run 4h") || raw.includes("4ч")) return "run4h";
+  if (raw.includes("run multi") || raw.includes("multi") || raw.includes("мульти")) return "runmulti";
+  if (raw.includes("run 4h") || raw.includes("4h") || raw.includes("4ч")) return "run4h";
   if (raw.includes("infinite") || raw.includes("бескон")) return "runinfinite";
   if (raw.includes("stop") || raw.includes("стоп")) return "stop";
   if (raw.includes("status") || raw.includes("статус")) return "status";
@@ -243,10 +247,14 @@ function markCandidatePublished(candidate, plans = [], mode = "new") {
 function stopLoop() {
   if (loopId) clearInterval(loopId);
   if (stopTimeoutId) clearTimeout(stopTimeoutId);
+
   loopId = null;
   stopTimeoutId = null;
   currentMode = "stopped";
   runState.mode = "stopped";
+  cycleBusy = false;
+
+  // Важно: очищаем только при остановке/новом запуске.
   publishedSignalState.clear();
 }
 
@@ -563,107 +571,126 @@ async function exportXlsx(chatId) {
   await scheduleTempCleanup(filePath);
 }
 
-async function cycle(chatId, userId) {
-  pruneRecentlyTraded();
+async function cycle(chatId, userId, manual = false) {
+  if (cycleBusy) {
+    console.log("cycle skipped: busy");
+    return;
+  }
 
-  const positions = getPositions();
+  cycleBusy = true;
 
-  for (const p of positions) {
-    const latest = await getLatestTokenPrice(p.ca);
-    if (!latest?.price) continue;
+  try {
+    pruneRecentlyTraded();
 
-    const mark = markPosition(p, latest.price);
-    if (!mark) continue;
+    const positions = getPositions();
 
-    const partial = maybeTakeRunnerPartial(p, latest.price);
-    if (partial) {
-      await sendMessage(
-        chatId,
-        `🎯 <b>RUNNER PARTIAL</b>
+    for (const p of positions) {
+      const latest = await getLatestTokenPrice(p.ca);
+      if (!latest?.price) continue;
+
+      const mark = markPosition(p, latest.price);
+      if (!mark) continue;
+
+      const partial = maybeTakeRunnerPartial(p, latest.price);
+      if (partial) {
+        await sendMessage(
+          chatId,
+          `🎯 <b>RUNNER PARTIAL</b>
 
 <b>Token:</b> ${escapeHtml(p.token)}
 <b>Target:</b> ${partial.targetPct}%
 <b>Sold fraction:</b> ${round(partial.soldFraction * 100, 0)}%
 <b>Cash added:</b> ${round(partial.netValueSol, 4)} SOL`
-      );
-    }
+        );
+      }
 
-    const analyzedNow = await getBestTrade({ excludeCas: [] }).catch(() => null);
-    const verdict = shouldClosePosition(p, analyzedNow?.token?.ca === p.ca ? analyzedNow : null);
+      const verdict = shouldClosePosition(p, null);
 
-    await sendMessage(chatId, buildPositionUpdateText(p, mark, verdict.reason));
+      if (manual || verdict.close) {
+        await sendMessage(chatId, buildPositionUpdateText(p, mark, verdict.reason));
+      }
 
-    if (verdict.close) {
-      const closed = closePosition(p.id, latest.price, verdict.reason);
-      if (closed) {
-        recentlyTraded.set(closed.ca, Date.now());
-        await recordTradeOutcomeFromSignalContext(closed.signalContext, closed.netPnlPct);
-        await sendPhotoOrText(chatId, closed.signalContext?.imageUrl || null, buildExitText(closed));
+      if (verdict.close) {
+        const closed = closePosition(p.id, latest.price, verdict.reason);
+        if (closed) {
+          recentlyTraded.set(closed.ca, Date.now());
+          await recordTradeOutcomeFromSignalContext(closed.signalContext, closed.netPnlPct);
+          await sendPhotoOrText(chatId, closed.signalContext?.imageUrl || null, buildExitText(closed));
+        }
       }
     }
-  }
 
-  const candidate = await getBestTrade({
-    excludeCas: [...recentlyTraded.keys(), ...getPositions().map(p => p.ca)]
-  });
-
-  if (!candidate) {
-    await sendMessage(chatId, "❌ No candidates found");
-    return;
-  }
-
-  const plans = buildStrategyPlans(candidate);
-  const publishDecision = shouldPublishCandidate(candidate, plans);
-
-  if (publishDecision.publish) {
-    if (publishDecision.mode === "new") {
-      await sendPhotoOrText(chatId, candidate.token.imageUrl || null, buildAnalysisText(candidate, plans));
-    } else {
-      await sendMessage(chatId, buildCandidateUpdateText(candidate, plans, publishDecision.reason));
-    }
-
-    markCandidatePublished(candidate, plans, publishDecision.mode);
-  } else {
-    console.log("signal suppressed:", candidate.token.ca, publishDecision.reason);
-  }
-
-  const canTradeThisCandidate =
-    publishDecision.publish || getPositions().some(p => p.ca === candidate.token.ca);
-
-  if (!canTradeThisCandidate) return;
-
-  for (const plan of plans) {
-    const alreadyOpenSameStrategy = getPositions().some(p => p.strategy === plan.strategyKey);
-    if (alreadyOpenSameStrategy) continue;
-    if (candidate.corpse.isCorpse) continue;
-    if (candidate.falseBounce.rejected) continue;
-    if (candidate.developer.verdict === "Bad") continue;
-    if (candidate.score < 85) continue;
-
-    const position = openPosition({
-      strategy: plan.strategyKey,
-      token: candidate.token,
-      thesis: plan.thesis,
-      plannedHoldMs: plan.plannedHoldMs,
-      stopLossPct: plan.stopLossPct,
-      takeProfitPct: plan.takeProfitPct,
-      runnerTargetsPct: plan.runnerTargetsPct,
-      signalScore: candidate.score,
-      expectedEdgePct: plan.expectedEdgePct,
-      signalContext: {
-        imageUrl: candidate.token.imageUrl || null,
-        narrative: candidate.narrative,
-        socials: candidate.socials,
-        developer: candidate.developer,
-        reasons: candidate.reasons,
-        baseStrategy: candidate.strategy,
-        chosenPlan: plan
-      }
+    const candidate = await getBestTrade({
+      excludeCas: [...recentlyTraded.keys(), ...getPositions().map(p => p.ca)]
     });
 
-    if (position) {
-      await sendPhotoOrText(chatId, candidate.token.imageUrl || null, buildEntryText(position));
+    if (!candidate) {
+      if (manual) await sendMessage(chatId, "❌ No candidates found");
+      return;
     }
+
+    const plans = buildStrategyPlans(candidate);
+    const publishDecision = shouldPublishCandidate(candidate, plans);
+
+    if (manual || publishDecision.publish) {
+      if (manual || publishDecision.mode === "new") {
+        await sendPhotoOrText(chatId, candidate.token.imageUrl || null, buildAnalysisText(candidate, plans));
+      } else {
+        await sendMessage(chatId, buildCandidateUpdateText(candidate, plans, publishDecision.reason));
+      }
+
+      markCandidatePublished(candidate, plans, manual ? "new" : publishDecision.mode);
+    } else {
+      console.log("signal suppressed:", candidate.token.ca, publishDecision.reason);
+    }
+
+    // ВАЖНО:
+    // Антиспам НЕ блокирует торговую логику.
+    // Бот продолжает проверять планы и входы даже если сообщение подавлено.
+
+    for (const plan of plans) {
+      const alreadyOpenSameStrategy = getPositions().some(p => p.strategy === plan.strategyKey);
+      const alreadyOpenSameToken = getPositions().some(p => p.ca === candidate.token.ca);
+
+      if (alreadyOpenSameStrategy) continue;
+      if (alreadyOpenSameToken) continue;
+      if (candidate.corpse.isCorpse) continue;
+      if (candidate.falseBounce.rejected) continue;
+      if (candidate.developer.verdict === "Bad") continue;
+      if (candidate.score < 85) continue;
+
+      const position = openPosition({
+        strategy: plan.strategyKey,
+        token: candidate.token,
+        thesis: plan.thesis,
+        plannedHoldMs: plan.plannedHoldMs,
+        stopLossPct: plan.stopLossPct,
+        takeProfitPct: plan.takeProfitPct,
+        runnerTargetsPct: plan.runnerTargetsPct,
+        signalScore: candidate.score,
+        expectedEdgePct: plan.expectedEdgePct,
+        signalContext: {
+          imageUrl: candidate.token.imageUrl || null,
+          narrative: candidate.narrative,
+          socials: candidate.socials,
+          developer: candidate.developer,
+          reasons: candidate.reasons,
+          baseStrategy: candidate.strategy,
+          chosenPlan: plan
+        }
+      });
+
+      if (position) {
+        await sendPhotoOrText(chatId, candidate.token.imageUrl || null, buildEntryText(position));
+      }
+    }
+  } catch (err) {
+    console.log("cycle error:", err.message);
+    if (manual) {
+      await sendMessage(chatId, `⚠️ Cycle error: ${escapeHtml(err.message)}`);
+    }
+  } finally {
+    cycleBusy = false;
   }
 }
 
@@ -682,13 +709,18 @@ function startRun(chatId, userId, mode) {
   recentlyTraded.clear();
   publishedSignalState.clear();
 
-  if (mode === "4h") {
+  if (mode === "4h" || mode === "multi") {
     resetPortfolio(1);
   }
 
+  // Первый цикл сразу, без ожидания 60 секунд.
+  cycle(chatId, userId, false).catch(err => {
+    console.log("initial cycle error:", err.message);
+  });
+
   loopId = setInterval(() => {
-    cycle(chatId, userId).catch(err => {
-      console.log("cycle error:", err.message);
+    cycle(chatId, userId, false).catch(err => {
+      console.log("cycle interval error:", err.message);
     });
   }, AUTO_INTERVAL_MS);
 
@@ -702,12 +734,15 @@ function startRun(chatId, userId, mode) {
 }
 
 async function handleAction(chatId, userId, action) {
+  console.log("handleAction:", action);
+
   if (action === "start") {
     await sendMessage(
       chatId,
       `🤖 <b>Bot ready</b>
 
 Commands:
+/runmulti
 /run4h
 /runinfinite
 /stop
@@ -721,6 +756,12 @@ Commands:
     return;
   }
 
+  if (action === "runmulti") {
+    await sendMessage(chatId, "✅ Запуск выполнен: MULTI", { reply_markup: keyboard() });
+    startRun(chatId, userId, "multi");
+    return;
+  }
+
   if (action === "run4h") {
     await sendMessage(chatId, "🚀 Starting 4h multi-strategy simulation from 1 SOL", {
       reply_markup: keyboard()
@@ -730,7 +771,6 @@ Commands:
   }
 
   if (action === "runinfinite") {
-    if (!getPortfolio().startBalance) resetPortfolio(1);
     await sendMessage(chatId, "♾️ Starting infinite multi-strategy run", {
       reply_markup: keyboard()
     });
@@ -751,7 +791,7 @@ Commands:
   }
 
   if (action === "scan") {
-    await cycle(chatId, userId);
+    await cycle(chatId, userId, true);
     return;
   }
 
