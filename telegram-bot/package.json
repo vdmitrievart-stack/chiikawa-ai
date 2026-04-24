@@ -8,6 +8,7 @@
     "start": "node telegram-bot.js"
   },
   "dependencies": {
+    "@solana/web3.js": "^1.98.0",
     "node-telegram-bot-api": "^0.66.0",
     "xlsx": "^0.18.5"
   },
