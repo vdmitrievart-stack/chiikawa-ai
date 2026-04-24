@@ -1,15 +1,7 @@
-const DEFAULT_STRATEGY_CONFIG = {
-  scalp: { label: "SCALP", allocationPct: 0.2 },
-  reversal: { label: "REVERSAL", allocationPct: 0.2 },
-  runner: { label: "RUNNER", allocationPct: 0.2 },
-  copytrade: { label: "COPYTRADE", allocationPct: 0.2 },
-  migration_survivor: { label: "MIGRATION_SURVIVOR", allocationPct: 0.2 }
-};
-
-const ENTRY_MODE_MULTIPLIERS = {
-  PROBE: 0.22,
-  SCALED: 0.55,
-  FULL: 0.9
+const STRATEGY_CONFIG = {
+  scalp: { label: "SCALP", allocationPct: 0.25 },
+  reversal: { label: "REVERSAL", allocationPct: 0.45 },
+  runner: { label: "RUNNER", allocationPct: 0.30 }
 };
 
 const ENTRY_FEE_PCT = 0.25;
@@ -18,17 +10,14 @@ const ENTRY_SLIPPAGE_PCT = 0.6;
 const EXIT_SLIPPAGE_PCT = 0.6;
 const PRIORITY_FEE_SOL = 0.00001;
 
-let strategyConfig = cloneConfig(DEFAULT_STRATEGY_CONFIG);
-let state = createFreshState(10);
+let state = createState(1);
 
-function createFreshState(startBalance = 10) {
+function createState(startBalance = 1) {
   return {
     startBalance,
-    virtualBase: startBalance,
     cash: startBalance,
     positions: [],
-    closedTrades: [],
-    runStartedAt: Date.now()
+    closedTrades: []
   };
 }
 
@@ -46,27 +35,13 @@ function pctToFrac(pct) {
   return safeNum(pct) / 100;
 }
 
-function cloneConfig(input) {
-  return JSON.parse(JSON.stringify(input || DEFAULT_STRATEGY_CONFIG));
-}
-
-function normalizeEntryMode(mode) {
-  const value = String(mode || "SCALED").toUpperCase().trim();
-  if (value === "PROBE" || value === "SCALED" || value === "FULL") return value;
-  return "SCALED";
-}
-
-function getEntryModeMultiplier(entryMode) {
-  return ENTRY_MODE_MULTIPLIERS[normalizeEntryMode(entryMode)] || ENTRY_MODE_MULTIPLIERS.SCALED;
-}
-
 function getEntryCosts(amountSol) {
   const feeSol = amountSol * pctToFrac(ENTRY_FEE_PCT);
   const slippageSol = amountSol * pctToFrac(ENTRY_SLIPPAGE_PCT);
   return {
     feeSol: round(feeSol, 8),
     slippageSol: round(slippageSol, 8),
-    prioritySol: round(PRIORITY_FEE_SOL, 8),
+    prioritySol: PRIORITY_FEE_SOL,
     totalSol: round(feeSol + slippageSol + PRIORITY_FEE_SOL, 8)
   };
 }
@@ -77,7 +52,7 @@ function getExitCosts(grossValueSol) {
   return {
     feeSol: round(feeSol, 8),
     slippageSol: round(slippageSol, 8),
-    prioritySol: round(PRIORITY_FEE_SOL, 8),
+    prioritySol: PRIORITY_FEE_SOL,
     totalSol: round(feeSol + slippageSol + PRIORITY_FEE_SOL, 8)
   };
 }
@@ -86,199 +61,74 @@ export function estimateRoundTripCostPct() {
   return ENTRY_FEE_PCT + EXIT_FEE_PCT + ENTRY_SLIPPAGE_PCT + EXIT_SLIPPAGE_PCT;
 }
 
-export function setStrategyConfig(nextConfig = DEFAULT_STRATEGY_CONFIG) {
-  strategyConfig = cloneConfig(nextConfig);
-  return getStrategyConfig();
-}
-
 export function getStrategyConfig() {
-  return cloneConfig(strategyConfig);
+  return { ...STRATEGY_CONFIG };
 }
 
-export function resetPortfolio(startBalance = 10, nextConfig = strategyConfig) {
-  strategyConfig = cloneConfig(nextConfig);
-  state = createFreshState(startBalance);
+export function resetPortfolio(startBalance = 1) {
+  state = createState(startBalance);
 }
 
 export function getPositions() {
-  return state.positions;
+  return state.positions.map(p => ({ ...p }));
 }
 
 export function getClosedTrades() {
-  return state.closedTrades.map((t) => ({ ...t }));
-}
-
-export function hasOpenPositions() {
-  return state.positions.length > 0;
+  return state.closedTrades.map(t => ({ ...t }));
 }
 
 function getAllocatedCapitalTotal(strategy) {
-  const pct = safeNum(strategyConfig?.[strategy]?.allocationPct, 0);
-  return round(state.startBalance * pct, 8);
+  const cfg = STRATEGY_CONFIG[strategy];
+  if (!cfg) return 0;
+  return state.startBalance * cfg.allocationPct;
 }
 
-function getCurrentlyUsedCapital(strategy) {
-  return round(
-    state.positions
-      .filter((p) => p.strategy === strategy)
-      .reduce((sum, p) => sum + p.amountSol + p.entryCosts.totalSol, 0),
-    8
-  );
+function getUsedCapital(strategy) {
+  return state.positions
+    .filter(p => p.strategy === strategy)
+    .reduce((sum, p) => sum + p.amountSol + p.entryCosts.totalSol, 0);
 }
 
 export function getAvailableCapitalForStrategy(strategy) {
-  const total = getAllocatedCapitalTotal(strategy);
-  const used = getCurrentlyUsedCapital(strategy);
-  const freeInBucket = Math.max(0, total - used);
-  return round(Math.min(freeInBucket, state.cash), 8);
-}
-
-function deriveTargetPositionSize(strategy, entryMode) {
-  const bucketAvailable = getAvailableCapitalForStrategy(strategy);
-  const multiplier = getEntryModeMultiplier(entryMode);
-  const raw = bucketAvailable * multiplier;
-  return round(raw, 8);
-}
-
-function getMinimumTradeSize(strategy, entryMode) {
-  const mode = normalizeEntryMode(entryMode);
-
-  if (strategy === "copytrade") {
-    if (mode === "PROBE") return 0.02;
-    if (mode === "SCALED") return 0.04;
-    return 0.06;
-  }
-
-  if (strategy === "runner") {
-    if (mode === "PROBE") return 0.025;
-    if (mode === "SCALED") return 0.05;
-    return 0.08;
-  }
-
-  if (mode === "PROBE") return 0.015;
-  if (mode === "SCALED") return 0.035;
-  return 0.06;
-}
-
-function getMaximumTradeSize(strategy, entryMode) {
-  const mode = normalizeEntryMode(entryMode);
-
-  if (strategy === "copytrade") {
-    if (mode === "PROBE") return 0.08;
-    if (mode === "SCALED") return 0.16;
-    return 0.24;
-  }
-
-  if (strategy === "runner") {
-    if (mode === "PROBE") return 0.1;
-    if (mode === "SCALED") return 0.2;
-    return 0.35;
-  }
-
-  if (mode === "PROBE") return 0.07;
-  if (mode === "SCALED") return 0.15;
-  return 0.25;
-}
-
-function finalizeAmountSol(strategy, entryMode) {
-  const target = deriveTargetPositionSize(strategy, entryMode);
-  const minSize = getMinimumTradeSize(strategy, entryMode);
-  const maxSize = getMaximumTradeSize(strategy, entryMode);
-  const clamped = Math.max(minSize, Math.min(maxSize, target));
-  const boundedByCash = Math.min(clamped, Math.max(0, state.cash - 0.002));
-  return round(boundedByCash, 8);
+  const allocated = getAllocatedCapitalTotal(strategy);
+  const used = getUsedCapital(strategy);
+  return Math.min(Math.max(0, allocated - used), state.cash);
 }
 
 export function getPortfolio() {
-  const unrealized = state.positions.reduce((sum, p) => {
-    return sum + safeNum(p.lastMark?.netPnlSol, 0);
-  }, 0);
+  const realized = state.closedTrades.reduce((sum, t) => sum + safeNum(t.netPnlSol), 0);
+  const unrealized = state.positions.reduce((sum, p) => sum + safeNum(p.lastMark?.netPnlSol), 0);
+  const openValue = state.positions.reduce((sum, p) => sum + safeNum(p.lastMark?.netValueSol), 0);
 
-  const realized = state.closedTrades.reduce((sum, t) => sum + safeNum(t.netPnlSol, 0), 0);
-  const equity =
-    state.cash +
-    state.positions.reduce((sum, p) => sum + safeNum(p.lastMark?.netValueSol, 0), 0);
-
-  const byStrategy = Object.keys(strategyConfig).reduce((acc, key) => {
-    const closed = state.closedTrades.filter((t) => t.strategy === key);
-    const open = state.positions.filter((p) => p.strategy === key);
-    const wins = closed.filter((t) => safeNum(t.netPnlPct) > 0).length;
-    const losses = closed.filter((t) => safeNum(t.netPnlPct) <= 0).length;
+  const byStrategy = Object.keys(STRATEGY_CONFIG).reduce((acc, key) => {
+    const closed = state.closedTrades.filter(t => t.strategy === key);
+    const open = state.positions.filter(t => t.strategy === key);
+    const wins = closed.filter(t => safeNum(t.netPnlPct) > 0).length;
+    const losses = closed.length - wins;
 
     acc[key] = {
-      allocationPct: safeNum(strategyConfig[key]?.allocationPct, 0),
-      allocatedSol: getAllocatedCapitalTotal(key),
-      availableSol: getAvailableCapitalForStrategy(key),
+      allocationPct: STRATEGY_CONFIG[key].allocationPct,
+      allocatedSol: round(getAllocatedCapitalTotal(key), 8),
+      availableSol: round(getAvailableCapitalForStrategy(key), 8),
       openPositions: open.length,
       closedTrades: closed.length,
       wins,
       losses,
-      realizedPnlSol: round(closed.reduce((s, t) => s + safeNum(t.netPnlSol, 0), 0), 8),
-      realizedPnlPctAvg: closed.length
-        ? round(closed.reduce((s, t) => s + safeNum(t.netPnlPct, 0), 0) / closed.length, 4)
-        : 0,
-      avgHoldMinutes: open.length
-        ? round(
-            open.reduce((s, p) => s + ((Date.now() - safeNum(p.openedAt)) / 60000), 0) / open.length,
-            2
-          )
-        : 0
+      realizedPnlSol: round(closed.reduce((s, t) => s + safeNum(t.netPnlSol), 0), 8)
     };
     return acc;
   }, {});
 
   return {
     startBalance: round(state.startBalance, 8),
-    virtualBase: round(state.virtualBase ?? state.startBalance, 8),
     cash: round(state.cash, 8),
-    equity: round(equity, 8),
+    equity: round(state.cash + openValue, 8),
     realizedPnlSol: round(realized, 8),
     unrealizedPnlSol: round(unrealized, 8),
     positions: getPositions(),
     closedTrades: getClosedTrades(),
     byStrategy
   };
-}
-
-
-export function getVirtualBase() {
-  return round(state.virtualBase ?? state.startBalance, 8);
-}
-
-export function depositVirtualBalance(amountSol = 0) {
-  const amount = round(Math.max(0, safeNum(amountSol, 0)), 8);
-  if (amount <= 0) return { ok: false, amount: 0, cash: round(state.cash, 8), virtualBase: getVirtualBase() };
-  state.virtualBase = round((state.virtualBase ?? state.startBalance) + amount, 8);
-  state.startBalance = round(state.startBalance + amount, 8);
-  state.cash = round(state.cash + amount, 8);
-  return { ok: true, amount, cash: round(state.cash, 8), virtualBase: getVirtualBase() };
-}
-
-export function withdrawVirtualBalance(amountSol = 0) {
-  const requested = round(Math.max(0, safeNum(amountSol, 0)), 8);
-  const available = round(Math.max(0, state.cash), 8);
-  const amount = round(Math.min(requested, available), 8);
-  if (amount <= 0) return { ok: false, amount: 0, cash: round(state.cash, 8), virtualBase: getVirtualBase() };
-  state.virtualBase = round(Math.max(0, (state.virtualBase ?? state.startBalance) - amount), 8);
-  state.startBalance = round(Math.max(0, state.startBalance - amount), 8);
-  state.cash = round(Math.max(0, state.cash - amount), 8);
-  return { ok: true, amount, cash: round(state.cash, 8), virtualBase: getVirtualBase() };
-}
-
-export function hydratePortfolioSnapshot(snapshot = {}, nextConfig = strategyConfig, fallbackStartBalance = 10) {
-  strategyConfig = cloneConfig(nextConfig || DEFAULT_STRATEGY_CONFIG);
-  const raw = snapshot?.portfolio || snapshot || {};
-  const startBalance = round(safeNum(raw?.startBalance, fallbackStartBalance), 8);
-  const virtualBase = round(safeNum(raw?.virtualBase, startBalance), 8);
-  state = {
-    startBalance,
-    virtualBase,
-    cash: round(safeNum(raw?.cash, virtualBase), 8),
-    positions: Array.isArray(raw?.positions) ? raw.positions.map((p) => ({ ...p })) : [],
-    closedTrades: Array.isArray(raw?.closedTrades) ? raw.closedTrades.map((t) => ({ ...t })) : [],
-    runStartedAt: safeNum(raw?.runStartedAt, Date.now())
-  };
-  return getPortfolio();
 }
 
 export function openPosition({
@@ -291,56 +141,43 @@ export function openPosition({
   runnerTargetsPct = [],
   signalScore = 0,
   expectedEdgePct = 0,
-  signalContext = {},
-  walletId = null,
-  entryMode = "SCALED",
-  planName = "",
-  planObjective = ""
+  signalContext = {}
 }) {
-  if (!token?.ca || !token?.name || !safeNum(token.price)) return null;
-  if (!strategyConfig[strategy]) return null;
+  if (!token?.ca || !token?.name || !safeNum(token.price) || !STRATEGY_CONFIG[strategy]) return null;
 
-  const normalizedEntryMode = normalizeEntryMode(entryMode);
-  const amountSol = finalizeAmountSol(strategy, normalizedEntryMode);
+  const available = getAvailableCapitalForStrategy(strategy);
+  if (available <= 0.0001) return null;
 
+  const amountSol = round(available * 0.92, 8);
   if (amountSol <= 0) return null;
 
   const entryCosts = getEntryCosts(amountSol);
-  const debit = round(amountSol + entryCosts.totalSol, 8);
+  const totalDebit = round(amountSol + entryCosts.totalSol, 8);
+  if (totalDebit > state.cash) return null;
 
-  if (debit > state.cash || amountSol <= 0) return null;
-
-  const entryEffectivePrice = safeNum(token.price) * (1 + pctToFrac(ENTRY_SLIPPAGE_PCT));
-  const tokenAmount = amountSol / entryEffectivePrice;
+  const entryEffectivePrice = token.price * (1 + pctToFrac(ENTRY_SLIPPAGE_PCT));
+  const tokenAmount = round(amountSol / entryEffectivePrice, 8);
 
   const position = {
     id: `${strategy}-${token.ca}-${Date.now()}`,
     strategy,
-    walletId,
     token: token.name,
-    symbol: token.symbol || "",
     ca: token.ca,
-    dexId: token.dexId || "",
-    chainId: token.chainId || "",
-    url: token.url || "",
     entryReferencePrice: round(token.price, 12),
     entryEffectivePrice: round(entryEffectivePrice, 12),
-    tokenAmount: round(tokenAmount, 8),
-    amountSol: round(amountSol, 8),
+    tokenAmount,
+    amountSol,
     entryCosts,
     openedAt: Date.now(),
     plannedHoldMs,
-    stopLossPct: safeNum(stopLossPct),
-    takeProfitPct: safeNum(takeProfitPct),
+    stopLossPct,
+    takeProfitPct,
     runnerTargetsPct: Array.isArray(runnerTargetsPct) ? runnerTargetsPct : [],
     runnerTargetIndex: 0,
-    signalScore: safeNum(signalScore),
-    expectedEdgePct: safeNum(expectedEdgePct),
+    signalScore,
+    expectedEdgePct,
     thesis,
     signalContext,
-    entryMode: normalizedEntryMode,
-    planName,
-    planObjective,
     highestPrice: round(token.price, 12),
     lowestPrice: round(token.price, 12),
     lastPrice: round(token.price, 12),
@@ -348,7 +185,7 @@ export function openPosition({
     partialRealizedSol: 0
   };
 
-  state.cash = round(state.cash - debit, 8);
+  state.cash = round(state.cash - totalDebit, 8);
   state.positions.push(position);
 
   return { ...position, balanceAfterEntry: state.cash };
@@ -356,35 +193,32 @@ export function openPosition({
 
 export function markPosition(position, currentPrice) {
   const px = safeNum(currentPrice, 0);
-  if (!px || !position) return null;
+  if (!position || px <= 0) return null;
 
-  position.highestPrice = Math.max(safeNum(position.highestPrice, px), px);
-  position.lowestPrice = Math.min(safeNum(position.lowestPrice, px), px);
+  position.highestPrice = Math.max(position.highestPrice, px);
+  position.lowestPrice = Math.min(position.lowestPrice, px);
   position.lastPrice = round(px, 12);
 
-  const grossValueSol = safeNum(position.tokenAmount) * px;
+  const grossValueSol = round(position.tokenAmount * px, 8);
   const exitCosts = getExitCosts(grossValueSol);
-  const netValueSol = grossValueSol - exitCosts.totalSol;
+  const netValueSol = round(grossValueSol - exitCosts.totalSol, 8);
 
-  const totalCapitalUsed = safeNum(position.amountSol) + safeNum(position.entryCosts?.totalSol);
-  const netPnlSol =
-    netValueSol - totalCapitalUsed + safeNum(position.partialRealizedSol, 0);
-  const netPnlPct = totalCapitalUsed > 0 ? (netPnlSol / totalCapitalUsed) * 100 : 0;
+  const totalCapitalUsed = round(position.amountSol + position.entryCosts.totalSol, 8);
+  const netPnlSol = round(netValueSol + safeNum(position.partialRealizedSol) - totalCapitalUsed, 8);
+  const netPnlPct = totalCapitalUsed > 0 ? round((netPnlSol / totalCapitalUsed) * 100, 4) : 0;
 
-  const grossPnlSol = grossValueSol - safeNum(position.amountSol);
-  const grossPnlPct = safeNum(position.amountSol) > 0
-    ? (grossPnlSol / safeNum(position.amountSol)) * 100
-    : 0;
+  const grossPnlSol = round(grossValueSol - position.amountSol, 8);
+  const grossPnlPct = position.amountSol > 0 ? round((grossPnlSol / position.amountSol) * 100, 4) : 0;
 
   position.lastMark = {
     currentPrice: round(px, 12),
-    grossValueSol: round(grossValueSol, 8),
-    netValueSol: round(netValueSol, 8),
-    grossPnlSol: round(grossPnlSol, 8),
-    grossPnlPct: round(grossPnlPct, 4),
-    netPnlSol: round(netPnlSol, 8),
-    netPnlPct: round(netPnlPct, 4),
-    ageMs: Date.now() - safeNum(position.openedAt)
+    grossValueSol,
+    netValueSol,
+    grossPnlSol,
+    grossPnlPct,
+    netPnlSol,
+    netPnlPct,
+    ageMs: Date.now() - position.openedAt
   };
 
   return position.lastMark;
@@ -392,7 +226,7 @@ export function markPosition(position, currentPrice) {
 
 export function maybeTakeRunnerPartial(position, currentPrice) {
   if (!position || position.strategy !== "runner") return null;
-  if (!Array.isArray(position.runnerTargetsPct) || !position.runnerTargetsPct.length) return null;
+  if (!position.runnerTargetsPct?.length) return null;
 
   const mark = markPosition(position, currentPrice);
   if (!mark) return null;
@@ -400,84 +234,75 @@ export function maybeTakeRunnerPartial(position, currentPrice) {
   const idx = safeNum(position.runnerTargetIndex, 0);
   if (idx >= position.runnerTargetsPct.length) return null;
 
-  const target = safeNum(position.runnerTargetsPct[idx], 0);
-  if (mark.grossPnlPct < target) return null;
+  const targetPct = position.runnerTargetsPct[idx];
+  if (mark.grossPnlPct < targetPct) return null;
 
-  const fraction =
-    idx === 0 ? 0.3 :
-    idx === 1 ? 0.3 :
-    0.2;
-
-  const soldTokenAmount = safeNum(position.tokenAmount) * fraction;
-  const grossValueSol = soldTokenAmount * safeNum(currentPrice);
+  const fraction = idx === 0 ? 0.3 : idx === 1 ? 0.3 : 0.2;
+  const soldTokenAmount = round(position.tokenAmount * fraction, 8);
+  const grossValueSol = round(soldTokenAmount * currentPrice, 8);
   const exitCosts = getExitCosts(grossValueSol);
-  const netValueSol = grossValueSol - exitCosts.totalSol;
+  const netValueSol = round(grossValueSol - exitCosts.totalSol, 8);
 
-  position.tokenAmount = round(safeNum(position.tokenAmount) - soldTokenAmount, 8);
-  position.partialRealizedSol = round(safeNum(position.partialRealizedSol) + netValueSol, 8);
-  position.runnerTargetIndex = idx + 1;
+  position.tokenAmount = round(position.tokenAmount - soldTokenAmount, 8);
+  position.partialRealizedSol = round(position.partialRealizedSol + netValueSol, 8);
+  position.runnerTargetIndex += 1;
   state.cash = round(state.cash + netValueSol, 8);
 
   return {
-    targetPct: target,
+    targetPct,
     soldFraction: fraction,
-    netValueSol: round(netValueSol, 8),
+    netValueSol,
     remainingTokenAmount: position.tokenAmount
   };
 }
 
 export function closePosition(positionId, exitReferencePrice, reason = "EXIT") {
-  const idx = state.positions.findIndex((p) => p.id === positionId);
+  const idx = state.positions.findIndex(p => p.id === positionId);
   if (idx === -1) return null;
 
   const position = state.positions[idx];
   const px = safeNum(exitReferencePrice, 0);
   if (px <= 0) return null;
 
-  const grossValueSol = safeNum(position.tokenAmount) * px;
+  const grossValueSol = round(position.tokenAmount * px, 8);
   const exitCosts = getExitCosts(grossValueSol);
-  const netValueSol = grossValueSol - exitCosts.totalSol;
+  const netValueSol = round(grossValueSol - exitCosts.totalSol, 8);
 
-  const totalCapitalUsed = safeNum(position.amountSol) + safeNum(position.entryCosts?.totalSol);
-  const netPnlSol =
-    netValueSol + safeNum(position.partialRealizedSol, 0) - totalCapitalUsed;
-  const netPnlPct = totalCapitalUsed > 0 ? (netPnlSol / totalCapitalUsed) * 100 : 0;
+  const totalCapitalUsed = round(position.amountSol + position.entryCosts.totalSol, 8);
+  const netPnlSol = round(netValueSol + safeNum(position.partialRealizedSol) - totalCapitalUsed, 8);
+  const netPnlPct = totalCapitalUsed > 0 ? round((netPnlSol / totalCapitalUsed) * 100, 4) : 0;
 
   state.cash = round(state.cash + netValueSol, 8);
 
   const trade = {
     id: position.id,
     strategy: position.strategy,
-    walletId: position.walletId,
     token: position.token,
-    symbol: position.symbol || "",
     ca: position.ca,
-    dexId: position.dexId || "",
-    chainId: position.chainId || "",
-    url: position.url || "",
-    entryMode: position.entryMode || "SCALED",
-    planName: position.planName || "",
-    planObjective: position.planObjective || "",
     entryReferencePrice: position.entryReferencePrice,
     entryEffectivePrice: position.entryEffectivePrice,
     exitReferencePrice: round(px, 12),
-    amountSol: safeNum(position.amountSol),
+    amountSol: position.amountSol,
     entryCosts: position.entryCosts,
     exitCosts,
-    tokenAmount: safeNum(position.tokenAmount),
-    partialRealizedSol: round(safeNum(position.partialRealizedSol), 8),
-    netValueSol: round(netValueSol, 8),
-    netPnlSol: round(netPnlSol, 8),
-    netPnlPct: round(netPnlPct, 4),
+    tokenAmount: position.tokenAmount,
+    partialRealizedSol: round(position.partialRealizedSol, 8),
+    netValueSol,
+    netPnlSol,
+    netPnlPct,
+    signalScore: position.signalScore,
+    expectedEdgePct: position.expectedEdgePct,
+    thesis: position.thesis,
+    signalContext: position.signalContext,
     reason,
     openedAt: position.openedAt,
     closedAt: Date.now(),
-    durationMs: Date.now() - safeNum(position.openedAt),
-    balanceAfter: state.cash,
-    signalContext: position.signalContext
+    durationMs: Date.now() - position.openedAt,
+    balanceAfter: state.cash
   };
 
   state.closedTrades.push(trade);
   state.positions.splice(idx, 1);
+
   return trade;
 }
