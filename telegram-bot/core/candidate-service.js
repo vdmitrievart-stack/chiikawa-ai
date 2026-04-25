@@ -61,6 +61,10 @@ function safeDiv(a, b, fallback = 0) {
   return safeNum(a, 0) / den;
 }
 
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
 export default class CandidateService {
   constructor(options = {}) {
     this.logger = options.logger || console;
@@ -110,6 +114,21 @@ export default class CandidateService {
     this.smartWalletFeed = options.smartWalletFeed || null;
     this.maxHolderEnrichPerPass = Number(options.maxHolderEnrichPerPass || 8);
     this.maxSmartWalletCandidates = Number(options.maxSmartWalletCandidates || process.env.GMGN_SMART_WALLET_MAX_CANDIDATES || 30);
+
+    // External API protection: avoids Dex 429 storms and GMGN 403 hammering.
+    this.dexSearchLastFetchAt = 0;
+    this.dexTokenLastFetchAt = 0;
+    this.dexSearchMinDelayMs = Number(process.env.DEX_SEARCH_MIN_DELAY_MS || 1500);
+    this.dexTokenMinDelayMs = Number(process.env.DEX_TOKEN_MIN_DELAY_MS || 1800);
+    this.dex429CooldownUntil = 0;
+    this.dexSearchCache = new Map();
+    this.dexTokenCache = new Map();
+    this.dexCacheTtlMs = Number(process.env.DEX_CACHE_TTL_MS || 90_000);
+    this.maxDexSearchQueriesPerScan = Number(process.env.MAX_DEX_SEARCH_QUERIES_PER_SCAN || 8);
+    this.smartWalletDisabledUntil = 0;
+    this.smartWalletFailureCooldownMs = Number(process.env.SMART_WALLET_FAILURE_COOLDOWN_MS || 10 * 60 * 1000);
+    this.smartWalletHardDisabled = process.env.GMGN_SMART_WALLET_ENABLED === "false";
+
     this.defaultTradingMode = this.normalizeTradingMode(
       options.tradingMode ||
       process.env.TRADING_MODE ||
@@ -133,6 +152,7 @@ export default class CandidateService {
       reversalWatch: 0,
       runnerLike: 0,
       migrationStructure: 0,
+      migrationAccumulation: 0,
       deepAnalyzed: 0,
       tradeReady: 0,
       smartWalletFeedRaw: 0,
@@ -613,12 +633,94 @@ export default class CandidateService {
     };
   }
 
-  async fetchDexSearch(query) {
+    async waitForDexSlot(kind = "search") {
+    const isToken = kind === "token";
+    const minDelay = isToken ? this.dexTokenMinDelayMs : this.dexSearchMinDelayMs;
+    const key = isToken ? "dexTokenLastFetchAt" : "dexSearchLastFetchAt";
+    const now = Date.now();
+
+    if (this.dex429CooldownUntil && now < this.dex429CooldownUntil) {
+      await sleepMs(this.dex429CooldownUntil - now);
+    }
+
+    const elapsed = Date.now() - safeNum(this[key], 0);
+    if (elapsed < minDelay) {
+      await sleepMs(minDelay - elapsed);
+    }
+
+    this[key] = Date.now();
+  }
+
+  getCache(map, key) {
+    const row = map.get(key);
+    if (!row) return null;
+    if (Date.now() - safeNum(row.ts, 0) > this.dexCacheTtlMs) {
+      map.delete(key);
+      return null;
+    }
+    return row.value;
+  }
+
+  setCache(map, key, value) {
+    map.set(key, { ts: Date.now(), value });
+    return value;
+  }
+
+  async fetchJsonWithProtection(url, { kind = "search", cacheKey = "" } = {}) {
+    const cacheMap = kind === "token" ? this.dexTokenCache : this.dexSearchCache;
+    if (cacheKey) {
+      const cached = this.getCache(cacheMap, cacheKey);
+      if (cached) return cached;
+    }
+
+    await this.waitForDexSlot(kind);
+
+    let res;
     try {
-      const url = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(query)}`;
-      const res = await fetch(url);
-      if (!res.ok) return [];
-      const json = await res.json();
+      res = await fetch(url, {
+        headers: {
+          accept: "application/json",
+          "user-agent": "ChiikawaTradingBot/1.0"
+        }
+      });
+    } catch (error) {
+      this.logger.log("dex fetch network failed:", error.message);
+      return null;
+    }
+
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers?.get?.("retry-after") || 0);
+      const cooldownMs = retryAfter > 0 ? retryAfter * 1000 : Number(process.env.DEX_429_COOLDOWN_MS || 60_000);
+      this.dex429CooldownUntil = Date.now() + cooldownMs;
+      this.logger.log(`dex rate limited 429. cooling down ${cooldownMs}ms`);
+      return null;
+    }
+
+    if (!res.ok) {
+      this.logger.log(`dex fetch failed HTTP ${res.status}: ${url}`);
+      return null;
+    }
+
+    const json = await res.json().catch((error) => {
+      this.logger.log("dex json parse failed:", error.message);
+      return null;
+    });
+
+    if (cacheKey && json) this.setCache(cacheMap, cacheKey, json);
+    return json;
+  }
+
+  async fetchDexSearch(query) {
+    const q = asText(query);
+    if (!q) return [];
+
+    try {
+      const url = `https://api.dexscreener.com/latest/dex/search/?q=${encodeURIComponent(q)}`;
+      const json = await this.fetchJsonWithProtection(url, {
+        kind: "search",
+        cacheKey: `search:${q}`
+      });
+      if (!json) return [];
       const pairs = Array.isArray(json?.pairs) ? json.pairs : [];
       return pairs.filter((p) => isSolanaChain(p?.chainId));
     } catch (error) {
@@ -634,9 +736,11 @@ async fetchDexTokenByCA(ca) {
 
   try {
     const url = `https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(tokenAddress)}`;
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    const json = await res.json();
+    const json = await this.fetchJsonWithProtection(url, {
+      kind: "token",
+      cacheKey: `token:${tokenAddress}`
+    });
+    if (!json) return null;
     const pairs = (Array.isArray(json?.pairs) ? json.pairs : []).filter((p) => isSolanaChain(p?.chainId));
     if (!pairs.length) return null;
     return pairs.sort((a, b) =>
@@ -650,7 +754,12 @@ async fetchDexTokenByCA(ca) {
 }
 
 async fetchCandidatesFromSmartWalletFeed() {
-  if (!this.smartWalletFeed || typeof this.smartWalletFeed.fetchTokenHints !== 'function') {
+  if (
+    this.smartWalletHardDisabled ||
+    !this.smartWalletFeed ||
+    typeof this.smartWalletFeed.fetchTokenHints !== 'function' ||
+    Date.now() < safeNum(this.smartWalletDisabledUntil, 0)
+  ) {
     return {
       candidates: [],
       telemetry: {
@@ -658,8 +767,8 @@ async fetchCandidatesFromSmartWalletFeed() {
         smartWalletTokens: 0,
         smartWalletAccepted: 0,
         smartWalletPublishWorthy: 0,
-        feedEnabled: false,
-        feedMode: 'disabled'
+        feedEnabled: !this.smartWalletHardDisabled,
+        feedMode: this.smartWalletHardDisabled ? 'disabled_by_env' : 'cooldown_or_disabled'
       }
     };
   }
@@ -668,7 +777,12 @@ async fetchCandidatesFromSmartWalletFeed() {
   try {
     snapshot = await this.smartWalletFeed.fetchTokenHints();
   } catch (error) {
-    this.logger.log('smart-wallet feed failed:', error.message);
+    const msg = String(error?.message || error || "");
+    this.logger.log('smart-wallet feed failed:', msg);
+    if (msg.includes("403") || msg.includes("429") || msg.includes("Too Many Requests")) {
+      this.smartWalletDisabledUntil = Date.now() + this.smartWalletFailureCooldownMs;
+      this.logger.log(`smart-wallet feed cooldown for ${this.smartWalletFailureCooldownMs}ms`);
+    }
     return {
       candidates: [],
       telemetry: {
@@ -677,7 +791,7 @@ async fetchCandidatesFromSmartWalletFeed() {
         smartWalletAccepted: 0,
         smartWalletPublishWorthy: 0,
         feedEnabled: true,
-        feedMode: 'error'
+        feedMode: 'error_cooldown'
       }
     };
   }
@@ -1621,7 +1735,10 @@ async fetchCandidatesFromSmartWalletFeed() {
     if (candidate?.migration?.passes && !candidate?.antiRug?.hardVeto) {
       score = Math.max(score, Math.round(score * 0.7 + safeNum(candidate?.migration?.survivorScore, 0) * 0.3));
     }
-    if (candidate?.runnerLike?.allow) {
+    if (candidate?.migrationAccumulation?.priorityWatch && !candidate?.antiRug?.hardVeto) {
+      score = Math.max(score, Math.round(score * 0.62 + safeNum(candidate?.migrationAccumulation?.score, 0) * 0.38));
+    }
+    if (candidate?.runnerLike?.allow && !this.shouldPreferReversalOverRunner(candidate)) {
       score = Math.max(score, Math.round(score * 0.76 + safeNum(candidate?.runnerLike?.score, 0) * 0.24));
     }
     if (candidate?.antiRug?.hardVeto) {
@@ -1656,6 +1773,7 @@ async fetchCandidatesFromSmartWalletFeed() {
       candidate.packaging = this.buildPackagingSignals(candidate);
       candidate.runnerLike = this.buildRunnerLikeSignals(candidate);
       candidate.reversal = this.buildReversalSignals(candidate);
+      candidate.migrationAccumulation = this.buildMigrationAccumulationSignals(candidate);
       return this.recomputeCompositeScore(candidate);
     }
 
@@ -1669,7 +1787,202 @@ async fetchCandidatesFromSmartWalletFeed() {
     candidate.packaging = this.buildPackagingSignals(candidate);
     candidate.runnerLike = this.buildRunnerLikeSignals(candidate);
     candidate.reversal = this.buildReversalSignals(candidate);
+    candidate.migrationAccumulation = this.buildMigrationAccumulationSignals(candidate);
     return this.recomputeCompositeScore(candidate);
+  }
+
+    buildMigrationAccumulationSignals(candidate = {}) {
+    const token = candidate?.token || {};
+    const holder = candidate?.holderAccumulation || {};
+    const migration = candidate?.migration || {};
+    const scalpMetrics = candidate?.scalp?.metrics || {};
+
+    const pairAgeMin = safeNum(migration?.pairAgeMin, 99999);
+    const fdv = safeNum(token?.fdv, 0);
+    const liquidity = safeNum(token?.liquidity, 0);
+    const volumeH1 = safeNum(token?.volumeH1, 0);
+    const volumeH6 = safeNum(token?.volumeH6, 0);
+    const volumeH24 = safeNum(token?.volumeH24, token?.volume, 0);
+    const txnsH1 = safeNum(token?.txnsH1, 0);
+    const txnsH6 = safeNum(token?.txnsH6, 0);
+    const txnsH24 = safeNum(token?.txnsH24, token?.txns, 0);
+
+    const priceM5 = safeNum(candidate?.delta?.priceM5Pct, safeNum(token?.priceChangeM5, 0));
+    const priceH1 = safeNum(candidate?.delta?.priceH1Pct, safeNum(token?.priceChangeH1, 0));
+    const priceH6 = safeNum(candidate?.delta?.priceH6Pct, safeNum(token?.priceChangeH6, 0));
+    const priceH24 = safeNum(candidate?.delta?.priceH24Pct, safeNum(token?.priceChangeH24, 0));
+
+    const buyPressureM5 = safeNum(scalpMetrics?.buyPressureM5, 0);
+    const buyPressureH1 = safeNum(scalpMetrics?.buyPressureH1, 0);
+    const buyPressureH24 = safeNum(scalpMetrics?.buyPressureH24, 0);
+
+    const retention30m = safeNum(holder?.retention30mPct, 0);
+    const retention2h = safeNum(holder?.retention2hPct, 0);
+    const netControlPct = safeNum(holder?.netControlPct, 0);
+    const netAccumulationPct = safeNum(holder?.netAccumulationPct, 0);
+    const freshWalletBuyCount = safeNum(holder?.freshWalletBuyCount, 0);
+    const bottomTouches = safeNum(holder?.bottomTouches, 0);
+    const reloadCount = safeNum(holder?.reloadCount, 0);
+    const dipBuyRatio = safeNum(holder?.dipBuyRatio, 0);
+
+    const quietAccumulation = Boolean(holder?.quietAccumulationPass);
+    const warehouseStorage = Boolean(holder?.warehouseStoragePass) || String(holder?.cohortArchetype || "") === "warehouse_storage";
+    const bottomPack = Boolean(holder?.bottomPackReversalPass);
+
+    const ageWindow = pairAgeMin >= 60 && pairAgeMin <= 36 * 60;
+    const mcWindow = fdv >= 12000 && fdv <= 180000;
+    const deepCorrection = priceH24 <= -25 || priceH6 <= -18 || (priceH1 <= -8 && pairAgeMin >= 90);
+    const notFullyDead = liquidity >= 7000 && volumeH24 >= 12000 && txnsH24 >= 90;
+    const stillBreathing = volumeH1 >= 1200 || txnsH1 >= 18 || volumeH6 >= 6000 || txnsH6 >= 60;
+    const baseStabilizing = priceM5 >= -5 && priceH1 >= -16 && priceH1 <= 18;
+    const earlyReclaim = priceM5 > -1 && (buyPressureM5 >= 52 || buyPressureH1 >= 50 || priceH1 > 0);
+
+    const accumulationEvidence = quietAccumulation || warehouseStorage || bottomPack || retention30m >= 45 || retention2h >= 25 || netControlPct >= 25 || netAccumulationPct >= 35 || freshWalletBuyCount >= 8 || bottomTouches >= 2 || reloadCount >= 2 || dipBuyRatio >= 0.35;
+    const antiRugHard = Boolean(candidate?.antiRug?.hardVeto) || safeNum(candidate?.rug?.risk, 0) >= 80 || Boolean(candidate?.corpse?.isCorpse);
+    const liquidityOkRelative = fdv > 0 ? (liquidity / Math.max(fdv, 1)) * 100 >= 5 : liquidity >= 10000;
+
+    let score = 0;
+    if (ageWindow) score += 14;
+    if (mcWindow) score += 12;
+    if (deepCorrection) score += 16;
+    if (notFullyDead) score += 12;
+    if (stillBreathing) score += 10;
+    if (baseStabilizing) score += 12;
+    if (earlyReclaim) score += 14;
+    if (accumulationEvidence) score += 16;
+    if (liquidityOkRelative) score += 8;
+    if (quietAccumulation) score += 10;
+    if (warehouseStorage) score += 8;
+    if (bottomPack) score += 12;
+    if (retention30m >= 55) score += 6;
+    if (retention2h >= 35) score += 8;
+    if (netControlPct >= 45) score += 8;
+    if (freshWalletBuyCount >= 14) score += 6;
+    if (bottomTouches >= 3) score += 6;
+    if (buyPressureH24 < 42 && buyPressureH1 < 48 && buyPressureM5 < 50) score -= 10;
+    if (liquidity < 6000) score -= 16;
+    if (fdv > 250000) score -= 12;
+    if (priceH1 > 35 || priceM5 > 18) score -= 14;
+    if (antiRugHard) score -= 35;
+
+    const allow = !antiRugHard && ageWindow && mcWindow && deepCorrection && notFullyDead && stillBreathing && baseStabilizing && accumulationEvidence && score >= 58;
+    const priorityWatch = !antiRugHard && ageWindow && mcWindow && deepCorrection && notFullyDead && (accumulationEvidence || earlyReclaim) && score >= 48;
+    const probeEligible = allow && score >= 66 && (bottomPack || quietAccumulation || warehouseStorage || netControlPct >= 40 || retention2h >= 32);
+
+    const mode = bottomPack ? "bottom_pack_after_migration" : quietAccumulation || warehouseStorage ? "quiet_accumulation_after_migration" : earlyReclaim ? "early_reclaim_after_migration" : "post_migration_base";
+
+    return {
+      allow,
+      priorityWatch,
+      probeEligible,
+      score: clamp(Math.round(score), 0, 99),
+      mode,
+      ageWindow,
+      mcWindow,
+      deepCorrection,
+      notFullyDead,
+      stillBreathing,
+      baseStabilizing,
+      earlyReclaim,
+      accumulationEvidence,
+      liquidityOkRelative,
+      metrics: {
+        pairAgeMin,
+        fdv,
+        liquidity,
+        volumeH1,
+        volumeH6,
+        volumeH24,
+        txnsH1,
+        txnsH6,
+        txnsH24,
+        priceM5,
+        priceH1,
+        priceH6,
+        priceH24,
+        buyPressureM5,
+        buyPressureH1,
+        buyPressureH24,
+        retention30m,
+        retention2h,
+        netControlPct,
+        netAccumulationPct,
+        freshWalletBuyCount,
+        bottomTouches,
+        reloadCount,
+        dipBuyRatio
+      }
+    };
+  }
+
+  buildMigrationAccumulationPlan(candidate = {}) {
+    return {
+      strategyKey: "migration_survivor",
+      thesis: "Post-migration dump → accumulation base → early reversal attempt",
+      plannedHoldMs: 4 * 60 * 60 * 1000,
+      stopLossPct: 6.5,
+      takeProfitPct: 0,
+      runnerTargetsPct: [18, 35, 65],
+      signalScore: safeNum(candidate?.migrationAccumulation?.score, safeNum(candidate?.score, 0)),
+      expectedEdgePct: 18,
+      entryMode: candidate?.migrationAccumulation?.probeEligible ? "SCALED" : "PROBE",
+      planName: "Migration Accumulation",
+      objective: "catch post-migration base before expansion"
+    };
+  }
+
+  getAntiRugBadge(candidate = {}) {
+    const anti = candidate?.antiRug || {};
+    const verdict = String(anti?.verdict || "CLEAN").toUpperCase();
+    let emoji = "🟢";
+    if (verdict === "HARD_BLOCK") emoji = "🔴";
+    else if (verdict === "SOFT_BLOCK" || verdict === "RISKY") emoji = "🟠";
+    else if (verdict === "WATCH") emoji = "🟡";
+    return { emoji, verdict, riskScore: safeNum(anti?.riskScore, 0) };
+  }
+
+  shouldPreferReversalOverRunner(candidate = {}) {
+    const holder = candidate?.holderAccumulation || {};
+    const packaging = candidate?.packaging || {};
+    const reversal = candidate?.reversal || {};
+    const migrationAccumulation = candidate?.migrationAccumulation || {};
+    const token = candidate?.token || {};
+    const priceM5 = safeNum(candidate?.delta?.priceM5Pct, safeNum(token?.priceChangeM5, 0));
+    const priceH1 = safeNum(candidate?.delta?.priceH1Pct, safeNum(token?.priceChangeH1, 0));
+    const priceH6 = safeNum(candidate?.delta?.priceH6Pct, safeNum(token?.priceChangeH6, 0));
+    const priceH24 = safeNum(candidate?.delta?.priceH24Pct, safeNum(token?.priceChangeH24, 0));
+    const quietAccumulation = Boolean(holder?.quietAccumulationPass) || Boolean(packaging?.quietAccumulation) || Boolean(reversal?.quietAccumulation);
+    const bottomPack = Boolean(holder?.bottomPackReversalPass) || Boolean(packaging?.bottomPack) || Boolean(reversal?.bottomPack);
+    const packagingReversal = Boolean(packaging?.priorityWatch) || Boolean(packaging?.probeEligible) || Boolean(packaging?.warehouseLike);
+    const postFlushReclaim = (priceH6 < 0 || priceH24 < -10) && priceH1 > -4 && priceM5 >= -2;
+    const trueContinuation = priceH1 >= 8 && priceH6 >= 18 && priceH24 >= 25 && !quietAccumulation && !bottomPack && !packagingReversal && !postFlushReclaim && !migrationAccumulation?.priorityWatch;
+    if (trueContinuation) return false;
+    return Boolean(reversal?.allow || migrationAccumulation?.priorityWatch || migrationAccumulation?.allow || quietAccumulation || bottomPack || packagingReversal || postFlushReclaim);
+  }
+
+  getMainPlanLabel(plans = [], candidate = {}) {
+    const list = Array.isArray(plans) ? plans : [];
+    const nonCopy = list.filter((p) => p?.strategyKey && p.strategyKey !== "copytrade");
+    const migrationAccumulationPlan = nonCopy.find((p) => String(p?.planName || "").toLowerCase().includes("migration accumulation") || (p.strategyKey === "migration_survivor" && candidate?.migrationAccumulation?.priorityWatch));
+    if (migrationAccumulationPlan) return "MIGRATION_ACCUMULATION";
+    if (this.shouldPreferReversalOverRunner(candidate)) {
+      const reversalPlan = nonCopy.find((p) => p.strategyKey === "reversal" || String(p?.planName || "").toLowerCase().includes("reversal") || String(p?.planName || "").toLowerCase().includes("packaging"));
+      if (reversalPlan) return "REVERSAL";
+    }
+    const preferred = nonCopy.find((p) => p.strategyKey === "scalp") || nonCopy.find((p) => p.strategyKey === "migration_survivor") || nonCopy.find((p) => p.strategyKey === "runner") || nonCopy[0] || list[0];
+    if (!preferred?.strategyKey) return "WATCH";
+    if (preferred.strategyKey === "migration_survivor") return "MIGRATION_SURVIVOR";
+    return String(preferred.strategyKey).toUpperCase();
+  }
+
+  buildTopSignalHeader(candidate = {}, plans = []) {
+    const anti = this.getAntiRugBadge(candidate);
+    const mainPlan = this.getMainPlanLabel(plans, candidate);
+    const planLine = (plans || []).map((p) => p.strategyKey).filter(Boolean).join(", ") || "none";
+    return `${anti.emoji} <b>Anti-rug:</b> <b>${escapeHtml(anti.verdict)}</b> / ${safeNum(anti.riskScore, 0)}
+🎯 <b>Main plan:</b> <b>${escapeHtml(mainPlan)}</b>
+📌 <b>Plans:</b> ${escapeHtml(planLine)}
+↩️ <b>Reversal score:</b> ${safeNum(candidate?.reversal?.score, 0)} | 🧬 <b>Migration accumulation:</b> ${safeNum(candidate?.migrationAccumulation?.score, 0)} | 🏃 <b>Runner-like:</b> ${safeNum(candidate?.runnerLike?.score, 0)} | 📦 <b>Packaging:</b> ${safeNum(candidate?.packaging?.score, 0)}`;
   }
 
   buildReversalPlan(candidate = {}) {
@@ -1791,13 +2104,20 @@ async fetchCandidatesFromSmartWalletFeed() {
         planName: "Migration Survivor",
         objective: "post-migration expansion"
       });
+    } else if (
+      (candidate?.migrationAccumulation?.probeEligible || candidate?.migrationAccumulation?.allow) &&
+      softRiskAllowed &&
+      !(tradingMode === "sniper" && safeNum(candidate?.antiRug?.riskScore, 0) >= 28)
+    ) {
+      plans.push(this.buildMigrationAccumulationPlan(candidate));
     }
 
     if (
       score >= cfg.runnerMinScore &&
       !antiRugProbeOnly &&
       safeNum(candidate?.delta?.priceH1Pct, 0) > 0 &&
-      safeNum(candidate?.absorption?.score, 0) >= 8
+      safeNum(candidate?.absorption?.score, 0) >= 8 &&
+      !this.shouldPreferReversalOverRunner(candidate)
     ) {
       plans.push({
         strategyKey: "runner",
@@ -1843,9 +2163,11 @@ async fetchCandidatesFromSmartWalletFeed() {
     }
 
     if (strategyScope === "migration_survivor") {
-      return candidate?.migration?.passes
-        ? safeNum(candidate?.migration?.survivorScore, 0)
-        : 0;
+      if (candidate?.migration?.passes) return safeNum(candidate?.migration?.survivorScore, 0);
+      if (candidate?.migrationAccumulation?.priorityWatch || candidate?.migrationAccumulation?.allow) {
+        return safeNum(candidate?.migrationAccumulation?.score, 0) + safeNum(candidate?.holderAccumulation?.netControlPct, 0) * 1.2;
+      }
+      return 0;
     }
 
     if (strategyScope === "runner") {
@@ -1861,7 +2183,8 @@ async fetchCandidatesFromSmartWalletFeed() {
       safeNum(candidate?.migration?.survivorScore, 0),
       safeNum(candidate?.scalp?.score, 0),
       safeNum(candidate?.reversal?.score, 0),
-      safeNum(candidate?.packaging?.score, 0)
+      safeNum(candidate?.packaging?.score, 0),
+      safeNum(candidate?.migrationAccumulation?.score, 0)
     );
   }
 
@@ -1869,18 +2192,17 @@ async fetchCandidatesFromSmartWalletFeed() {
 async fetchMarketCandidates() {
   this.resetRadarTelemetry();
 
-  const results = await Promise.all(
-    Object.entries(this.radarQueryBuckets || {}).flatMap(([bucket, queries]) =>
-      (queries || []).map(async (query) => ({
-        bucket,
-        query,
-        pairs: await this.fetchDexSearch(query)
-      }))
-    )
+  const plannedQueries = Object.entries(this.radarQueryBuckets || {}).flatMap(([bucket, queries]) =>
+    (queries || []).map((query) => ({ bucket, query }))
   );
 
-  for (const row of results) {
-    this.lastRadarTelemetry.scannedRaw += Array.isArray(row.pairs) ? row.pairs.length : 0;
+  const selectedQueries = plannedQueries.slice(0, Math.max(1, this.maxDexSearchQueriesPerScan));
+  const results = [];
+
+  for (const row of selectedQueries) {
+    const pairs = await this.fetchDexSearch(row.query);
+    results.push({ ...row, pairs });
+    this.lastRadarTelemetry.scannedRaw += Array.isArray(pairs) ? pairs.length : 0;
   }
 
   const searchPairs = dedupeByCA(results.flatMap((x) => x.pairs || [])).filter((p) => isSolanaChain(p?.chainId));
@@ -1943,14 +2265,16 @@ async fetchMarketCandidates() {
       safeNum(b?.migration?.survivorScore, 0),
       safeNum(b?.scalp?.score, 0),
       safeNum(b?.reversal?.score, 0),
-      safeNum(b?.packaging?.score, 0)
+      safeNum(b?.packaging?.score, 0),
+      safeNum(b?.migrationAccumulation?.score, 0)
     );
     const aScore = Math.max(
       safeNum(a?.score, 0),
       safeNum(a?.migration?.survivorScore, 0),
       safeNum(a?.scalp?.score, 0),
       safeNum(a?.reversal?.score, 0),
-      safeNum(a?.packaging?.score, 0)
+      safeNum(a?.packaging?.score, 0),
+      safeNum(a?.migrationAccumulation?.score, 0)
     );
     return (
       bScore - aScore ||
@@ -1999,6 +2323,7 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
     let reversalWatch = 0;
     let runnerLike = 0;
     let migrationStructure = 0;
+    let migrationAccumulation = 0;
     let trapRejected = 0;
     let tradeReady = 0;
 
@@ -2008,8 +2333,9 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
       if (row?.packaging?.probeEligible) packagingProbe += 1;
       if (row?.runnerLike?.allow) runnerLike += 1;
       if (row?.migration?.passes) migrationStructure += 1;
-      if (row?.reversal?.allow || row?.packaging?.priorityWatch) reversalWatch += 1;
-      if (row?.packaging?.detected || row?.reversal?.allow || row?.migration?.passes || row?.runnerLike?.allow) watchlist += 1;
+      if (row?.migrationAccumulation?.priorityWatch || row?.migrationAccumulation?.allow) migrationAccumulation += 1;
+      if (row?.reversal?.allow || row?.packaging?.priorityWatch || row?.migrationAccumulation?.priorityWatch) reversalWatch += 1;
+      if (row?.packaging?.detected || row?.reversal?.allow || row?.migration?.passes || row?.migrationAccumulation?.priorityWatch || row?.runnerLike?.allow) watchlist += 1;
       if (row?.falseBounce?.rejected || row?.corpse?.isCorpse || safeNum(row?.rug?.risk, 0) >= 70) trapRejected += 1;
       if (this.buildPlans(row, strategyScope, runtime).length > 0) tradeReady += 1;
     }
@@ -2022,9 +2348,10 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
       reversalWatch,
       runnerLike,
       migrationStructure,
+      migrationAccumulation,
       trapRejected,
       tradeReady,
-      smartWalletPublishWorthy: ranked.filter((row) => row?.smartWalletFeed && (row?.packaging?.priorityWatch || row?.reversal?.allow || row?.migration?.passes || row?.runnerLike?.allow)).length,
+      smartWalletPublishWorthy: ranked.filter((row) => row?.smartWalletFeed && (row?.packaging?.priorityWatch || row?.reversal?.allow || row?.migration?.passes || row?.migrationAccumulation?.priorityWatch || row?.runnerLike?.allow)).length,
       lastUpdatedAt: new Date().toISOString()
     });
 
@@ -2047,7 +2374,10 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
 
   buildHeroCaption(candidate) {
     const token = candidate?.token || {};
+    const plans = this.buildPlans(candidate, "all");
+    const topHeader = this.buildTopSignalHeader(candidate, plans);
     return `🧭 <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
+${topHeader}
 chain: ${escapeHtml(token.chainId || "-")}
 score: ${safeNum(candidate?.score, 0)}
 anti-rug: ${escapeHtml(candidate?.antiRug?.verdict || '-')}
@@ -2061,6 +2391,7 @@ reversal mode: ${escapeHtml(candidate?.reversal?.primaryMode || "-")}
 quiet accumulation: ${candidate?.holderAccumulation?.quietAccumulationPass ? "yes" : "no"}
 control pct: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFixed(2)}
 migration score: ${safeNum(candidate?.migration?.survivorScore, 0)}
+migration accumulation: ${safeNum(candidate?.migrationAccumulation?.score, 0)} / ${escapeHtml(candidate?.migrationAccumulation?.mode || "-")}
 price: ${safeNum(token.price, 0)}
 liquidity: ${safeNum(token.liquidity, 0)}
 volume 1h: ${safeNum(token.volumeH1, 0)}
@@ -2080,11 +2411,13 @@ url: ${escapeHtml(token.url || "-")}`;
     const migration = candidate?.migration || {};
     const scalp = candidate?.scalp || {};
     const reversal = candidate?.reversal || {};
+    const migrationAccumulation = candidate?.migrationAccumulation || {};
     const holder = candidate?.holderAccumulation || {};
     const scalpMetrics = scalp?.metrics || {};
     const reversalMetrics = reversal?.metrics || {};
 
     return `🔎 <b>ANALYSIS</b>
+${this.buildTopSignalHeader(candidate, plans)}
 
 Token: ${escapeHtml(token.name || token.symbol || "UNKNOWN")}
 CA: <code>${escapeHtml(token.ca || "-")}</code>
@@ -2152,6 +2485,18 @@ survivor score: ${safeNum(migration?.survivorScore, 0)}
 liq/mcap %: ${safeNum(migration?.liqToMcapPct, 0).toFixed(1)}
 vol/liq %: ${safeNum(migration?.volToLiqPct, 0).toFixed(1)}
 passes: ${migration?.passes ? "yes" : "no"}
+
+🧬 Migration Accumulation:
+allow: ${migrationAccumulation?.allow ? "yes" : "no"}
+priority watch: ${migrationAccumulation?.priorityWatch ? "yes" : "no"}
+probe eligible: ${migrationAccumulation?.probeEligible ? "yes" : "no"}
+score: ${safeNum(migrationAccumulation?.score, 0)}
+mode: ${escapeHtml(migrationAccumulation?.mode || "-")}
+age window: ${migrationAccumulation?.ageWindow ? "yes" : "no"}
+deep correction: ${migrationAccumulation?.deepCorrection ? "yes" : "no"}
+still breathing: ${migrationAccumulation?.stillBreathing ? "yes" : "no"}
+base stabilizing: ${migrationAccumulation?.baseStabilizing ? "yes" : "no"}
+accumulation evidence: ${migrationAccumulation?.accumulationEvidence ? "yes" : "no"}
 
 Narrative summary:
 ${escapeHtml(candidate?.narrative?.summary || "No narrative available.")}
