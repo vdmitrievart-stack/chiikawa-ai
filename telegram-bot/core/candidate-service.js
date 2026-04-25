@@ -110,6 +110,12 @@ export default class CandidateService {
     this.smartWalletFeed = options.smartWalletFeed || null;
     this.maxHolderEnrichPerPass = Number(options.maxHolderEnrichPerPass || 8);
     this.maxSmartWalletCandidates = Number(options.maxSmartWalletCandidates || process.env.GMGN_SMART_WALLET_MAX_CANDIDATES || 30);
+    this.defaultTradingMode = this.normalizeTradingMode(
+      options.tradingMode ||
+      process.env.TRADING_MODE ||
+      process.env.TRADING_BEHAVIOR_MODE ||
+      "balanced"
+    );
     this.lastRadarTelemetry = this.createEmptyRadarTelemetry();
   }
 
@@ -160,6 +166,121 @@ export default class CandidateService {
   bumpBucket(bucket, amount = 1) {
     const map = this.lastRadarTelemetry.byBucket || (this.lastRadarTelemetry.byBucket = {});
     map[bucket] = safeNum(map[bucket], 0) + amount;
+  }
+
+  normalizeTradingMode(value = "balanced") {
+    const mode = String(value || "balanced").toLowerCase().trim();
+    if (mode === "aggressive" || mode === "aggro" || mode === "risk") return "aggressive";
+    if (mode === "sniper" || mode === "safe" || mode === "strict") return "sniper";
+    return "balanced";
+  }
+
+  getTradingMode(runtime = null) {
+    return this.normalizeTradingMode(
+      runtime?.activeConfig?.tradingMode ||
+      runtime?.activeConfig?.behaviorMode ||
+      process.env.TRADING_MODE ||
+      process.env.TRADING_BEHAVIOR_MODE ||
+      this.defaultTradingMode ||
+      "balanced"
+    );
+  }
+
+  getTradingModeConfig(modeInput = "balanced") {
+    const mode = this.normalizeTradingMode(modeInput);
+
+    if (mode === "aggressive") {
+      return {
+        mode,
+        label: "AGGRESSIVE",
+        scoreOffset: 6,
+        copytradeMinScore: 64,
+        scalpMinScore: 58,
+        reversalMinScore: 62,
+        runnerMinScore: 78,
+        allowSoftVetoProbe: true,
+        allowRiskyWatch: true,
+        maxAllowedAntiRugRisk: 68,
+        forceProbeOnSoftVeto: true
+      };
+    }
+
+    if (mode === "sniper") {
+      return {
+        mode,
+        label: "SNIPER",
+        scoreOffset: -8,
+        copytradeMinScore: 82,
+        scalpMinScore: 78,
+        reversalMinScore: 82,
+        runnerMinScore: 90,
+        allowSoftVetoProbe: false,
+        allowRiskyWatch: false,
+        maxAllowedAntiRugRisk: 34,
+        forceProbeOnSoftVeto: false
+      };
+    }
+
+    return {
+      mode: "balanced",
+      label: "BALANCED",
+      scoreOffset: 0,
+      copytradeMinScore: 70,
+      scalpMinScore: 64,
+      reversalMinScore: 68,
+      runnerMinScore: 84,
+      allowSoftVetoProbe: true,
+      allowRiskyWatch: true,
+      maxAllowedAntiRugRisk: 54,
+      forceProbeOnSoftVeto: true
+    };
+  }
+
+  applyTradingModeToScore(score, antiRug = {}, modeInput = "balanced") {
+    const cfg = this.getTradingModeConfig(modeInput);
+    let nextScore = safeNum(score, 0) + safeNum(cfg.scoreOffset, 0);
+
+    if (cfg.mode === "aggressive") {
+      if (antiRug?.softVeto) nextScore = Math.min(nextScore, 66);
+      else if (safeNum(antiRug?.riskScore, 0) >= 40) nextScore = Math.min(nextScore + 3, 78);
+    } else if (cfg.mode === "sniper") {
+      if (antiRug?.softVeto || safeNum(antiRug?.riskScore, 0) >= 40) nextScore = Math.min(nextScore, 42);
+      if (safeNum(antiRug?.riskScore, 0) > cfg.maxAllowedAntiRugRisk) nextScore = Math.min(nextScore, 35);
+    }
+
+    if (antiRug?.hardVeto) nextScore = Math.min(nextScore, 25);
+
+    return clamp(Math.round(nextScore), 0, 99);
+  }
+
+  adjustPlanForTradingMode(plan = {}, modeInput = "balanced", candidate = {}) {
+    const cfg = this.getTradingModeConfig(modeInput);
+    const antiRug = candidate?.antiRug || {};
+    const next = { ...plan };
+
+    next.tradingMode = cfg.mode;
+
+    if (antiRug?.softVeto || antiRug?.probeOnly) {
+      if (cfg.forceProbeOnSoftVeto) {
+        next.entryMode = "PROBE";
+        next.thesis = `${next.thesis || "Trade"} | anti-rug probe only`;
+        next.expectedEdgePct = Math.max(0, safeNum(next.expectedEdgePct, 0) - 2);
+        next.stopLossPct = Math.max(2.8, safeNum(next.stopLossPct, 0) * 0.85);
+      }
+    }
+
+    if (cfg.mode === "aggressive") {
+      next.expectedEdgePct = safeNum(next.expectedEdgePct, 0) + 1;
+      if (next.entryMode === "PROBE" && !antiRug?.softVeto) next.entryMode = "SCALED";
+    }
+
+    if (cfg.mode === "sniper") {
+      next.entryMode = next.entryMode === "FULL" ? "SCALED" : next.entryMode;
+      next.expectedEdgePct = safeNum(next.expectedEdgePct, 0) + 2;
+      next.stopLossPct = Math.max(2.5, safeNum(next.stopLossPct, 0) * 0.9);
+    }
+
+    return next;
   }
 
   classifyRadarBucket(token = {}) {
@@ -1192,6 +1313,8 @@ async fetchCandidatesFromSmartWalletFeed() {
       }
     });
 
+    const tradingMode = this.getTradingMode();
+
     let score = baseScore;
     if (scalp.allow) {
       score = Math.max(score, Math.round((baseScore * 0.55) + (safeNum(scalp.score, 0) * 0.45)));
@@ -1208,7 +1331,7 @@ async fetchCandidatesFromSmartWalletFeed() {
       score = Math.max(0, score - 12);
     }
 
-    score = clamp(score, 0, 99);
+    score = this.applyTradingModeToScore(score, antiRug, tradingMode);
 
     const reasons = [
       "solana chain only",
@@ -1233,9 +1356,12 @@ async fetchCandidatesFromSmartWalletFeed() {
       reasons.push(`anti-rug watch: ${antiRug.warnings.join(', ') || 'risk elevated'}`);
     }
 
+    reasons.push(`trading mode ${tradingMode}`);
+
     return {
       token,
       score,
+      tradingMode,
       strategy: "solana_only",
       rug: {
         risk: rugRisk
@@ -1479,8 +1605,11 @@ async fetchCandidatesFromSmartWalletFeed() {
       candidate.antiRug = this.buildAntiRugIntel(candidate);
     }
 
+    const tradingMode = this.getTradingMode();
+    const antiRugProbeOnly = Boolean(candidate?.antiRug?.probeOnly || candidate?.antiRug?.softVeto);
+
     let score = safeNum(candidate?.score, 0);
-    if (candidate?.scalp?.allow && !antiRugProbeOnly) {
+    if (candidate?.scalp?.allow && !(antiRugProbeOnly && tradingMode === "sniper")) {
       score = Math.max(score, Math.round(score * 0.65 + safeNum(candidate?.scalp?.score, 0) * 0.35));
     }
     if (candidate?.reversal?.allow) {
@@ -1498,10 +1627,11 @@ async fetchCandidatesFromSmartWalletFeed() {
     if (candidate?.antiRug?.hardVeto) {
       score = Math.min(score, 35);
     } else if (candidate?.antiRug?.softVeto) {
-      score = Math.min(score, 58);
+      score = Math.min(score, tradingMode === "aggressive" ? 66 : 58);
     }
 
-    candidate.score = clamp(score, 0, 99);
+    candidate.tradingMode = tradingMode;
+    candidate.score = this.applyTradingModeToScore(score, candidate?.antiRug, tradingMode);
     return candidate;
   }
 
@@ -1590,14 +1720,21 @@ async fetchCandidatesFromSmartWalletFeed() {
     return base;
   }
 
-  buildPlans(candidate, strategyScope = "all") {
+  buildPlans(candidate, strategyScope = "all", runtime = null) {
+    const tradingMode = this.getTradingMode(runtime);
+    const cfg = this.getTradingModeConfig(tradingMode);
+    candidate.tradingMode = tradingMode;
+
     if (candidate?.antiRug?.hardVeto) return [];
+    if (tradingMode === "sniper" && candidate?.antiRug?.softVeto) return [];
+    if (tradingMode === "sniper" && safeNum(candidate?.antiRug?.riskScore, 0) > cfg.maxAllowedAntiRugRisk) return [];
 
     const plans = [];
     const score = safeNum(candidate?.score, 0);
     const antiRugProbeOnly = Boolean(candidate?.antiRug?.probeOnly || candidate?.antiRug?.softVeto);
+    const softRiskAllowed = !antiRugProbeOnly || cfg.allowSoftVetoProbe;
 
-    if (score >= 70 && !antiRugProbeOnly) {
+    if (score >= cfg.copytradeMinScore && !antiRugProbeOnly) {
       plans.push({
         strategyKey: "copytrade",
         thesis: "Leader-confirmed Solana follow",
@@ -1613,17 +1750,34 @@ async fetchCandidatesFromSmartWalletFeed() {
       });
     }
 
-    if (candidate?.scalp?.allow) {
+    if (
+      candidate?.scalp?.allow &&
+      score >= cfg.scalpMinScore &&
+      softRiskAllowed &&
+      !(tradingMode === "sniper" && safeNum(candidate?.antiRug?.riskScore, 0) >= 30)
+    ) {
       plans.push(this.buildScalpPlan(candidate));
     }
 
-    if (candidate?.reversal?.allow) {
+    if (
+      candidate?.reversal?.allow &&
+      score >= cfg.reversalMinScore &&
+      softRiskAllowed
+    ) {
       plans.push(this.buildReversalPlan(candidate));
-    } else if (candidate?.packaging?.probeEligible) {
+    } else if (
+      candidate?.packaging?.probeEligible &&
+      softRiskAllowed &&
+      tradingMode !== "sniper"
+    ) {
       plans.push(this.buildPackagingProbePlan(candidate));
     }
 
-    if (candidate?.migration?.passes) {
+    if (
+      candidate?.migration?.passes &&
+      softRiskAllowed &&
+      !(tradingMode === "sniper" && safeNum(candidate?.antiRug?.riskScore, 0) >= 28)
+    ) {
       plans.push({
         strategyKey: "migration_survivor",
         thesis: "Post-migration survivor with retained demand",
@@ -1633,14 +1787,14 @@ async fetchCandidatesFromSmartWalletFeed() {
         runnerTargetsPct: [25, 50, 80],
         signalScore: Math.max(score, safeNum(candidate?.migration?.survivorScore, 0)),
         expectedEdgePct: 22,
-        entryMode: "SCALED",
+        entryMode: antiRugProbeOnly ? "PROBE" : "SCALED",
         planName: "Migration Survivor",
         objective: "post-migration expansion"
       });
     }
 
     if (
-      score >= 84 &&
+      score >= cfg.runnerMinScore &&
       !antiRugProbeOnly &&
       safeNum(candidate?.delta?.priceH1Pct, 0) > 0 &&
       safeNum(candidate?.absorption?.score, 0) >= 8
@@ -1660,11 +1814,13 @@ async fetchCandidatesFromSmartWalletFeed() {
       });
     }
 
+    const adjustedPlans = plans.map((plan) => this.adjustPlanForTradingMode(plan, tradingMode, candidate));
+
     if (strategyScope && strategyScope !== "all") {
-      return plans.filter((p) => p.strategyKey === strategyScope);
+      return adjustedPlans.filter((plan) => plan.strategyKey === strategyScope);
     }
 
-    return plans;
+    return adjustedPlans;
   }
 
   getRelevantRank(candidate, strategyScope = "all") {
@@ -1855,7 +2011,7 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
       if (row?.reversal?.allow || row?.packaging?.priorityWatch) reversalWatch += 1;
       if (row?.packaging?.detected || row?.reversal?.allow || row?.migration?.passes || row?.runnerLike?.allow) watchlist += 1;
       if (row?.falseBounce?.rejected || row?.corpse?.isCorpse || safeNum(row?.rug?.risk, 0) >= 70) trapRejected += 1;
-      if (this.buildPlans(row, strategyScope).length > 0) tradeReady += 1;
+      if (this.buildPlans(row, strategyScope, runtime).length > 0) tradeReady += 1;
     }
 
     Object.assign(this.lastRadarTelemetry, {
@@ -1873,13 +2029,13 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
     });
 
     const candidate = ranked.find((row) => {
-      const plans = this.buildPlans(row, strategyScope);
+      const plans = this.buildPlans(row, strategyScope, runtime);
       return plans.length > 0;
     }) || null;
 
     if (!candidate) return null;
 
-    const plans = this.buildPlans(candidate, strategyScope);
+    const plans = this.buildPlans(candidate, strategyScope, runtime);
     if (!plans.length) return null;
 
     return {
@@ -1934,6 +2090,7 @@ Token: ${escapeHtml(token.name || token.symbol || "UNKNOWN")}
 CA: <code>${escapeHtml(token.ca || "-")}</code>
 Chain: ${escapeHtml(token.chainId || "-")}
 Score: ${safeNum(candidate?.score, 0)}
+Trading mode: ${escapeHtml(candidate?.tradingMode || this.getTradingMode())}
 Discovery bucket: ${escapeHtml(candidate?.discoveryBucket || "-")}
 Discovery source: ${escapeHtml(candidate?.discoverySource || "-")}
 Smart-wallet hits: ${safeNum(candidate?.smartWalletFeed?.walletHits, 0)}
