@@ -185,6 +185,7 @@ export default class CandidateService {
     const txnsH24 = safeNum(token?.txnsH24, token?.txns, 0);
     const rugRisk = safeNum(candidate?.rug?.risk, 0);
 
+    if (candidate?.antiRug?.hardVeto) return true;
     if (rugRisk >= 80) return true;
     if (candidate?.corpse?.isCorpse && liquidity < 12000) return true;
     if (fdv < 5000 && liquidity < 5000) return true;
@@ -268,6 +269,226 @@ export default class CandidateService {
       allow,
       linearityRisk,
       score: clamp(Math.round((Math.max(priceH1, 0) * 0.4) + (Math.max(priceH6, 0) * 0.2) + safeNum(candidate?.absorption?.score, 0)), 0, 99)
+    };
+  }
+
+
+
+  buildAntiRugIntel(candidate = {}) {
+    const token = candidate?.token || {};
+    const holder = candidate?.holderAccumulation || {};
+    const migration = candidate?.migration || {};
+    const scalp = candidate?.scalp || {};
+    const reversal = candidate?.reversal || {};
+
+    const liquidity = safeNum(token?.liquidity, 0);
+    const fdv = safeNum(token?.fdv, 0);
+    const volumeH24 = safeNum(token?.volumeH24, token?.volume, 0);
+    const volumeH1 = safeNum(token?.volumeH1, 0);
+    const volumeM5 = safeNum(token?.volumeM5, 0);
+    const txnsH24 = safeNum(token?.txnsH24, token?.txns, 0);
+    const txnsH1 = safeNum(token?.txnsH1, 0);
+    const txnsM5 = safeNum(token?.txnsM5, 0);
+
+    const priceM5 = safeNum(token?.priceChangeM5, safeNum(candidate?.delta?.priceM5Pct, 0));
+    const priceH1 = safeNum(token?.priceChangeH1, safeNum(candidate?.delta?.priceH1Pct, 0));
+    const priceH6 = safeNum(token?.priceChangeH6, safeNum(candidate?.delta?.priceH6Pct, 0));
+    const priceH24 = safeNum(token?.priceChangeH24, safeNum(candidate?.delta?.priceH24Pct, 0));
+
+    const rugRisk = safeNum(candidate?.rug?.risk, 0);
+    const corpseScore = safeNum(candidate?.corpse?.score, 0);
+    const botActivity = safeNum(candidate?.bots?.botActivity, 0);
+    const concentration = safeNum(candidate?.wallet?.concentration, 0);
+    const distribution = safeNum(candidate?.distribution?.score, 0);
+    const absorption = safeNum(candidate?.absorption?.score, 0);
+    const accumulation = safeNum(candidate?.accumulation?.score, 0);
+
+    const retention30m = safeNum(holder?.retention30mPct, 0);
+    const retention2h = safeNum(holder?.retention2hPct, 0);
+    const retention6h = safeNum(holder?.historicalRetention6hPct, 0);
+    const netControlPct = safeNum(holder?.netControlPct, 0);
+    const netAccumulationPct = safeNum(holder?.netAccumulationPct, 0);
+    const freshWalletBuyCount = safeNum(holder?.freshWalletBuyCount, 0);
+    const reloadCount = safeNum(holder?.reloadCount, 0);
+    const quietAccumulation = Boolean(holder?.quietAccumulationPass);
+    const warehouseStorage = Boolean(holder?.warehouseStoragePass);
+    const bottomPack = Boolean(holder?.bottomPackReversalPass);
+
+    const socialCount = safeNum(candidate?.socials?.socialCount, 0);
+    const liqToMcapPct = fdv > 0 ? (liquidity / Math.max(fdv, 1)) * 100 : 0;
+    const volToLiqPct = liquidity > 0 ? (volumeH24 / Math.max(liquidity, 1)) * 100 : 0;
+    const isPumpAddress = String(token?.ca || '').toLowerCase().endsWith('pump');
+
+    const reasons = [];
+    const warnings = [];
+    let riskScore = 0;
+    let protectionScore = 0;
+
+    if (liquidity < 5000) {
+      riskScore += 30;
+      reasons.push('critical liquidity under $5k');
+    } else if (liquidity < 10000) {
+      riskScore += 18;
+      reasons.push('thin liquidity under $10k');
+    }
+
+    if (fdv >= 100000 && liquidity < 12000) {
+      riskScore += 22;
+      reasons.push('high FDV on thin liquidity');
+    }
+
+    if (fdv >= 500000 && liquidity < 30000) {
+      riskScore += 24;
+      reasons.push('six-figure+ FDV with fragile liquidity');
+    }
+
+    if (fdv > 0 && liqToMcapPct < 4 && fdv >= 80000) {
+      riskScore += 22;
+      reasons.push('liquidity/MC ratio critically weak');
+    } else if (fdv > 0 && liqToMcapPct < 8 && fdv >= 80000) {
+      riskScore += 14;
+      warnings.push('liquidity/MC ratio weak');
+    }
+
+    if (volumeH24 > liquidity * 12 && liquidity < 20000) {
+      riskScore += 20;
+      reasons.push('oversized churn on thin liquidity');
+    }
+
+    if (volumeH24 > liquidity * 20 && liquidity < 30000) {
+      riskScore += 16;
+      reasons.push('extreme volume/liquidity churn');
+    }
+
+    if (txnsH24 > 2500 && liquidity < 12000) {
+      riskScore += 18;
+      reasons.push('too many transactions for weak liquidity');
+    }
+
+    if (priceH24 < -65 && volumeH24 > 50000) {
+      riskScore += 24;
+      reasons.push('major collapse with remaining churn');
+    }
+
+    if (priceH6 < -45 && priceH1 <= 5) {
+      riskScore += 18;
+      reasons.push('post-dump weak recovery');
+    }
+
+    if (priceM5 > 15 && txnsH1 < 80 && volumeH1 < 10000) {
+      riskScore += 14;
+      reasons.push('sharp micro pump without enough participation');
+    }
+
+    if (volumeM5 > 0 && txnsM5 <= 3 && priceM5 > 8) {
+      riskScore += 10;
+      warnings.push('micro candle with too few participants');
+    }
+
+    if (corpseScore >= 65) {
+      riskScore += 26;
+      reasons.push('corpse score critical');
+    } else if (corpseScore >= 45) {
+      riskScore += 14;
+      warnings.push('corpse score elevated');
+    }
+
+    if (rugRisk >= 70) {
+      riskScore += 24;
+      reasons.push('rug risk critical');
+    } else if (rugRisk >= 55) {
+      riskScore += 12;
+      warnings.push('rug risk elevated');
+    }
+
+    if (botActivity >= 55) {
+      riskScore += 18;
+      reasons.push('bot activity elevated');
+    }
+
+    if (concentration >= 55) {
+      riskScore += 14;
+      reasons.push('holder concentration proxy high');
+    }
+
+    if (distribution > accumulation + 15 && distribution > absorption + 15) {
+      riskScore += 18;
+      reasons.push('distribution dominates accumulation');
+    }
+
+    if (socialCount === 0 && liquidity < 15000 && fdv > 30000) {
+      riskScore += 14;
+      warnings.push('no socials with fragile structure');
+    }
+
+    if (isPumpAddress && priceH24 < -55 && liquidity < 18000) {
+      riskScore += 12;
+      warnings.push('pump-style post-collapse structure');
+    }
+
+    if (quietAccumulation) {
+      protectionScore += 12;
+      warnings.push('quiet accumulation softens risk');
+    }
+
+    if (warehouseStorage) {
+      protectionScore += 12;
+      warnings.push('warehouse storage softens risk');
+    }
+
+    if (bottomPack) {
+      protectionScore += 10;
+      warnings.push('bottom-pack reversal softens risk');
+    }
+
+    if (retention30m >= 55) protectionScore += 8;
+    if (retention2h >= 35) protectionScore += 8;
+    if (retention6h >= 12) protectionScore += 4;
+    if (netControlPct >= 45) protectionScore += 10;
+    if (netAccumulationPct >= 55) protectionScore += 8;
+    if (freshWalletBuyCount >= 12) protectionScore += 6;
+    if (reloadCount >= 2) protectionScore += 3;
+    if (safeNum(migration?.passes, false)) protectionScore += 7;
+    if (safeNum(scalp?.score, 0) >= 70 && priceM5 <= 10) protectionScore += 4;
+    if (safeNum(reversal?.score, 0) >= 70) protectionScore += 5;
+
+    const adjustedRisk = clamp(Math.round(riskScore - protectionScore), 0, 100);
+
+    const hardVeto =
+      adjustedRisk >= 72 ||
+      (liquidity < 5000 && fdv >= 50000) ||
+      (priceH24 < -80 && liquidity < 20000) ||
+      (corpseScore >= 75 && rugRisk >= 55) ||
+      (volumeH24 > liquidity * 25 && liquidity < 10000);
+
+    const softVeto =
+      !hardVeto &&
+      (
+        adjustedRisk >= 55 ||
+        (rugRisk >= 60 && liquidity < 15000) ||
+        (volumeH24 > liquidity * 15 && liquidity < 25000)
+      );
+
+    const verdict =
+      hardVeto ? 'HARD_BLOCK' :
+      softVeto ? 'SOFT_BLOCK' :
+      adjustedRisk >= 40 ? 'RISKY' :
+      adjustedRisk >= 22 ? 'WATCH' :
+      'CLEAN';
+
+    return {
+      verdict,
+      riskScore: adjustedRisk,
+      rawRiskScore: clamp(Math.round(riskScore), 0, 100),
+      protectionScore: clamp(Math.round(protectionScore), 0, 100),
+      hardVeto,
+      softVeto,
+      tradeBlocked: hardVeto,
+      probeOnly: softVeto,
+      liqToMcapPct,
+      volToLiqPct,
+      reasons,
+      warnings
     };
   }
 
@@ -936,6 +1157,41 @@ async fetchCandidatesFromSmartWalletFeed() {
       buyPressureM5
     });
 
+    const antiRug = this.buildAntiRugIntel({
+      token,
+      rug: { risk: rugRisk },
+      corpse: {
+        score: corpseScore,
+        isCorpse
+      },
+      falseBounce: {
+        rejected: falseBounceRejected
+      },
+      developer: {
+        verdict: developerVerdict
+      },
+      wallet: {
+        concentration: proxyConcentration
+      },
+      bots: {
+        botActivity
+      },
+      distribution: {
+        score: distributionScore
+      },
+      accumulation: {
+        score: accumulationScore
+      },
+      absorption: {
+        score: absorptionScore
+      },
+      migration,
+      scalp,
+      socials: {
+        socialCount
+      }
+    });
+
     let score = baseScore;
     if (scalp.allow) {
       score = Math.max(score, Math.round((baseScore * 0.55) + (safeNum(scalp.score, 0) * 0.45)));
@@ -943,6 +1199,15 @@ async fetchCandidatesFromSmartWalletFeed() {
     if (migration.passes) {
       score = Math.max(score, Math.round((score * 0.7) + (safeNum(migration?.survivorScore, 0) * 0.3)));
     }
+
+    if (antiRug.hardVeto) {
+      score = Math.max(0, score - 45);
+    } else if (antiRug.softVeto) {
+      score = Math.max(0, score - 24);
+    } else if (antiRug.riskScore >= 40) {
+      score = Math.max(0, score - 12);
+    }
+
     score = clamp(score, 0, 99);
 
     const reasons = [
@@ -958,6 +1223,14 @@ async fetchCandidatesFromSmartWalletFeed() {
 
     if (scalp.allow) {
       reasons.push(`scalp mode ${scalp.primaryMode}`);
+    }
+
+    if (antiRug.hardVeto) {
+      reasons.push(`anti-rug hard block: ${antiRug.reasons.join(', ') || 'critical risk'}`);
+    } else if (antiRug.softVeto) {
+      reasons.push(`anti-rug soft block: ${antiRug.reasons.join(', ') || 'elevated risk'}`);
+    } else if (antiRug.riskScore >= 40) {
+      reasons.push(`anti-rug watch: ${antiRug.warnings.join(', ') || 'risk elevated'}`);
     }
 
     return {
@@ -1020,6 +1293,7 @@ async fetchCandidatesFromSmartWalletFeed() {
       },
       migration,
       scalp,
+      antiRug,
       dexPaid: false,
       copytradeMeta: {
         followDelaySec: 0,
@@ -1201,8 +1475,12 @@ async fetchCandidatesFromSmartWalletFeed() {
   }
 
   recomputeCompositeScore(candidate = {}) {
+    if (candidate?.token) {
+      candidate.antiRug = this.buildAntiRugIntel(candidate);
+    }
+
     let score = safeNum(candidate?.score, 0);
-    if (candidate?.scalp?.allow) {
+    if (candidate?.scalp?.allow && !antiRugProbeOnly) {
       score = Math.max(score, Math.round(score * 0.65 + safeNum(candidate?.scalp?.score, 0) * 0.35));
     }
     if (candidate?.reversal?.allow) {
@@ -1211,12 +1489,18 @@ async fetchCandidatesFromSmartWalletFeed() {
     if (candidate?.packaging?.detected) {
       score = Math.max(score, Math.round(score * 0.72 + safeNum(candidate?.packaging?.score, 0) * 0.28));
     }
-    if (candidate?.migration?.passes) {
+    if (candidate?.migration?.passes && !candidate?.antiRug?.hardVeto) {
       score = Math.max(score, Math.round(score * 0.7 + safeNum(candidate?.migration?.survivorScore, 0) * 0.3));
     }
     if (candidate?.runnerLike?.allow) {
       score = Math.max(score, Math.round(score * 0.76 + safeNum(candidate?.runnerLike?.score, 0) * 0.24));
     }
+    if (candidate?.antiRug?.hardVeto) {
+      score = Math.min(score, 35);
+    } else if (candidate?.antiRug?.softVeto) {
+      score = Math.min(score, 58);
+    }
+
     candidate.score = clamp(score, 0, 99);
     return candidate;
   }
@@ -1307,10 +1591,13 @@ async fetchCandidatesFromSmartWalletFeed() {
   }
 
   buildPlans(candidate, strategyScope = "all") {
+    if (candidate?.antiRug?.hardVeto) return [];
+
     const plans = [];
     const score = safeNum(candidate?.score, 0);
+    const antiRugProbeOnly = Boolean(candidate?.antiRug?.probeOnly || candidate?.antiRug?.softVeto);
 
-    if (score >= 70) {
+    if (score >= 70 && !antiRugProbeOnly) {
       plans.push({
         strategyKey: "copytrade",
         thesis: "Leader-confirmed Solana follow",
@@ -1354,6 +1641,7 @@ async fetchCandidatesFromSmartWalletFeed() {
 
     if (
       score >= 84 &&
+      !antiRugProbeOnly &&
       safeNum(candidate?.delta?.priceH1Pct, 0) > 0 &&
       safeNum(candidate?.absorption?.score, 0) >= 8
     ) {
@@ -1606,6 +1894,8 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
     return `🧭 <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
 chain: ${escapeHtml(token.chainId || "-")}
 score: ${safeNum(candidate?.score, 0)}
+anti-rug: ${escapeHtml(candidate?.antiRug?.verdict || '-')}
+anti-rug risk: ${safeNum(candidate?.antiRug?.riskScore, 0)}
 discovery: ${escapeHtml(candidate?.discoverySource || candidate?.discoveryBucket || "-")}
 smart-wallet hits: ${safeNum(candidate?.smartWalletFeed?.walletHits, 0)}
 scalp score: ${safeNum(candidate?.scalp?.score, 0)}
@@ -1657,6 +1947,7 @@ Txns 24h: ${safeNum(token.txnsH24, token.txns, 0)}
 FDV: ${safeNum(token.fdv, 0)}
 
 ⚠️ Rug: ${safeNum(candidate?.rug?.risk, 0)}
+🛡️ Anti-Rug: ${escapeHtml(candidate?.antiRug?.verdict || '-')} | risk ${safeNum(candidate?.antiRug?.riskScore, 0)} | protection ${safeNum(candidate?.antiRug?.protectionScore, 0)}
 🧟 Corpse: ${safeNum(candidate?.corpse?.score, 0)}
 👥 Concentration: ${safeNum(candidate?.wallet?.concentration, 0)}
 🤖 Bot Activity: ${safeNum(candidate?.bots?.botActivity, 0)}
