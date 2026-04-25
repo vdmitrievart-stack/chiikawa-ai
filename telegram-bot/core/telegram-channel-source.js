@@ -4,8 +4,8 @@ function safeNum(v, fallback = 0) {
 }
 
 function asText(v, fallback = "") {
-  const s = String(v ?? "").trim();
-  return s || fallback;
+  const out = String(v ?? "").trim();
+  return out || fallback;
 }
 
 function sleepMs(ms) {
@@ -44,16 +44,17 @@ export default class TelegramChannelSource {
   constructor(options = {}) {
     this.logger = options.logger || console;
 
-    const envChannels = String(
-      options.channels ||
-      process.env.TELEGRAM_SIGNAL_CHANNELS ||
-      "solhousesignal,solwhaletrending,solearlytrending"
-    )
-      .split(",")
-      .map(normalizeChannel)
-      .filter(Boolean);
+    this.channels = unique(
+      String(
+        options.channels ||
+          process.env.TELEGRAM_SIGNAL_CHANNELS ||
+          "solhousesignal,solwhaletrending,solearlytrending"
+      )
+        .split(",")
+        .map(normalizeChannel)
+        .filter(Boolean)
+    );
 
-    this.channels = unique(envChannels);
     this.enabled = String(process.env.TELEGRAM_SIGNAL_SOURCE_ENABLED || "true") !== "false";
     this.maxMessagesPerChannel = Number(process.env.TELEGRAM_SIGNAL_MAX_MESSAGES || 20);
     this.maxAgeMinutes = Number(process.env.TELEGRAM_SIGNAL_MAX_AGE_MINUTES || 360);
@@ -68,6 +69,7 @@ export default class TelegramChannelSource {
     const blocks = [];
     const regex = /<div class="tgme_widget_message[^"]*"[\s\S]*?<\/div>\s*<\/div>/gi;
     let match;
+
     while ((match = regex.exec(html)) !== null) {
       blocks.push(match[0]);
       if (blocks.length >= this.maxMessagesPerChannel) break;
@@ -96,26 +98,27 @@ export default class TelegramChannelSource {
     const explicit = [];
     const explicitRegex = /(?:ca|contract|address|token)\s*[:\-]?\s*([1-9A-HJ-NP-Za-km-z]{32,44}(?:pump)?)/gi;
     let m;
+
     while ((m = explicitRegex.exec(clean)) !== null) {
       explicit.push(m[1]);
     }
 
-    const dexLinks = [];
+    const linkContracts = [];
     const linkRegex = /(?:dexscreener\.com\/solana\/|gmgn\.ai\/sol\/token\/)([1-9A-HJ-NP-Za-km-z]{32,44}(?:pump)?)/gi;
+
     while ((m = linkRegex.exec(clean)) !== null) {
-      dexLinks.push(m[1]);
+      linkContracts.push(m[1]);
     }
 
-    const base58 = clean.match(/\b[1-9A-HJ-NP-Za-km-z]{32,44}(?:pump)?\b/g) || [];
+    const generic = clean.match(/\b[1-9A-HJ-NP-Za-km-z]{32,44}(?:pump)?\b/g) || [];
 
-    return unique([...explicit, ...dexLinks, ...base58])
+    return unique([...explicit, ...linkContracts, ...generic])
       .filter((ca) => ca.length >= 32 && ca.length <= 48)
       .filter((ca) => !/^0x/i.test(ca));
   }
 
-  scoreHint({ ca, channels = [], messages = [] }) {
+  scoreHint({ channels = [], messages = [] }) {
     let score = 0;
-
     score += Math.min(20, channels.length * 7);
     score += Math.min(12, messages.length * 3);
 
@@ -133,15 +136,14 @@ export default class TelegramChannelSource {
   }
 
   async fetchChannel(channel) {
-    const now = Date.now();
-    const elapsed = now - this.lastFetchAt;
+    const elapsed = Date.now() - this.lastFetchAt;
     if (elapsed < this.fetchDelayMs) {
       await sleepMs(this.fetchDelayMs - elapsed);
     }
+
     this.lastFetchAt = Date.now();
 
     const url = `https://t.me/s/${encodeURIComponent(channel)}`;
-
     const res = await fetch(url, {
       headers: {
         accept: "text/html,application/xhtml+xml",
@@ -155,28 +157,29 @@ export default class TelegramChannelSource {
 
     const html = await res.text();
     const blocks = this.extractMessageBlocks(html);
-    const out = [];
+    const rows = [];
 
     for (const block of blocks) {
-      const ts = this.extractMessageDate(block);
-      const ageMin = ts > 0 ? (Date.now() - ts) / 60000 : 999999;
+      const messageTs = this.extractMessageDate(block);
+      const ageMin = messageTs > 0 ? (Date.now() - messageTs) / 60000 : 999999;
+
       if (ageMin > this.maxAgeMinutes) continue;
 
       const text = decodeHtml(block);
       const contracts = this.extractContracts(text);
 
       for (const ca of contracts) {
-        out.push({
+        rows.push({
           ca,
           channel,
           text: text.slice(0, 800),
-          messageTs: ts,
+          messageTs,
           ageMin
         });
       }
     }
 
-    return out;
+    return rows;
   }
 
   async fetchTokenHints() {
@@ -187,7 +190,8 @@ export default class TelegramChannelSource {
           mode: "disabled",
           rawSignals: 0,
           uniqueTokens: 0,
-          channels: this.channels.length
+          channels: this.channels.length,
+          errors: []
         }
       };
     }
@@ -259,7 +263,11 @@ export default class TelegramChannelSource {
       }
     };
 
-    this.cache = { ts: Date.now(), value };
+    this.cache = {
+      ts: Date.now(),
+      value
+    };
+
     return value;
   }
 }

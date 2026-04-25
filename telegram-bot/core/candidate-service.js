@@ -1,3 +1,4 @@
+import TelegramChannelSource from "./telegram-channel-source.js";
 function safeNum(v, fallback = 0) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
@@ -112,8 +113,12 @@ export default class CandidateService {
     };
     this.holderAccumulationEngine = options.holderAccumulationEngine || null;
     this.smartWalletFeed = options.smartWalletFeed || null;
+    this.telegramChannelSource = options.telegramChannelSource || new TelegramChannelSource({
+      logger: this.logger
+    });
     this.maxHolderEnrichPerPass = Number(options.maxHolderEnrichPerPass || 8);
     this.maxSmartWalletCandidates = Number(options.maxSmartWalletCandidates || process.env.GMGN_SMART_WALLET_MAX_CANDIDATES || 30);
+    this.maxTelegramSignalCandidates = Number(options.maxTelegramSignalCandidates || process.env.TELEGRAM_SIGNAL_MAX_CANDIDATES || 30);
 
     // External API protection: avoids Dex 429 storms and GMGN 403 hammering.
     this.dexSearchLastFetchAt = 0;
@@ -159,13 +164,18 @@ export default class CandidateService {
       smartWalletTokens: 0,
       smartWalletAccepted: 0,
       smartWalletPublishWorthy: 0,
+      telegramSignalRaw: 0,
+      telegramSignalTokens: 0,
+      telegramSignalAccepted: 0,
+      telegramSignalPublishWorthy: 0,
       byBucket: {
         fresh: 0,
         packaging: 0,
         migration: 0,
         momentum: 0,
         forgotten: 0,
-        smart_wallets: 0
+        smart_wallets: 0,
+        telegram_signals: 0
       },
       lastUpdatedAt: new Date().toISOString()
     };
@@ -858,6 +868,106 @@ async fetchCandidatesFromSmartWalletFeed() {
       smartWalletPublishWorthy: 0,
       feedEnabled: true,
       feedMode: asText(snapshot?.telemetry?.mode, 'mixed')
+    }
+  };
+}
+
+  async fetchCandidatesFromTelegramChannels() {
+  if (!this.telegramChannelSource || typeof this.telegramChannelSource.fetchTokenHints !== "function") {
+    return {
+      candidates: [],
+      telemetry: {
+        telegramSignalRaw: 0,
+        telegramSignalTokens: 0,
+        telegramSignalAccepted: 0,
+        telegramSignalPublishWorthy: 0,
+        feedEnabled: false,
+        feedMode: "disabled"
+      }
+    };
+  }
+
+  let snapshot;
+
+  try {
+    snapshot = await this.telegramChannelSource.fetchTokenHints();
+  } catch (error) {
+    this.logger.log("telegram signal source failed:", error.message);
+    return {
+      candidates: [],
+      telemetry: {
+        telegramSignalRaw: 0,
+        telegramSignalTokens: 0,
+        telegramSignalAccepted: 0,
+        telegramSignalPublishWorthy: 0,
+        feedEnabled: true,
+        feedMode: "error"
+      }
+    };
+  }
+
+  const hints = Array.isArray(snapshot?.tokens) ? snapshot.tokens : [];
+  const selected = hints.slice(0, this.maxTelegramSignalCandidates);
+
+  const pairs = [];
+
+  for (const hint of selected) {
+    const pair = await this.fetchDexTokenByCA(hint.ca);
+    if (pair) {
+      pairs.push({
+        pair,
+        hint
+      });
+    }
+  }
+
+  const candidates = pairs.map(({ pair, hint }) => {
+    const candidate = this.analyzePair(pair);
+
+    candidate.discoveryBucket = "telegram_signals";
+    candidate.discoverySource = "telegram_signal_channels";
+    candidate.telegramSignal = {
+      channelHits: safeNum(hint?.channelHits, 0),
+      telegramSignalScore: safeNum(hint?.telegramSignalScore, 0),
+      channels: Array.isArray(hint?.channels) ? hint.channels.slice(0, 8) : [],
+      newestAgeMin: safeNum(hint?.newestAgeMin, 999999),
+      sampleMessages: Array.isArray(hint?.messages)
+        ? hint.messages.slice(0, 3).map((x) => ({
+            channel: x.channel,
+            ageMin: safeNum(x.ageMin, 0),
+            text: shortText(x.text, 180)
+          }))
+        : []
+    };
+
+    candidate.reasons = Array.isArray(candidate.reasons) ? candidate.reasons : [];
+    candidate.reasons.push(
+      `telegram signal source: ${candidate.telegramSignal.channelHits} channel hits`
+    );
+
+    candidate.score = clamp(
+      safeNum(candidate?.score, 0) +
+        Math.min(
+          12,
+          safeNum(hint?.channelHits, 0) * 3 +
+            Math.round(safeNum(hint?.telegramSignalScore, 0) / 8)
+        ),
+      0,
+      99
+    );
+
+    return candidate;
+  });
+
+  return {
+    candidates,
+    telemetry: {
+      telegramSignalRaw: safeNum(snapshot?.telemetry?.rawSignals, hints.length),
+      telegramSignalTokens: selected.length,
+      telegramSignalAccepted: candidates.length,
+      telegramSignalPublishWorthy: 0,
+      feedEnabled: true,
+      feedMode: asText(snapshot?.telemetry?.mode, "telegram_public_channels")
     }
   };
 }
@@ -2207,11 +2317,17 @@ async fetchMarketCandidates() {
 
   const searchPairs = dedupeByCA(results.flatMap((x) => x.pairs || [])).filter((p) => isSolanaChain(p?.chainId));
   const smartWalletResult = await this.fetchCandidatesFromSmartWalletFeed();
+  const telegramSignalResult = await this.fetchCandidatesFromTelegramChannels();
 
   this.lastRadarTelemetry.smartWalletFeedRaw = safeNum(smartWalletResult?.telemetry?.smartWalletFeedRaw, 0);
   this.lastRadarTelemetry.smartWalletTokens = safeNum(smartWalletResult?.telemetry?.smartWalletTokens, 0);
   this.lastRadarTelemetry.smartWalletAccepted = safeNum(smartWalletResult?.telemetry?.smartWalletAccepted, 0);
   this.lastRadarTelemetry.scannedRaw += safeNum(smartWalletResult?.telemetry?.smartWalletFeedRaw, 0);
+
+  this.lastRadarTelemetry.telegramSignalRaw = safeNum(telegramSignalResult?.telemetry?.telegramSignalRaw, 0);
+  this.lastRadarTelemetry.telegramSignalTokens = safeNum(telegramSignalResult?.telemetry?.telegramSignalTokens, 0);
+  this.lastRadarTelemetry.telegramSignalAccepted = safeNum(telegramSignalResult?.telemetry?.telegramSignalAccepted, 0);
+  this.lastRadarTelemetry.scannedRaw += safeNum(telegramSignalResult?.telemetry?.telegramSignalRaw, 0);
 
   const analyzed = [];
   const byCa = new Map();
@@ -2241,6 +2357,27 @@ async fetchMarketCandidates() {
       ? 'dex_search+gmgn_smart_wallets'
       : existing.discoverySource;
     existing.smartWalletFeed = candidate.smartWalletFeed;
+    existing.score = clamp(Math.max(safeNum(existing.score, 0), safeNum(candidate.score, 0)), 0, 99);
+    existing.reasons = [...new Set([...(existing.reasons || []), ...(candidate.reasons || [])])];
+    byCa.set(ca, existing);
+  }
+
+  for (const candidate of telegramSignalResult?.candidates || []) {
+    const ca = asText(candidate?.token?.ca);
+    if (!ca) continue;
+    this.bumpBucket('telegram_signals', 1);
+    if (!byCa.has(ca)) {
+      byCa.set(ca, candidate);
+      continue;
+    }
+    const existing = byCa.get(ca);
+    existing.discoveryBucket = existing.discoveryBucket === 'smart_wallets'
+      ? 'smart_wallets+telegram_signals'
+      : 'telegram_signals';
+    existing.discoverySource = [existing.discoverySource, 'telegram_signal_channels']
+      .filter(Boolean)
+      .join('+');
+    existing.telegramSignal = candidate.telegramSignal;
     existing.score = clamp(Math.max(safeNum(existing.score, 0), safeNum(candidate.score, 0)), 0, 99);
     existing.reasons = [...new Set([...(existing.reasons || []), ...(candidate.reasons || [])])];
     byCa.set(ca, existing);
@@ -2352,6 +2489,7 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
       trapRejected,
       tradeReady,
       smartWalletPublishWorthy: ranked.filter((row) => row?.smartWalletFeed && (row?.packaging?.priorityWatch || row?.reversal?.allow || row?.migration?.passes || row?.migrationAccumulation?.priorityWatch || row?.runnerLike?.allow)).length,
+      telegramSignalPublishWorthy: ranked.filter((row) => row?.telegramSignal && (row?.packaging?.priorityWatch || row?.reversal?.allow || row?.migration?.passes || row?.migrationAccumulation?.priorityWatch || row?.runnerLike?.allow)).length,
       lastUpdatedAt: new Date().toISOString()
     });
 
@@ -2392,6 +2530,7 @@ quiet accumulation: ${candidate?.holderAccumulation?.quietAccumulationPass ? "ye
 control pct: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFixed(2)}
 migration score: ${safeNum(candidate?.migration?.survivorScore, 0)}
 migration accumulation: ${safeNum(candidate?.migrationAccumulation?.score, 0)} / ${escapeHtml(candidate?.migrationAccumulation?.mode || "-")}
+telegram channels: ${safeNum(candidate?.telegramSignal?.channelHits, 0)} | ${escapeHtml((candidate?.telegramSignal?.channels || []).join(", ") || "-")}
 price: ${safeNum(token.price, 0)}
 liquidity: ${safeNum(token.liquidity, 0)}
 volume 1h: ${safeNum(token.volumeH1, 0)}
@@ -2485,6 +2624,11 @@ survivor score: ${safeNum(migration?.survivorScore, 0)}
 liq/mcap %: ${safeNum(migration?.liqToMcapPct, 0).toFixed(1)}
 vol/liq %: ${safeNum(migration?.volToLiqPct, 0).toFixed(1)}
 passes: ${migration?.passes ? "yes" : "no"}
+
+📣 Telegram Signal Source:
+channels: ${safeNum(candidate?.telegramSignal?.channelHits, 0)}
+source list: ${escapeHtml((candidate?.telegramSignal?.channels || []).join(", ") || "-")}
+age min: ${safeNum(candidate?.telegramSignal?.newestAgeMin, 0).toFixed(1)}
 
 🧬 Migration Accumulation:
 allow: ${migrationAccumulation?.allow ? "yes" : "no"}
