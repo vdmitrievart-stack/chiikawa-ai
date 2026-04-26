@@ -470,6 +470,8 @@ export default class CandidateService {
     const sameDayClusterCount = safeNum(walletCluster?.sameDayClusterCount, 0);
     const sameDayClusterSupplyPct = safeNum(walletCluster?.sameDayClusterSupplyPct, 0);
     const sameBuyWindowClusterCount = safeNum(walletCluster?.sameBuyWindowClusterCount, 0);
+    const sameFundingClusterCount = safeNum(walletCluster?.sameFundingClusterCount, 0);
+    const sameFundingSupplyPct = safeNum(walletCluster?.sameFundingSupplyPct, 0);
 
     const socialCount = safeNum(candidate?.socials?.socialCount, 0);
     const liqToMcapPct = fdv > 0 ? (liquidity / Math.max(fdv, 1)) * 100 : 0;
@@ -592,6 +594,11 @@ export default class CandidateService {
     if (sameDayClusterSupplyPct >= 30 && sameBuyWindowClusterCount >= 4) {
       riskScore += 20;
       reasons.push('same-day and same-buy-window holder coordination');
+    }
+
+    if (sameFundingClusterCount >= 4 || sameFundingSupplyPct >= 20) {
+      riskScore += 24;
+      reasons.push('same funding source holder cluster');
     }
 
     if (socialCount === 0 && liquidity < 15000 && fdv > 30000) {
