@@ -503,6 +503,22 @@ function extractMetrics(result) {
     priceSinceLastSummaryPct: safeNum(holder?.priceSinceLastSummaryPct, 0),
     bullishHolderGrowthOnWeakness: Boolean(holder?.bullishHolderGrowthOnWeakness),
     holderGrowthWindowMin: safeNum(holder?.holderGrowthWindowMin, 0),
+    walletCluster: holder?.walletCluster || null,
+    clusterRisk: holder?.walletCluster?.clusterRisk || '-',
+    clusterRiskScore: safeNum(holder?.walletCluster?.clusterRiskScore, 0),
+    avgWalletAgeDays: safeNum(holder?.walletCluster?.avgWalletAgeDays ?? holder?.walletCluster?.avgAgeDays, 0),
+    walletAgeKnownCount: safeNum(holder?.walletCluster?.walletAgeKnownCount, 0),
+    walletAgeUnknownCount: safeNum(holder?.walletCluster?.walletAgeUnknownCount, 0),
+    youngWalletCount7d: safeNum(holder?.walletCluster?.youngWalletCount7d, 0),
+    veryYoungWalletCount3d: safeNum(holder?.walletCluster?.veryYoungWalletCount3d, 0),
+    oldWalletCount30d: safeNum(holder?.walletCluster?.oldWalletCount30d, 0),
+    sameDayClusterCount: safeNum(holder?.walletCluster?.sameDayClusterCount, 0),
+    sameDayYoungClusterCount: safeNum(holder?.walletCluster?.sameDayYoungClusterCount, 0),
+    sameBuyWindowClusterCount: safeNum(holder?.walletCluster?.sameBuyWindowClusterCount, 0),
+    sameFundingClusterCount: safeNum(holder?.walletCluster?.sameFundingClusterCount, 0),
+    sameDayBuySizeCv: safeNum(holder?.walletCluster?.sameDayBuySizeCv, 999),
+    sameBuyWindowBuySizeCv: safeNum(holder?.walletCluster?.sameBuyWindowBuySizeCv, 999),
+    globalBuySizeCv: safeNum(holder?.walletCluster?.globalBuySizeCv, 999),
   };
 }
 
@@ -738,6 +754,59 @@ function buildAccumulationReport(result, monitorEnabled = false) {
   return lines.join('\n');
 }
 
+function buildWalletClusterShortReport(result = {}) {
+  const analyzed = result?.analyzed || {};
+  const token = analyzed?.token || result?.token || {};
+  const holder = analyzed?.holderAccumulation || {};
+  const cluster = holder?.walletCluster || null;
+
+  const base = [
+    `🧬 <b>WALLET CLUSTER / ВОЗРАСТ КОШЕЛЬКОВ</b>`,
+    `<b>${escapeHtml(token.name || token.symbol || 'UNKNOWN')}</b>`,
+    `<code>${escapeHtml(token.ca || '')}</code>`,
+  ];
+
+  if (!cluster) {
+    base.push(yellow('Wallet cluster — данных пока нет'));
+    base.push(`Проверь замену файлов: holder-accumulation-engine.js + wallet-cluster-intelligence.js`);
+    return base.join('\n');
+  }
+
+  const riskScore = safeNum(cluster.clusterRiskScore, 0);
+  base.push(`${riskScore >= 70 ? red('Cluster risk') : riskScore >= 45 ? yellow('Cluster risk') : green('Cluster risk')} — ${escapeHtml(cluster.clusterRisk || '-')} / ${riskScore}`);
+  base.push(`${yellow('Возраст проверен')} — ${safeNum(cluster.walletAgeKnownCount ?? cluster.trackedWallets, 0)} / ${safeNum(cluster.trackedWallets, 0)} кошельков`);
+  base.push(`${safeNum(cluster.avgWalletAgeDays ?? cluster.avgAgeDays, 0) <= 7 ? red('Средний возраст') : safeNum(cluster.avgWalletAgeDays ?? cluster.avgAgeDays, 0) <= 30 ? yellow('Средний возраст') : green('Средний возраст')} — ${fmtNum(cluster.avgWalletAgeDays ?? cluster.avgAgeDays, 1)}д`);
+  base.push(`${safeNum(cluster.youngWalletCount7d, 0) >= 5 ? red('Молодые ≤7д / ≤3д') : safeNum(cluster.youngWalletCount7d, 0) >= 3 ? yellow('Молодые ≤7д / ≤3д') : green('Молодые ≤7д / ≤3д')} — ${safeNum(cluster.youngWalletCount7d, 0)} / ${safeNum(cluster.veryYoungWalletCount3d, 0)} | supply ${fmtPct(cluster.youngSupplyPct)}`);
+  base.push(`${safeNum(cluster.oldWalletCount30d, 0) >= 6 ? green('Старые >30д') : yellow('Старые >30д')} — ${safeNum(cluster.oldWalletCount30d, 0)} | supply ${fmtPct(cluster.oldSupplyPct)}`);
+  base.push(`${safeNum(cluster.sameDayClusterCount, 0) >= 5 ? red('Same-day cluster') : safeNum(cluster.sameDayClusterCount, 0) >= 3 ? yellow('Same-day cluster') : green('Same-day cluster')} — ${safeNum(cluster.sameDayClusterCount, 0)} кош. / ${fmtPct(cluster.sameDayClusterSupplyPct)} supply`);
+  base.push(`${safeNum(cluster.sameDayYoungClusterCount, 0) >= 4 ? red('Young same-day cluster') : safeNum(cluster.sameDayYoungClusterCount, 0) >= 2 ? yellow('Young same-day cluster') : green('Young same-day cluster')} — ${safeNum(cluster.sameDayYoungClusterCount, 0)} кош.`);
+  base.push(`${safeNum(cluster.sameBuyWindowClusterCount, 0) >= 4 ? red('Same 15m buy-window') : safeNum(cluster.sameBuyWindowClusterCount, 0) >= 2 ? yellow('Same 15m buy-window') : green('Same 15m buy-window')} — ${safeNum(cluster.sameBuyWindowClusterCount, 0)} кош. / ${fmtPct(cluster.sameBuyWindowSupplyPct)} supply`);
+  base.push(`${safeNum(cluster.sameFundingClusterCount, 0) >= 4 ? red('Same funding') : safeNum(cluster.sameFundingClusterCount, 0) >= 2 ? yellow('Same funding') : green('Same funding')} — ${safeNum(cluster.sameFundingClusterCount, 0)} кош. / ${fmtPct(cluster.sameFundingSupplyPct)} supply`);
+  base.push(`${safeNum(cluster.sameDayBuySizeCv, 999) <= 0.22 ? red('Buy size CV') : safeNum(cluster.sameDayBuySizeCv, 999) <= 0.35 ? yellow('Buy size CV') : green('Buy size CV')} — day ${fmtNum(cluster.sameDayBuySizeCv, 3)} | 15m ${fmtNum(cluster.sameBuyWindowBuySizeCv, 3)} | all ${fmtNum(cluster.globalBuySizeCv, 3)}`);
+  if (Array.isArray(cluster.reasons) && cluster.reasons.length) {
+    base.push(`🧠 ${escapeHtml(cluster.reasons.slice(0, 3).join(' | '))}`);
+  }
+  return base.filter(Boolean).join('\n');
+}
+
+async function sendLongText(router, chatId, text, options = {}) {
+  const maxLen = 3600;
+  const rows = String(text || '').split('\n');
+  let part = '';
+
+  for (const row of rows) {
+    const next = part ? `${part}\n${row}` : row;
+    if (next.length > maxLen) {
+      if (part) await router.sendMessage(chatId, part, options);
+      part = row;
+    } else {
+      part = next;
+    }
+  }
+
+  if (part) await router.sendMessage(chatId, part, options);
+}
+
 function buildDeltaMessage(prev, next) {
   const deltaControl = round(next.netControlPct - prev.netControlPct, 2);
   const deltaAccum = round(next.netAccumulationPct - prev.netAccumulationPct, 2);
@@ -790,6 +859,22 @@ function buildDeltaMessage(prev, next) {
     `<b>Склад / активно:</b> ${next.warehouseStoragePass ? 'да' : 'нет'} / ${next.activeReaccumulationPass ? 'да' : 'нет'}`,
     `<b>Архетип:</b> ${escapeHtml(next.archetype || '-')}`,
   ];
+
+  if (next.walletCluster) {
+    lines.push(
+      '',
+      '<b>🧬 Возраст кошельков / wallet cluster</b>',
+      `<b>Cluster risk:</b> ${escapeHtml(next.clusterRisk || '-')} / ${safeNum(next.clusterRiskScore, 0)}`,
+      `<b>Возраст проверен:</b> ${safeNum(next.walletAgeKnownCount, 0)} known / ${safeNum(next.walletAgeUnknownCount, 0)} unknown`,
+      `<b>Средний возраст:</b> ${fmtNum(next.avgWalletAgeDays, 1)}д`,
+      `<b>Молодые ≤7д / ≤3д:</b> ${safeNum(next.youngWalletCount7d, 0)} / ${safeNum(next.veryYoungWalletCount3d, 0)}`,
+      `<b>Старые >30д:</b> ${safeNum(next.oldWalletCount30d, 0)}`,
+      `<b>Same-day / same 15m:</b> ${safeNum(next.sameDayClusterCount, 0)} / ${safeNum(next.sameBuyWindowClusterCount, 0)}`,
+      `<b>Same funding:</b> ${safeNum(next.sameFundingClusterCount, 0)}`,
+      `<b>Buy size CV:</b> day ${fmtNum(next.sameDayBuySizeCv, 3)} | 15m ${fmtNum(next.sameBuyWindowBuySizeCv, 3)} | global ${fmtNum(next.globalBuySizeCv, 3)}`
+    );
+  }
+
 
   if (bullish.length) {
     lines.push('', '<b>🟢 Позитивные изменения</b>', ...bullish.map((x) => `• ${x}`));
@@ -962,7 +1047,11 @@ export function applyAccumulationScanHotfix(router, kernel) {
         updateSignalRegistry(signalRegistry, result);
         const enableMonitor = isWatchworthy(result);
         const caption = buildAccumulationReport(result, enableMonitor);
-        await router.sendPhotoOrText(chatId, result?.heroImage || null, caption, { reply_markup: router.keyboard() });
+        // Emergency v4: send wallet-cluster/age as a separate short message BEFORE the full report.
+        // Even if an old path still uses photo captions, this block cannot be hidden by caption truncation.
+        await router.sendMessage(chatId, buildWalletClusterShortReport(result), { reply_markup: router.keyboard() });
+        // Send the full report as normal messages, not as a photo caption.
+        await sendLongText(router, chatId, caption, { reply_markup: router.keyboard() });
 
         if (enableMonitor) {
           const metrics = extractMetrics(result);
