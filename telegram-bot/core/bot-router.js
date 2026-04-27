@@ -188,6 +188,7 @@ function normalizeAction(text) {
     compact === "/insiders" ||
     compact === "insiders" ||
     normalized === "team scan" ||
+    normalized === "team scan v2" ||
     normalized === "team intel" ||
     normalized === "снайперы" ||
     normalized === "инсайдеры" ||
@@ -602,7 +603,7 @@ export default class BotRouter {
         return true;
       }
       this.clearChatMode(chatId);
-      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started</b>", {
+      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — V2 ACTIVE</b>", {
         reply_markup: this.keyboard()
       });
       await this.sendMessage(chatId, await this.kernel.buildTeamWalletIntelText(text), {
@@ -966,7 +967,7 @@ export default class BotRouter {
     const teamScanCmd = text.match(/^(?:\/?(?:teamscan|teamintel|snipers|insiders)|команда|инсайдеры|снайперы)\s+([1-9A-HJ-NP-Za-km-z]{32,48})$/i);
     if (teamScanCmd) {
       const ca = teamScanCmd[1];
-      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started</b>", {
+      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — V2 ACTIVE</b>", {
         reply_markup: this.keyboard()
       });
       await this.sendMessage(chatId, await this.kernel.buildTeamWalletIntelText(ca), {

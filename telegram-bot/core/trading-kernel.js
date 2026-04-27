@@ -1216,7 +1216,18 @@ ${this.buildGMGNPnlHintSummary()}`;
   buildWalletsText() {
     return `${this.gmgnWalletService.buildWalletSummaryText(this.runtime.activeConfig)}
 
-${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}`;
+${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}
+
+🕵️ <b>Team / Insider / Sniper Intel — V2 ACTIVE</b>
+Отдельная проверка команды, инсайдеров, снайперов и dev history.
+
+Команды:
+<code>/teamscan CA</code>
+<code>/teamintel CA</code>
+<code>/snipers CA</code>
+<code>/insiders CA</code>
+
+Или нажми кнопку <b>🕵️ Team Scan</b> и отправь CA.`;
   }
 
   buildCopytradeText() {
