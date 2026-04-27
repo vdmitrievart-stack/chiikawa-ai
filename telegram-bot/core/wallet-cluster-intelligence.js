@@ -1,6 +1,6 @@
 // wallet-cluster-intelligence.js
 // Detects coordinated holder clusters:
-// - young wallets / same-day first-seen cluster
+// - real wallet age from owner wallet history / same-day creation cluster
 // - same 15m buy-window cluster
 // - similar buy sizes
 // - funding-source hints when available from wallet records
@@ -73,38 +73,50 @@ export function buildWalletClusterStats(walletRows = []) {
   const enriched = rows
     .filter((row) => safeNum(row?.trackedSharePct, 0) > 0 || safeNum(row?.currentTokenAmount, 0) > 0)
     .map((row) => {
-      const firstSeenAt =
+      const tokenFirstSeenAt =
         safeNum(row?.firstSeenAt, 0) ||
         safeNum(row?.firstBuyAt, 0) ||
         safeNum(row?.latestBuyAt, 0) ||
         now;
 
+      const walletFirstActivityAt = safeNum(row?.walletFirstActivityAt, 0);
+      const walletFirstActivityComplete = row?.walletFirstActivityComplete === true;
       const latestBuyAt = safeNum(row?.latestBuyAt, 0);
       const buyAmount =
         safeNum(row?.latestBuyAmount, 0) ||
         safeNum(row?.totalBought, 0) ||
         safeNum(row?.currentTokenAmount, 0);
 
-      const ageDays = Math.max(0, (now - firstSeenAt) / 86400000);
+      const tokenAgeDays = Math.max(0, (now - tokenFirstSeenAt) / 86400000);
+      const walletAgeDays = walletFirstActivityAt > 0 && walletFirstActivityComplete
+        ? Math.max(0, (now - walletFirstActivityAt) / 86400000)
+        : 0;
 
       return {
         ...row,
-        firstSeenAt,
+        firstSeenAt: tokenFirstSeenAt,
+        tokenFirstSeenAt,
+        walletFirstActivityAt,
+        walletFirstActivityComplete,
         latestBuyAt,
         buyAmount,
-        ageDays,
-        ageBucketDay: bucketByMs(firstSeenAt, 24 * 60 * 60 * 1000),
+        tokenAgeDays,
+        ageDays: walletAgeDays,
+        ageBucketDay: walletFirstActivityComplete ? bucketByMs(walletFirstActivityAt, 24 * 60 * 60 * 1000) : 0,
+        tokenAgeBucketDay: bucketByMs(tokenFirstSeenAt, 24 * 60 * 60 * 1000),
         buyBucket15m: latestBuyAt ? bucketByMs(latestBuyAt, 15 * 60 * 1000) : 0,
         trackedSharePct: safeNum(row?.trackedSharePct, 0),
         fundingSource: String(row?.fundingSource || row?.firstFundingSource || "")
       };
     });
 
-  const youngRows = enriched.filter((row) => row.ageDays <= 7);
-  const veryYoungRows = enriched.filter((row) => row.ageDays <= 3);
-  const oldRows = enriched.filter((row) => row.ageDays > 30);
+  const walletAgeKnownRows = enriched.filter((row) => row.walletFirstActivityComplete && safeNum(row?.walletFirstActivityAt, 0) > 0);
+  const walletAgeUnknownRows = enriched.filter((row) => !row.walletFirstActivityComplete || safeNum(row?.walletFirstActivityAt, 0) <= 0);
+  const youngRows = walletAgeKnownRows.filter((row) => row.ageDays <= 7);
+  const veryYoungRows = walletAgeKnownRows.filter((row) => row.ageDays <= 3);
+  const oldRows = walletAgeKnownRows.filter((row) => row.ageDays > 30);
 
-  const sameDay = maxBucket(enriched, (row) => row.ageBucketDay);
+  const sameDay = maxBucket(walletAgeKnownRows, (row) => row.ageBucketDay);
   const sameDayYoung = maxBucket(youngRows, (row) => row.ageBucketDay);
   const sameBuyWindow = maxBucket(enriched, (row) => row.buyBucket15m);
   const sameFunding = maxBucket(enriched, (row) => row.fundingSource);
@@ -120,12 +132,16 @@ export function buildWalletClusterStats(walletRows = []) {
   const sameBuyWindowBuySizeCv = coefficientOfVariation(sameBuyWindow.rows.map((row) => row.buyAmount));
   const globalBuySizeCv = coefficientOfVariation(enriched.map((row) => row.buyAmount));
 
-  const avgAgeDays = enriched.length
-    ? enriched.reduce((sum, row) => sum + safeNum(row.ageDays, 0), 0) / enriched.length
+  const avgAgeDays = walletAgeKnownRows.length
+    ? walletAgeKnownRows.reduce((sum, row) => sum + safeNum(row.ageDays, 0), 0) / walletAgeKnownRows.length
     : 0;
 
   const avgYoungAgeDays = youngRows.length
     ? youngRows.reduce((sum, row) => sum + safeNum(row.ageDays, 0), 0) / youngRows.length
+    : 0;
+
+  const avgTokenInteractionAgeDays = enriched.length
+    ? enriched.reduce((sum, row) => sum + safeNum(row.tokenAgeDays, 0), 0) / enriched.length
     : 0;
 
   let clusterRiskScore = 0;
@@ -133,67 +149,67 @@ export function buildWalletClusterStats(walletRows = []) {
 
   if (youngSupplyPct >= 35) {
     clusterRiskScore += 18;
-    reasons.push("large supply held by <=7d wallets");
+    reasons.push("много supply у кошельков младше 7 дней");
   }
 
   if (veryYoungSupplyPct >= 25) {
     clusterRiskScore += 16;
-    reasons.push("large supply held by <=3d wallets");
+    reasons.push("много supply у кошельков младше 3 дней");
   }
 
   if (sameDay.count >= 5) {
     clusterRiskScore += 18;
-    reasons.push("many holders first seen same day");
+    reasons.push("много кошельков впервые активировались в один день");
   }
 
   if (sameDayYoung.count >= 4) {
     clusterRiskScore += 16;
-    reasons.push("young same-day holder cluster");
+    reasons.push("молодой same-day кластер кошельков");
   }
 
   if (sameDayClusterSupplyPct >= 25) {
     clusterRiskScore += 14;
-    reasons.push("same-day cluster controls meaningful supply");
+    reasons.push("same-day кластер контролирует заметную долю");
   }
 
   if (sameBuyWindow.count >= 4) {
     clusterRiskScore += 12;
-    reasons.push("holders bought in same 15m window");
+    reasons.push("кошельки покупали в одном 15м окне");
   }
 
   if (sameBuyWindowSupplyPct >= 20) {
     clusterRiskScore += 10;
-    reasons.push("same buy-window cluster controls supply");
+    reasons.push("15м buy-window кластер контролирует supply");
   }
 
   if (sameDayBuySizeCv <= 0.22 && sameDay.count >= 4) {
     clusterRiskScore += 14;
-    reasons.push("same-day holders have similar buy sizes");
+    reasons.push("same-day кошельки покупали похожими размерами");
   }
 
   if (sameBuyWindowBuySizeCv <= 0.25 && sameBuyWindow.count >= 4) {
     clusterRiskScore += 12;
-    reasons.push("same buy-window holders have similar sizes");
+    reasons.push("кошельки в одном 15м окне имеют похожий размер покупки");
   }
 
   if (globalBuySizeCv <= 0.25 && enriched.length >= 5) {
     clusterRiskScore += 10;
-    reasons.push("global holder buy sizes are unusually similar");
+    reasons.push("размеры покупок по группе необычно похожи");
   }
 
   if (sameFunding.count >= 4) {
     clusterRiskScore += 20;
-    reasons.push("multiple holders share same funding source");
+    reasons.push("несколько кошельков имеют общий funding source");
   }
 
   if (sameFundingSupplyPct >= 20) {
     clusterRiskScore += 16;
-    reasons.push("same funding source controls meaningful supply");
+    reasons.push("общий funding source контролирует заметную долю");
   }
 
   if (oldSupplyPct >= 35 && youngSupplyPct < 20) {
     clusterRiskScore -= 12;
-    reasons.push("older wallets dominate tracked supply");
+    reasons.push("старые кошельки доминируют в отслеживаемой базе");
   }
 
   clusterRiskScore = clamp(Math.round(clusterRiskScore), 0, 100);
@@ -207,6 +223,10 @@ export function buildWalletClusterStats(walletRows = []) {
   return {
     trackedWallets: enriched.length,
     totalTrackedSharePct: roundNum(supply(enriched), 2),
+    walletAgeKnownCount: walletAgeKnownRows.length,
+    walletAgeUnknownCount: walletAgeUnknownRows.length,
+    walletAgeSource: "owner_wallet_history_v2",
+    walletAgeBasis: "owner_first_onchain_activity",
     youngWalletCount7d: youngRows.length,
     veryYoungWalletCount3d: veryYoungRows.length,
     oldWalletCount30d: oldRows.length,
@@ -214,7 +234,9 @@ export function buildWalletClusterStats(walletRows = []) {
     veryYoungSupplyPct: roundNum(veryYoungSupplyPct, 2),
     oldSupplyPct: roundNum(oldSupplyPct, 2),
     avgAgeDays: roundNum(avgAgeDays, 2),
+    avgWalletAgeDays: roundNum(avgAgeDays, 2),
     avgYoungAgeDays: roundNum(avgYoungAgeDays, 2),
+    avgTokenInteractionAgeDays: roundNum(avgTokenInteractionAgeDays, 2),
     sameDayClusterCount: sameDay.count,
     sameDayClusterSupplyPct: roundNum(sameDayClusterSupplyPct, 2),
     sameDayYoungClusterCount: sameDayYoung.count,

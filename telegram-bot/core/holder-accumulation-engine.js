@@ -33,8 +33,11 @@ export default class HolderAccumulationEngine {
     this.rpcUrl = options.rpcUrl || process.env.SOLANA_RPC_URL || "";
     this.summaryTtlMs = Number(options.summaryTtlMs || 5 * 60 * 1000);
     this.walletTtlMs = Number(options.walletTtlMs || 30 * 60 * 1000);
+    this.walletAgeTtlMs = Number(options.walletAgeTtlMs || 24 * 60 * 60 * 1000);
     this.maxTrackedWallets = Number(options.maxTrackedWallets || 20);
     this.maxHistorySignatures = Number(options.maxHistorySignatures || 18);
+    this.maxWalletAgeSignatures = Number(options.maxWalletAgeSignatures || 1000);
+    this.walletAgeCache = new Map();
     this.minMeaningfulTrackedSharePct = Number(options.minMeaningfulTrackedSharePct || 0.2);
     this.minMeaningfulHoldingPct = Number(options.minMeaningfulHoldingPct || 20);
     this.connection = null;
@@ -59,7 +62,8 @@ export default class HolderAccumulationEngine {
       cluster &&
       typeof cluster === "object" &&
       Number.isFinite(Number(cluster?.trackedWallets)) &&
-      typeof cluster?.clusterRisk === "string";
+      typeof cluster?.clusterRisk === "string" &&
+      cluster?.walletAgeSource === "owner_wallet_history_v2";
 
     const cachedThreshold = safeNum(summary?.minimumMeaningfulSharePct, this.minMeaningfulTrackedSharePct);
     const thresholdMatches = Math.abs(cachedThreshold - this.minMeaningfulTrackedSharePct) < 0.000001;
@@ -191,14 +195,83 @@ export default class HolderAccumulationEngine {
     });
   }
 
+  async fetchOwnerWalletAge(owner) {
+    const wallet = asText(owner);
+    if (!wallet || !this.connection) {
+      return {
+        walletFirstActivityAt: 0,
+        walletFirstActivityAgeDays: 0,
+        walletFirstActivityComplete: false,
+        walletAgeSource: "none",
+        walletAgeCheckedAt: Date.now()
+      };
+    }
+
+    const cached = this.walletAgeCache.get(wallet);
+    if (cached && Date.now() - safeNum(cached?.walletAgeCheckedAt, 0) < this.walletAgeTtlMs) {
+      return cached;
+    }
+
+    const now = Date.now();
+    try {
+      const sigs = await this.connection.getSignaturesForAddress(new PublicKey(wallet), {
+        limit: this.maxWalletAgeSignatures
+      });
+
+      const oldestKnown = Array.isArray(sigs) && sigs.length
+        ? safeNum(sigs[sigs.length - 1]?.blockTime, 0) * 1000
+        : 0;
+
+      // Solana RPC returns newest signatures first. If fewer rows than the requested limit came back,
+      // the oldest row is a strong approximation of the wallet's first on-chain activity.
+      // If the page is full, the wallet may be older than the oldest row, so do not mark it as a
+      // newly-created wallet from this incomplete page.
+      const complete = Boolean(oldestKnown > 0 && sigs.length < this.maxWalletAgeSignatures);
+      const result = {
+        walletFirstActivityAt: oldestKnown,
+        walletFirstActivityAgeDays: oldestKnown > 0 ? Math.max(0, (now - oldestKnown) / 86400000) : 0,
+        walletFirstActivityComplete: complete,
+        walletFirstActivitySignatureCount: Array.isArray(sigs) ? sigs.length : 0,
+        walletAgeSource: complete ? "owner_wallet_history_v2" : (oldestKnown > 0 ? "owner_wallet_history_partial" : "none"),
+        walletAgeCheckedAt: now
+      };
+
+      this.walletAgeCache.set(wallet, result);
+      return result;
+    } catch (error) {
+      this.logger.log?.("holder engine owner wallet age error:", error?.message || String(error));
+      const result = {
+        walletFirstActivityAt: 0,
+        walletFirstActivityAgeDays: 0,
+        walletFirstActivityComplete: false,
+        walletFirstActivitySignatureCount: 0,
+        walletAgeSource: "error",
+        walletAgeCheckedAt: now
+      };
+      this.walletAgeCache.set(wallet, result);
+      return result;
+    }
+  }
+
   async enrichHistoricalWallets(mint, holders = [], candidate = {}) {
     const now = Date.now();
     const out = [];
     for (const holder of holders) {
       const cached = this.store?.getWalletRecord?.(mint, holder.tokenAccount);
-      if (cached && now - safeNum(cached?.updatedAt, 0) < this.walletTtlMs) {
+      const cachedFresh = cached && now - safeNum(cached?.updatedAt, 0) < this.walletTtlMs;
+      const cachedHasWalletAgeV2 =
+        cached &&
+        cached.walletAgeSource === "owner_wallet_history_v2" &&
+        safeNum(cached?.walletFirstActivityAt, 0) > 0 &&
+        cached.walletFirstActivityComplete === true;
+
+      if (cachedFresh && cachedHasWalletAgeV2) {
         out.push({ ...cached, currentTokenAmount: holder.currentTokenAmount, owner: holder.owner, tokenAccount: holder.tokenAccount });
         continue;
+      }
+
+      if (cachedFresh && cached && !cachedHasWalletAgeV2) {
+        this.logger.log?.("holder engine wallet cache refresh: missing owner wallet age", holder.owner);
       }
 
       const fresh = await this.backfillTokenAccountHistory(mint, holder, candidate);
@@ -294,10 +367,12 @@ export default class HolderAccumulationEngine {
     const dipBuyRatio = selfBuyCount > 0 ? clamp((reloadCount / selfBuyCount) * (priceWeakness ? 1 : 0.5), 0, 1) : 0;
     const rebuyGapHours = latestSellAt > 0 && latestBuyAt > latestSellAt ? (latestBuyAt - latestSellAt) / 3600000 : 0;
     const reboughtAfterSell = rebuyGapHours >= 15 && latestBuyAmount > 0 && currentHoldingPct >= 35;
+    const ownerWalletAge = await this.fetchOwnerWalletAge(owner);
 
     return {
       tokenAccount,
       owner,
+      ...ownerWalletAge,
       currentTokenAmount,
       totalBought,
       totalSold,

@@ -670,33 +670,36 @@ function buildAccumulationReport(result, monitorEnabled = false) {
     `${yellow('Покрытие значимых холдеров')} — ${fmtPct(holder.meaningfulCoveragePct ?? 0, 2)}`,
     `${safeNum(holder.reloadCount, 0) >= 2 ? green('Reload count') : yellow('Reload count')} — ${safeNum(holder.reloadCount, 0)} | Dip-buy ${fmtNum(holder.dipBuyRatio, 2)} | Bottom touches ${safeNum(holder.bottomTouches, 0)}`,
     ``,
-    `<b>👛 Wallet Cluster Intelligence v2</b>`,
+    `<b>🧬 Возраст кошельков / wallet cluster</b>`,
     (holder?.walletCluster
       ? `${safeNum(holder.walletCluster.clusterRiskScore, 0) >= 70 ? red('Cluster risk') : safeNum(holder.walletCluster.clusterRiskScore, 0) >= 45 ? yellow('Cluster risk') : green('Cluster risk')} — ${escapeHtml(holder.walletCluster.clusterRisk || "-")} / ${safeNum(holder.walletCluster.clusterRiskScore, 0)}`
-      : yellow('Cluster risk — данных пока нет. Проверь, что обновлён holder-accumulation-engine.js и добавлен wallet-cluster-intelligence.js')),
+      : yellow('Cluster risk — данных пока нет. Обнови holder-accumulation-engine.js + wallet-cluster-intelligence.js')),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.youngSupplyPct, 0) >= 45 ? red('Young wallet supply ≤7d') : safeNum(holder.walletCluster.youngSupplyPct, 0) >= 25 ? yellow('Young wallet supply ≤7d') : green('Young wallet supply ≤7d')} — ${fmtPct(holder.walletCluster.youngSupplyPct)}`
+      ? `${yellow('Возраст проверен')} — ${safeNum(holder.walletCluster.walletAgeKnownCount, 0)} / ${safeNum(holder.walletCluster.trackedWallets, 0)} кошельков${safeNum(holder.walletCluster.walletAgeUnknownCount, 0) > 0 ? ` | unknown ${safeNum(holder.walletCluster.walletAgeUnknownCount, 0)}` : ''}`
       : ``),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.veryYoungSupplyPct, 0) >= 30 ? red('Very young supply ≤3d') : safeNum(holder.walletCluster.veryYoungSupplyPct, 0) >= 15 ? yellow('Very young supply ≤3d') : green('Very young supply ≤3d')} — ${fmtPct(holder.walletCluster.veryYoungSupplyPct)}`
+      ? `${safeNum(holder.walletCluster.avgWalletAgeDays ?? holder.walletCluster.avgAgeDays, 0) <= 7 ? red('Средний возраст кошельков') : safeNum(holder.walletCluster.avgWalletAgeDays ?? holder.walletCluster.avgAgeDays, 0) <= 30 ? yellow('Средний возраст кошельков') : green('Средний возраст кошельков')} — ${fmtNum(holder.walletCluster.avgWalletAgeDays ?? holder.walletCluster.avgAgeDays, 1)}д`
       : ``),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.sameDayClusterCount, 0) >= 5 ? red('Same-day wallet cluster') : safeNum(holder.walletCluster.sameDayClusterCount, 0) >= 3 ? yellow('Same-day wallet cluster') : green('Same-day wallet cluster')} — ${safeNum(holder.walletCluster.sameDayClusterCount, 0)} wallets / ${fmtPct(holder.walletCluster.sameDayClusterSupplyPct)} supply`
+      ? `${safeNum(holder.walletCluster.youngWalletCount7d, 0) >= 5 ? red('Молодые кошельки ≤7д / ≤3д') : safeNum(holder.walletCluster.youngWalletCount7d, 0) >= 3 ? yellow('Молодые кошельки ≤7д / ≤3д') : green('Молодые кошельки ≤7д / ≤3д')} — ${safeNum(holder.walletCluster.youngWalletCount7d, 0)} / ${safeNum(holder.walletCluster.veryYoungWalletCount3d, 0)} | supply ${fmtPct(holder.walletCluster.youngSupplyPct)}`
       : ``),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.sameDayYoungClusterCount, 0) >= 4 ? red('Young same-day cluster') : safeNum(holder.walletCluster.sameDayYoungClusterCount, 0) >= 2 ? yellow('Young same-day cluster') : green('Young same-day cluster')} — ${safeNum(holder.walletCluster.sameDayYoungClusterCount, 0)} wallets`
+      ? `${safeNum(holder.walletCluster.oldWalletCount30d, 0) >= 6 ? green('Старые кошельки >30д') : yellow('Старые кошельки >30д')} — ${safeNum(holder.walletCluster.oldWalletCount30d, 0)} | supply ${fmtPct(holder.walletCluster.oldSupplyPct)}`
       : ``),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.sameBuyWindowClusterCount, 0) >= 4 ? red('Same 15m buy-window') : safeNum(holder.walletCluster.sameBuyWindowClusterCount, 0) >= 2 ? yellow('Same 15m buy-window') : green('Same 15m buy-window')} — ${safeNum(holder.walletCluster.sameBuyWindowClusterCount, 0)} wallets / ${fmtPct(holder.walletCluster.sameBuyWindowSupplyPct)} supply`
+      ? `${safeNum(holder.walletCluster.sameDayClusterCount, 0) >= 5 ? red('Созданы/активированы в один день') : safeNum(holder.walletCluster.sameDayClusterCount, 0) >= 3 ? yellow('Созданы/активированы в один день') : green('Созданы/активированы в один день')} — ${safeNum(holder.walletCluster.sameDayClusterCount, 0)} кош. / ${fmtPct(holder.walletCluster.sameDayClusterSupplyPct)} supply`
       : ``),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.sameFundingClusterCount, 0) >= 4 ? red('Same funding source') : safeNum(holder.walletCluster.sameFundingClusterCount, 0) >= 2 ? yellow('Same funding source') : green('Same funding source')} — ${safeNum(holder.walletCluster.sameFundingClusterCount, 0)} wallets / ${fmtPct(holder.walletCluster.sameFundingSupplyPct)} supply`
+      ? `${safeNum(holder.walletCluster.sameDayYoungClusterCount, 0) >= 4 ? red('Молодой same-day cluster') : safeNum(holder.walletCluster.sameDayYoungClusterCount, 0) >= 2 ? yellow('Молодой same-day cluster') : green('Молодой same-day cluster')} — ${safeNum(holder.walletCluster.sameDayYoungClusterCount, 0)} кош.`
       : ``),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.sameDayBuySizeCv, 999) <= 0.22 ? red('Similar buy sizes CV') : safeNum(holder.walletCluster.sameDayBuySizeCv, 999) <= 0.35 ? yellow('Similar buy sizes CV') : green('Similar buy sizes CV')} — ${fmtNum(holder.walletCluster.sameDayBuySizeCv, 3)}`
+      ? `${safeNum(holder.walletCluster.sameBuyWindowClusterCount, 0) >= 4 ? red('Покупки в одном 15м окне') : safeNum(holder.walletCluster.sameBuyWindowClusterCount, 0) >= 2 ? yellow('Покупки в одном 15м окне') : green('Покупки в одном 15м окне')} — ${safeNum(holder.walletCluster.sameBuyWindowClusterCount, 0)} кош. / ${fmtPct(holder.walletCluster.sameBuyWindowSupplyPct)} supply`
       : ``),
     (holder?.walletCluster
-      ? `${safeNum(holder.walletCluster.avgAgeDays, 0) <= 7 ? red('Average wallet age') : safeNum(holder.walletCluster.avgAgeDays, 0) <= 30 ? yellow('Average wallet age') : green('Average wallet age')} — ${fmtNum(holder.walletCluster.avgAgeDays, 1)}d`
+      ? `${safeNum(holder.walletCluster.sameDayBuySizeCv, 999) <= 0.22 ? red('Похожие размеры покупок CV') : safeNum(holder.walletCluster.sameDayBuySizeCv, 999) <= 0.35 ? yellow('Похожие размеры покупок CV') : green('Похожие размеры покупок CV')} — same-day ${fmtNum(holder.walletCluster.sameDayBuySizeCv, 3)} | 15m ${fmtNum(holder.walletCluster.sameBuyWindowBuySizeCv, 3)} | global ${fmtNum(holder.walletCluster.globalBuySizeCv, 3)}`
+      : ``),
+    (holder?.walletCluster
+      ? `${safeNum(holder.walletCluster.sameFundingClusterCount, 0) >= 4 ? red('Same funding source') : safeNum(holder.walletCluster.sameFundingClusterCount, 0) >= 2 ? yellow('Same funding source') : green('Same funding source')} — ${safeNum(holder.walletCluster.sameFundingClusterCount, 0)} кош. / ${fmtPct(holder.walletCluster.sameFundingSupplyPct)} supply`
       : ``),
     (holder?.walletCluster?.reasons?.length
       ? `🧠 Cluster signals — ${escapeHtml(holder.walletCluster.reasons.slice(0, 4).join(' | '))}`
