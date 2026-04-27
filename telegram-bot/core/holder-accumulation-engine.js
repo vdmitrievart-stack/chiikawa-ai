@@ -51,6 +51,22 @@ export default class HolderAccumulationEngine {
     return this.store?.getLatestSummary?.() || null;
   }
 
+  canReuseCachedSummary(summary = {}) {
+    if (!summary) return false;
+
+    const cluster = summary?.walletCluster;
+    const hasWalletCluster =
+      cluster &&
+      typeof cluster === "object" &&
+      Number.isFinite(Number(cluster?.trackedWallets)) &&
+      typeof cluster?.clusterRisk === "string";
+
+    const cachedThreshold = safeNum(summary?.minimumMeaningfulSharePct, this.minMeaningfulTrackedSharePct);
+    const thresholdMatches = Math.abs(cachedThreshold - this.minMeaningfulTrackedSharePct) < 0.000001;
+
+    return hasWalletCluster && thresholdMatches;
+  }
+
   async trackCandidate(candidate = {}) {
     await this.initialize();
 
@@ -58,8 +74,18 @@ export default class HolderAccumulationEngine {
     if (!mint) return null;
 
     const cached = this.store?.getSummary?.(mint);
-    if (cached && Date.now() - safeNum(cached?.updatedAt, 0) < this.summaryTtlMs) {
+    const cachedFresh = cached && Date.now() - safeNum(cached?.updatedAt, 0) < this.summaryTtlMs;
+
+    // Important cache fix:
+    // Older summaries did not include walletCluster, so the UI could show the holder block once
+    // and then keep reusing an incomplete fresh cache until TTL expired. Reuse cache only when
+    // the holder summary was built with walletCluster and the current meaningful-share threshold.
+    if (cachedFresh && this.canReuseCachedSummary(cached)) {
       return cached;
+    }
+
+    if (cachedFresh && cached && !this.canReuseCachedSummary(cached)) {
+      this.logger.log?.("holder engine cache refresh: rebuilding summary without valid walletCluster", mint);
     }
 
     if (!this.connection) {
@@ -68,6 +94,11 @@ export default class HolderAccumulationEngine {
 
     try {
       const holders = await this.fetchTopTokenAccounts(mint);
+      if (!holders.length) {
+        this.logger.log?.("holder engine fetchTopTokenAccounts empty:", mint);
+        return cached || this.buildEmptySummary(candidate);
+      }
+
       const historical = await this.enrichHistoricalWallets(mint, holders, candidate);
       const summary = this.buildSummary(candidate, historical, cached);
       await this.store?.setSummary?.(mint, summary);
@@ -226,7 +257,12 @@ export default class HolderAccumulationEngine {
             buyCount += 1;
             selfBuyCount += 1;
             if (at > 0 && (!earliestBuyAt || at < earliestBuyAt)) earliestBuyAt = at;
-            if (at > latestBuyAt) latestBuyAt = at;
+            if (at > latestBuyAt) {
+              latestBuyAt = at;
+              latestBuyAmount = delta;
+            } else if (!latestBuyAmount) {
+              latestBuyAmount = delta;
+            }
           } else {
             totalTransferredIn += delta;
             transferInCount += 1;
