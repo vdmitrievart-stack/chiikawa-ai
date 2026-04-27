@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import * as XLSX from "xlsx";
@@ -302,6 +303,9 @@ export default class BotRouter {
     this.kernel = kernel;
     this.logger = logger;
     this.chatState = new Map();
+    this.chatStateFile = path.resolve("./runtime-data/bot-router-chat-state.json");
+    this.chatStateTtlMs = Number(process.env.BOT_ROUTER_STATE_TTL_MS || 10 * 60 * 1000);
+    this.loadChatStateSnapshot();
     this.tempFiles = new Set();
     this.loopId = null;
     this.stopTimeoutId = null;
@@ -316,16 +320,47 @@ export default class BotRouter {
     return buildKeyboard(this.t);
   }
 
+  loadChatStateSnapshot() {
+    try {
+      if (!fsSync.existsSync(this.chatStateFile)) return;
+      const parsed = JSON.parse(fsSync.readFileSync(this.chatStateFile, "utf8"));
+      const rows = parsed && typeof parsed === "object" ? parsed.chatState || parsed : {};
+      this.chatState = new Map(Object.entries(rows));
+    } catch (error) {
+      this.logger.log?.("bot router state load error:", error.message);
+      this.chatState = new Map();
+    }
+  }
+
+  saveChatStateSnapshot() {
+    try {
+      fsSync.mkdirSync(path.dirname(this.chatStateFile), { recursive: true });
+      const rows = Object.fromEntries(this.chatState.entries());
+      fsSync.writeFileSync(this.chatStateFile, JSON.stringify({ version: 1, chatState: rows, updatedAt: Date.now() }, null, 2), "utf8");
+    } catch (error) {
+      this.logger.log?.("bot router state save error:", error.message);
+    }
+  }
+
   setChatMode(chatId, mode, payload = {}) {
-    this.chatState.set(chatId, { mode, ...payload, updatedAt: Date.now() });
+    this.chatState.set(String(chatId), { mode, ...payload, updatedAt: Date.now() });
+    this.saveChatStateSnapshot();
   }
 
   getChatMode(chatId) {
-    return this.chatState.get(chatId) || { mode: "idle" };
+    const key = String(chatId);
+    const state = this.chatState.get(key) || { mode: "idle" };
+    if (state.mode !== "idle" && Date.now() - Number(state.updatedAt || 0) > this.chatStateTtlMs) {
+      this.chatState.delete(key);
+      this.saveChatStateSnapshot();
+      return { mode: "idle" };
+    }
+    return state;
   }
 
   clearChatMode(chatId) {
-    this.chatState.delete(chatId);
+    this.chatState.delete(String(chatId));
+    this.saveChatStateSnapshot();
   }
 
   async sendMessage(chatId, text, extra = {}) {
@@ -352,6 +387,46 @@ export default class BotRouter {
     }
 
     return this.sendMessage(chatId, caption, extra);
+  }
+
+  async sendLongMessage(chatId, text, extra = {}) {
+    const value = String(text || "");
+    const max = 3600;
+    if (value.length <= max) {
+      await this.sendMessage(chatId, value, extra);
+      return;
+    }
+
+    const parts = [];
+    let rest = value;
+    while (rest.length > max) {
+      let cut = rest.lastIndexOf("\n", max);
+      if (cut < 1200) cut = max;
+      parts.push(rest.slice(0, cut));
+      rest = rest.slice(cut).trimStart();
+    }
+    if (rest) parts.push(rest);
+
+    for (let i = 0; i < parts.length; i += 1) {
+      await this.sendMessage(chatId, parts[i], extra);
+    }
+  }
+
+  async runScanCA(chatId, ca) {
+    await this.sendMessage(chatId, "🔎 <b>CA scan started — ROUTER V8 ACTIVE</b>", {
+      reply_markup: this.keyboard()
+    });
+    await this.kernel.scanCA(ca, this.createSendBridge(chatId));
+  }
+
+  async runTeamScan(chatId, ca) {
+    await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — ROUTER V8 ACTIVE</b>", {
+      reply_markup: this.keyboard()
+    });
+    const report = await this.kernel.buildTeamWalletIntelText(ca);
+    await this.sendLongMessage(chatId, report, {
+      reply_markup: this.keyboard()
+    });
   }
 
   async sendPublicMessage(text, extra = {}) {
@@ -591,7 +666,7 @@ export default class BotRouter {
         return true;
       }
       this.clearChatMode(chatId);
-      await this.kernel.scanCA(text, this.createSendBridge(chatId));
+      await this.runScanCA(chatId, text);
       return true;
     }
 
@@ -603,12 +678,7 @@ export default class BotRouter {
         return true;
       }
       this.clearChatMode(chatId);
-      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — V2 ACTIVE</b>", {
-        reply_markup: this.keyboard()
-      });
-      await this.sendMessage(chatId, await this.kernel.buildTeamWalletIntelText(text), {
-        reply_markup: this.keyboard()
-      });
+      await this.runTeamScan(chatId, text);
       return true;
     }
 
@@ -827,7 +897,7 @@ export default class BotRouter {
 
     if (action === "scan_ca") {
       this.setChatMode(chatId, "awaiting_ca");
-      await this.sendMessage(chatId, this.t("send_ca"), {
+      await this.sendMessage(chatId, `${this.t("send_ca")}\n🔥 ROUTER V8 ACTIVE`, {
         reply_markup: this.keyboard()
       });
       return;
@@ -865,7 +935,7 @@ export default class BotRouter {
 
     if (action === "team_scan") {
       this.setChatMode(chatId, "awaiting_team_scan_ca");
-      await this.sendMessage(chatId, this.t("send_team_ca"), {
+      await this.sendMessage(chatId, `${this.t("send_team_ca")}\n🔥 ROUTER V8 ACTIVE`, {
         reply_markup: this.keyboard()
       });
       return;
@@ -964,15 +1034,17 @@ export default class BotRouter {
 
     if (await this.processStatefulInput(chatId, text)) return;
 
+    const scanCaCmd = text.match(/^(?:\/?(?:scanca|scan_ca|ca)|scan\s+ca|скан\s+ca|🔎\s*scan\s*ca)\s+([1-9A-HJ-NP-Za-km-z]{32,48})$/i);
+    if (scanCaCmd) {
+      const ca = scanCaCmd[1];
+      await this.runScanCA(chatId, ca);
+      return;
+    }
+
     const teamScanCmd = text.match(/^(?:\/?(?:teamscan|teamintel|snipers|insiders)|команда|инсайдеры|снайперы)\s+([1-9A-HJ-NP-Za-km-z]{32,48})$/i);
     if (teamScanCmd) {
       const ca = teamScanCmd[1];
-      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — V2 ACTIVE</b>", {
-        reply_markup: this.keyboard()
-      });
-      await this.sendMessage(chatId, await this.kernel.buildTeamWalletIntelText(ca), {
-        reply_markup: this.keyboard()
-      });
+      await this.runTeamScan(chatId, ca);
       return;
     }
 
@@ -1013,9 +1085,10 @@ migration_survivor: ${(result.budget.migration_survivor * 100).toFixed(1)}%`,
     }
 
     if (isLikelyCA(text)) {
-      await this.sendMessage(chatId, this.t("scan_hint"), {
-        reply_markup: this.keyboard()
-      });
+      // Fallback: if Telegram/webhook lost the pending button state, a bare CA now runs Scan CA automatically.
+      // Team scan still works through the persisted pending state after pressing 🕵️ Team Scan V2,
+      // or directly as: /teamscan CA
+      await this.runScanCA(chatId, text);
       return;
     }
 
