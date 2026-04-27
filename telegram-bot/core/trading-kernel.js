@@ -39,6 +39,8 @@ import CopytradeService from "./copytrade-service.js";
 import NotificationService from "./notification-service.js";
 import HolderAccumulationStore from "./holder-accumulation-store.js";
 import HolderAccumulationEngine from "./holder-accumulation-engine.js";
+import TeamWalletStore from "./team-wallet-store.js";
+import TeamWalletIntelligence from "./team-wallet-intelligence.js";
 
 import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
 import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
@@ -205,6 +207,18 @@ export default class TradingKernel {
       rpcUrl: process.env.SOLANA_RPC_URL
     });
 
+    this.teamWalletStore = new TeamWalletStore({
+      logger: this.logger
+    });
+
+    this.teamWalletIntelligence = new TeamWalletIntelligence({
+      logger: this.logger,
+      rpcUrl: process.env.SOLANA_RPC_URL,
+      holderAccumulationEngine: this.holderAccumulationEngine,
+      holderStore: this.holderAccumulationStore,
+      store: this.teamWalletStore
+    });
+
     this.gmgnSmartWalletFeed = new GMGNSmartWalletFeed({
       logger: this.logger,
       apiKey: process.env.GMGN_API_KEY || '',
@@ -243,6 +257,7 @@ export default class TradingKernel {
   async initialize() {
     await this.gmgnOrderStore.load();
     await this.holderAccumulationEngine.initialize();
+    await this.teamWalletIntelligence.initialize();
     await this.restoreIfAvailable();
     this.lastHolderSummary = this.holderAccumulationEngine.getDashboardSummary();
     return true;
@@ -1324,6 +1339,32 @@ Send:
       description: bestRaw?.info?.description || "",
       links
     };
+  }
+
+
+  async buildTeamWalletIntelText(ca) {
+    const token = await this.fetchTokenByCA(ca);
+    if (!token) {
+      return `❌ <b>Team wallet scan</b>
+
+No Solana pair found for:
+<code>${escapeHtml(ca)}</code>`;
+    }
+
+    let analyzed = { token };
+    try {
+      analyzed = await this.candidateService.analyzeSingleToken(token);
+      analyzed = await this.enrichCandidateForCopytrade(analyzed);
+    } catch (error) {
+      this.logger.log?.("team wallet scan analyze fallback:", error.message);
+    }
+
+    const analysis = await this.teamWalletIntelligence.analyze({
+      token,
+      candidate: analyzed
+    });
+
+    return this.teamWalletIntelligence.buildReport(analysis);
   }
 
   async buildScanCaText(ca) {

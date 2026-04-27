@@ -179,6 +179,26 @@ function normalizeAction(text) {
   }
 
   if (
+    compact === "/teamscan" ||
+    compact === "teamscan" ||
+    compact === "/teamintel" ||
+    compact === "teamintel" ||
+    compact === "/snipers" ||
+    compact === "snipers" ||
+    compact === "/insiders" ||
+    compact === "insiders" ||
+    normalized === "team scan" ||
+    normalized === "team intel" ||
+    normalized === "снайперы" ||
+    normalized === "инсайдеры" ||
+    normalized === "команда" ||
+    hasAll("team", "scan") ||
+    hasAny("sniper", "snipers", "insider", "insiders")
+  ) {
+    return "team_scan";
+  }
+
+  if (
     compact === "/copytrade" ||
     compact === "copytrade" ||
     normalized === "copytrade"
@@ -574,6 +594,23 @@ export default class BotRouter {
       return true;
     }
 
+    if (mode.mode === "awaiting_team_scan_ca") {
+      if (!isLikelyCA(text)) {
+        await this.sendMessage(chatId, this.t("invalid_ca"), {
+          reply_markup: this.keyboard()
+        });
+        return true;
+      }
+      this.clearChatMode(chatId);
+      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started</b>", {
+        reply_markup: this.keyboard()
+      });
+      await this.sendMessage(chatId, await this.kernel.buildTeamWalletIntelText(text), {
+        reply_markup: this.keyboard()
+      });
+      return true;
+    }
+
     if (mode.mode === "awaiting_leader_address") {
       if (!isLikelyCA(text)) {
         await this.sendMessage(chatId, this.t("invalid_ca"), {
@@ -825,6 +862,14 @@ export default class BotRouter {
       return;
     }
 
+    if (action === "team_scan") {
+      this.setChatMode(chatId, "awaiting_team_scan_ca");
+      await this.sendMessage(chatId, this.t("send_team_ca"), {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
+
     if (action === "copytrade") {
       await this.sendMessage(chatId, this.kernel.buildCopytradeText(), {
         reply_markup: this.keyboard()
@@ -917,6 +962,18 @@ export default class BotRouter {
     const action = normalizeAction(text);
 
     if (await this.processStatefulInput(chatId, text)) return;
+
+    const teamScanCmd = text.match(/^(?:\/?(?:teamscan|teamintel|snipers|insiders)|команда|инсайдеры|снайперы)\s+([1-9A-HJ-NP-Za-km-z]{32,48})$/i);
+    if (teamScanCmd) {
+      const ca = teamScanCmd[1];
+      await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started</b>", {
+        reply_markup: this.keyboard()
+      });
+      await this.sendMessage(chatId, await this.kernel.buildTeamWalletIntelText(ca), {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
 
     const budgetCmd = text.match(/^budget\s+(.+)$/i);
     if (budgetCmd) {
