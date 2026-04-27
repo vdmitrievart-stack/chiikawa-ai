@@ -1353,26 +1353,81 @@ Send:
   }
 
 
-  async buildTeamWalletIntelText(ca) {
+  async buildScanCaPayload(ca) {
     const token = await this.fetchTokenByCA(ca);
-    if (!token) {
+    if (!token) return null;
+
+    let analyzed = null;
+    let plans = [];
+    let heroImage = token?.imageUrl || null;
+
+    // V10 compatibility fix:
+    // Some project versions do NOT have candidateService.analyzeSingleToken().
+    // The current CandidateService API is scanCA(...) or analyzeToken(token).
+    if (typeof this.candidateService?.scanCA === "function") {
+      const scanResult = await this.candidateService.scanCA({
+        runtime: this.runtime?.activeConfig || this.runtime || {},
+        fetchTokenByCA: async (inputCa) => this.fetchTokenByCA(inputCa || ca),
+        ca
+      });
+
+      if (scanResult?.analyzed) {
+        analyzed = scanResult.analyzed;
+        plans = Array.isArray(scanResult?.plans) ? scanResult.plans : [];
+        heroImage = scanResult?.heroImage || heroImage;
+      }
+    }
+
+    if (!analyzed) {
+      if (typeof this.candidateService?.analyzeSingleToken === "function") {
+        analyzed = await this.candidateService.analyzeSingleToken(token);
+      } else if (typeof this.candidateService?.analyzeToken === "function") {
+        analyzed = this.candidateService.analyzeToken(token);
+      } else {
+        throw new Error("CandidateService has no scanCA/analyzeToken method");
+      }
+
+      if (typeof this.candidateService?.enrichCandidateWithHolderLive === "function") {
+        await this.candidateService.enrichCandidateWithHolderLive(analyzed);
+      }
+    }
+
+    if (typeof this.enrichCandidateForCopytrade === "function") {
+      try {
+        analyzed = await this.enrichCandidateForCopytrade(analyzed);
+      } catch (error) {
+        this.logger.log?.("scan payload copytrade enrichment skipped:", error?.message || String(error));
+      }
+    }
+
+    if (!plans.length && typeof this.candidateService?.buildPlans === "function") {
+      plans = this.candidateService.buildPlans(
+        analyzed,
+        this.runtime?.activeConfig?.strategyScope || "all",
+        this.runtime?.activeConfig || null
+      );
+    }
+
+    return {
+      token,
+      analyzed,
+      plans,
+      heroImage
+    };
+  }
+
+  async buildTeamWalletIntelText(ca) {
+    const payload = await this.buildScanCaPayload(ca);
+    if (!payload?.token) {
       return `❌ <b>Team wallet scan</b>
 
 No Solana pair found for:
 <code>${escapeHtml(ca)}</code>`;
     }
 
-    let analyzed = { token };
-    try {
-      analyzed = await this.candidateService.analyzeSingleToken(token);
-      analyzed = await this.enrichCandidateForCopytrade(analyzed);
-    } catch (error) {
-      this.logger.log?.("team wallet scan analyze fallback:", error.message);
-    }
-
     const analysis = await this.teamWalletIntelligence.analyze({
-      token,
-      candidate: analyzed
+      token: payload.token,
+      candidate: payload.analyzed || { token: payload.token }
     });
 
     return this.teamWalletIntelligence.buildReport(analysis);
@@ -1399,33 +1454,25 @@ No Solana pair found for:
   }
 
   async buildScanCaText(ca) {
-    const token = await this.fetchTokenByCA(ca);
-    if (!token) {
+    const payload = await this.buildScanCaPayload(ca);
+    if (!payload?.token) {
       return `❌ <b>CA scan</b>
 
 No Solana pair found for:
 <code>${escapeHtml(ca)}</code>`;
     }
 
-    const analyzed = await this.candidateService.analyzeSingleToken(token);
-    const enrichedAnalyzed = await this.enrichCandidateForCopytrade(analyzed);
-    const plans = this.candidateService.buildPlans(enrichedAnalyzed);
-
-    return this.candidateService.buildAnalysisText(enrichedAnalyzed, plans);
+    return this.candidateService.buildAnalysisText(payload.analyzed, payload.plans);
   }
 
   async buildScanCaHero(ca) {
-    const token = await this.fetchTokenByCA(ca);
-    if (!token) return null;
-
-    const analyzed = await this.candidateService.analyzeSingleToken(token);
-    const enrichedAnalyzed = await this.enrichCandidateForCopytrade(analyzed);
-    const plans = this.candidateService.buildPlans(enrichedAnalyzed);
+    const payload = await this.buildScanCaPayload(ca);
+    if (!payload?.token) return null;
 
     return {
-      heroImage: this.candidateService.getHeroImage(enrichedAnalyzed),
-      caption: this.candidateService.buildHeroCaption(enrichedAnalyzed),
-      analysis: this.candidateService.buildAnalysisText(enrichedAnalyzed, plans)
+      heroImage: payload.heroImage || this.candidateService.getHeroImage?.(payload.analyzed) || payload.token?.imageUrl || null,
+      caption: this.candidateService.buildHeroCaption(payload.analyzed),
+      analysis: this.candidateService.buildAnalysisText(payload.analyzed, payload.plans)
     };
   }
 
