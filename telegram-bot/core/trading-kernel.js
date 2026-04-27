@@ -1378,6 +1378,26 @@ No Solana pair found for:
     return this.teamWalletIntelligence.buildReport(analysis);
   }
 
+  async scanCA(ca, send) {
+    const hero = await this.buildScanCaHero(ca);
+    if (!hero) {
+      await send.text(`❌ <b>CA scan</b>\n\nNo Solana pair found for:\n<code>${escapeHtml(ca)}</code>`);
+      return null;
+    }
+
+    if (hero.heroImage && hero.caption && typeof send.photoOrText === "function") {
+      await send.photoOrText(hero.heroImage, hero.caption);
+    } else if (hero.caption && typeof send.text === "function") {
+      await send.text(hero.caption);
+    }
+
+    if (hero.analysis && typeof send.text === "function") {
+      await send.text(hero.analysis);
+    }
+
+    return hero;
+  }
+
   async buildScanCaText(ca) {
     const token = await this.fetchTokenByCA(ca);
     if (!token) {

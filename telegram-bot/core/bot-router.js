@@ -391,9 +391,21 @@ export default class BotRouter {
 
   async sendLongMessage(chatId, text, extra = {}) {
     const value = String(text || "");
-    const max = 3600;
+    const max = 3400;
+    const sendPart = async (part) => {
+      try {
+        await this.sendMessage(chatId, part, extra);
+      } catch (error) {
+        // Telegram can reject a split HTML fragment. Fallback to plain text instead of silently dying.
+        await this.bot.sendMessage(chatId, String(part || "").replace(/<[^>]*>/g, ""), {
+          disable_web_page_preview: false,
+          ...extra
+        });
+      }
+    };
+
     if (value.length <= max) {
-      await this.sendMessage(chatId, value, extra);
+      await sendPart(value);
       return;
     }
 
@@ -407,28 +419,88 @@ export default class BotRouter {
     }
     if (rest) parts.push(rest);
 
-    for (let i = 0; i < parts.length; i += 1) {
-      await this.sendMessage(chatId, parts[i], extra);
+    for (const part of parts) {
+      await sendPart(part);
     }
   }
 
   async runScanCA(chatId, ca) {
-    await this.sendMessage(chatId, "🔎 <b>CA scan started — ROUTER V8 ACTIVE</b>", {
+    await this.sendMessage(chatId, "🔎 <b>CA scan started — ROUTER V9 ACTIVE</b>", {
       reply_markup: this.keyboard()
     });
-    await this.kernel.scanCA(ca, this.createSendBridge(chatId));
+
+    try {
+      if (typeof this.kernel.buildScanCaHero === "function") {
+        const hero = await this.kernel.buildScanCaHero(ca);
+        if (!hero) {
+          await this.sendMessage(chatId, `❌ <b>CA scan</b>\nNo Solana pair found for:\n<code>${ca}</code>`, {
+            reply_markup: this.keyboard()
+          });
+          return;
+        }
+
+        if (hero.heroImage && hero.caption) {
+          await this.sendPhotoOrText(chatId, hero.heroImage, hero.caption, { reply_markup: this.keyboard() });
+        } else if (hero.caption) {
+          await this.sendLongMessage(chatId, hero.caption, { reply_markup: this.keyboard() });
+        }
+
+        if (hero.analysis) {
+          await this.sendLongMessage(chatId, hero.analysis, { reply_markup: this.keyboard() });
+        }
+        return;
+      }
+
+      if (typeof this.kernel.buildScanCaText === "function") {
+        const report = await this.kernel.buildScanCaText(ca);
+        await this.sendLongMessage(chatId, report, { reply_markup: this.keyboard() });
+        return;
+      }
+
+      if (typeof this.kernel.scanCA === "function") {
+        await this.kernel.scanCA(ca, this.createSendBridge(chatId));
+        return;
+      }
+
+      await this.sendMessage(chatId, "❌ Scan CA method is not connected in TradingKernel.", {
+        reply_markup: this.keyboard()
+      });
+    } catch (error) {
+      this.logger.log?.("runScanCA error:", error?.stack || error?.message || String(error));
+      await this.sendMessage(
+        chatId,
+        `❌ <b>CA scan error — ROUTER V9</b>\n<code>${String(error?.message || error).slice(0, 900)}</code>`,
+        { reply_markup: this.keyboard() }
+      );
+    }
   }
 
   async runTeamScan(chatId, ca) {
-    await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — ROUTER V8 ACTIVE</b>", {
+    await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — ROUTER V9 ACTIVE</b>", {
       reply_markup: this.keyboard()
     });
-    const report = await this.kernel.buildTeamWalletIntelText(ca);
-    await this.sendLongMessage(chatId, report, {
-      reply_markup: this.keyboard()
-    });
-  }
 
+    try {
+      if (typeof this.kernel.buildTeamWalletIntelText !== "function") {
+        await this.sendMessage(chatId, "❌ TeamWalletIntel method is not connected in TradingKernel.", {
+          reply_markup: this.keyboard()
+        });
+        return;
+      }
+
+      const report = await this.kernel.buildTeamWalletIntelText(ca);
+      await this.sendLongMessage(chatId, report, {
+        reply_markup: this.keyboard()
+      });
+    } catch (error) {
+      this.logger.log?.("runTeamScan error:", error?.stack || error?.message || String(error));
+      await this.sendMessage(
+        chatId,
+        `❌ <b>Team scan error — ROUTER V9</b>\n<code>${String(error?.message || error).slice(0, 900)}</code>`,
+        { reply_markup: this.keyboard() }
+      );
+    }
+  }
   async sendPublicMessage(text, extra = {}) {
     if (!this.publicGroupChatId) return null;
 
@@ -897,7 +969,7 @@ export default class BotRouter {
 
     if (action === "scan_ca") {
       this.setChatMode(chatId, "awaiting_ca");
-      await this.sendMessage(chatId, `${this.t("send_ca")}\n🔥 ROUTER V8 ACTIVE`, {
+      await this.sendMessage(chatId, `${this.t("send_ca")}\n🔥 ROUTER V9 ACTIVE`, {
         reply_markup: this.keyboard()
       });
       return;
@@ -935,7 +1007,7 @@ export default class BotRouter {
 
     if (action === "team_scan") {
       this.setChatMode(chatId, "awaiting_team_scan_ca");
-      await this.sendMessage(chatId, `${this.t("send_team_ca")}\n🔥 ROUTER V8 ACTIVE`, {
+      await this.sendMessage(chatId, `${this.t("send_team_ca")}\n🔥 ROUTER V9 ACTIVE`, {
         reply_markup: this.keyboard()
       });
       return;
