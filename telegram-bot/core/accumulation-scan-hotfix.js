@@ -1047,10 +1047,8 @@ export function applyAccumulationScanHotfix(router, kernel) {
         updateSignalRegistry(signalRegistry, result);
         const enableMonitor = isWatchworthy(result);
         const caption = buildAccumulationReport(result, enableMonitor);
-        // Emergency v4: send wallet-cluster/age as a separate short message BEFORE the full report.
-        // Even if an old path still uses photo captions, this block cannot be hidden by caption truncation.
-        await router.sendMessage(chatId, buildWalletClusterShortReport(result), { reply_markup: router.keyboard() });
-        // Send the full report as normal messages, not as a photo caption.
+        // V7: wallet-cluster/age is already included in the full accumulation report.
+        // Do not send the short wallet-cluster message separately, чтобы не было дубля.
         await sendLongText(router, chatId, caption, { reply_markup: router.keyboard() });
 
         if (enableMonitor) {
