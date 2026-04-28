@@ -1416,6 +1416,81 @@ Send:
     };
   }
 
+
+  buildScanCaTeamIntelBlock(analysis = {}) {
+    const dev = analysis?.dev || {};
+    const hist = analysis?.devHistory || {};
+    const groups = analysis?.groups || {};
+    const crossProjects = analysis?.crossProjects || {};
+    const whaleBuys = analysis?.whaleBuys || {};
+    const risk = analysis?.risk || {};
+    const projects = Array.isArray(crossProjects?.projects) ? crossProjects.projects.slice(0, 4) : [];
+    const whales = Array.isArray(whaleBuys?.rows) ? whaleBuys.rows.slice(0, 4) : [];
+
+    const shortWallet = (value = "") => {
+      const s = String(value || "");
+      if (s.length <= 12) return escapeHtml(s || "-");
+      return `${escapeHtml(s.slice(0, 4))}…${escapeHtml(s.slice(-4))}`;
+    };
+
+    const fmtPct = (value, d = 2) => `${safeNum(value, 0).toFixed(d)}%`;
+    const fmtUsd = (value, d = 0) => `$${safeNum(value, 0).toFixed(d)}`;
+    const fmtNum = (value, d = 2) => safeNum(value, 0).toFixed(d);
+
+    const lines = [
+      `🕵️ <b>Team / Insider / Sniper Intel — V12</b>`,
+      `Risk — ${safeNum(risk?.score, 0) >= 70 ? "🚩" : safeNum(risk?.score, 0) >= 45 ? "🟡" : "✅"} ${escapeHtml(risk?.level || "LOW")} / ${safeNum(risk?.score, 0)}`,
+      `Dev — ${dev?.devWallet ? `<code>${escapeHtml(dev.devWallet)}</code>` : "не определён"}`,
+      `Dev launches — ${safeNum(hist?.launchesTotal, 0)} | dead/rug-like ${safeNum(hist?.scamLikeCount, 0)} | live/success ${safeNum(hist?.successfulLikeCount, 0)} | source ${escapeHtml(hist?.source || "unavailable")}`,
+      `Snipers 1м / 5м / 15м — ${safeNum(groups?.snipers1m?.count, 0)} / ${safeNum(groups?.snipers5m?.count, 0)} / ${safeNum(groups?.snipers15m?.count, 0)} wallets`,
+      `Team/insider wallets — ${safeNum(groups?.team?.count, 0)} | держат ${fmtPct(groups?.team?.pct, 2)} | dev держит ${fmtPct(groups?.dev?.pct, 2)}`,
+      ``,
+      `🧩 <b>Cross-project wallet overlap</b>`,
+      `Проверено — ${safeNum(crossProjects?.checkedWallets, 0)} wallets | с другими токенами — ${safeNum(crossProjects?.walletsWithOtherTokens, 0)} | clusters ${safeNum(crossProjects?.clusteredProjectCount, 0)} | risk ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`
+    ];
+
+    if (projects.length) {
+      for (const project of projects) {
+        lines.push(`• ${escapeHtml(project?.name || project?.symbol || "UNKNOWN")} ${project?.symbol ? `($${escapeHtml(project.symbol)})` : ""} — ${safeNum(project?.walletCount, 0)} wallets`);
+        lines.push(`  CA: <code>${escapeHtml(project?.ca || "")}</code> | liq ${fmtUsd(project?.liquidityUsd, 0)} | FDV ${fmtUsd(project?.fdv || project?.marketCap, 0)}`);
+      }
+    } else {
+      lines.push(`• явного скопления одних и тех же кошельков в других проектах пока нет`);
+    }
+
+    lines.push(``);
+    lines.push(`🐋 <b>Whale buys</b>`);
+    lines.push(`Whale signal — ${escapeHtml(whaleBuys?.signal || "LOW")} | whales ${safeNum(whaleBuys?.whaleCount, 0)} | holding ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | reducing ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`);
+    lines.push(`Сейчас держат — ${fmtNum(whaleBuys?.totalCurrentAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalCurrentPct, 2)} | ${fmtUsd(whaleBuys?.currentUsd, 0)}`);
+    lines.push(`Суммарно куплено — ${fmtNum(whaleBuys?.totalBoughtAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalBoughtPct, 2)} | ${fmtUsd(whaleBuys?.totalBoughtUsd, 0)}`);
+
+    if (whales.length) {
+      for (const row of whales) {
+        lines.push(`• ${shortWallet(row?.owner)} — now ${fmtPct(row?.supplyPct, 2)} | latest buy ${fmtPct(row?.latestBuyPct, 2)} | hold ${fmtPct(row?.holdingPct, 0)}`);
+      }
+    } else {
+      lines.push(`• крупных whale-buy признаков среди top holders пока нет`);
+    }
+
+    lines.push(``);
+    lines.push(`⚠️ Cross-project overlap показывает текущие ненулевые SPL-балансы кошельков; для полной истории нужен расширенный индексер.`);
+    return lines.join("\n");
+  }
+
+  async buildScanCaTeamIntelText(payload = {}) {
+    if (!payload?.token || !this.teamWalletIntelligence?.analyze) return "";
+    try {
+      const analysis = await this.teamWalletIntelligence.analyze({
+        token: payload.token,
+        candidate: payload.analyzed || { token: payload.token }
+      });
+      return this.buildScanCaTeamIntelBlock(analysis);
+    } catch (error) {
+      this.logger.log?.("scan ca team intel append failed:", error?.message || String(error));
+      return `🕵️ <b>Team / Insider / Sniper Intel — V12</b>\n⚠️ Team/whale intel unavailable: <code>${escapeHtml(String(error?.message || error).slice(0, 240))}</code>`;
+    }
+  }
+
   async buildTeamWalletIntelText(ca) {
     const payload = await this.buildScanCaPayload(ca);
     if (!payload?.token) {
@@ -1462,17 +1537,22 @@ No Solana pair found for:
 <code>${escapeHtml(ca)}</code>`;
     }
 
-    return this.candidateService.buildAnalysisText(payload.analyzed, payload.plans);
+    const baseReport = this.candidateService.buildAnalysisText(payload.analyzed, payload.plans);
+    const teamIntel = await this.buildScanCaTeamIntelText(payload);
+    return teamIntel ? `${baseReport}\n\n${teamIntel}` : baseReport;
   }
 
   async buildScanCaHero(ca) {
     const payload = await this.buildScanCaPayload(ca);
     if (!payload?.token) return null;
 
+    const baseAnalysis = this.candidateService.buildAnalysisText(payload.analyzed, payload.plans);
+    const teamIntel = await this.buildScanCaTeamIntelText(payload);
+
     return {
       heroImage: payload.heroImage || this.candidateService.getHeroImage?.(payload.analyzed) || payload.token?.imageUrl || null,
       caption: this.candidateService.buildHeroCaption(payload.analyzed),
-      analysis: this.candidateService.buildAnalysisText(payload.analyzed, payload.plans)
+      analysis: teamIntel ? `${baseAnalysis}\n\n${teamIntel}` : baseAnalysis
     };
   }
 
