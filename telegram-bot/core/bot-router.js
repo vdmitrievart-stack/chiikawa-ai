@@ -425,7 +425,7 @@ export default class BotRouter {
   }
 
   async runScanCA(chatId, ca) {
-    await this.sendMessage(chatId, "🔎 <b>CA scan started — ROUTER V12 ACTIVE</b>", {
+    await this.sendMessage(chatId, "🔎 <b>CA scan started — ROUTER V13 ACTIVE</b>", {
       reply_markup: this.keyboard()
     });
 
@@ -469,14 +469,14 @@ export default class BotRouter {
       this.logger.log?.("runScanCA error:", error?.stack || error?.message || String(error));
       await this.sendMessage(
         chatId,
-        `❌ <b>CA scan error — ROUTER V12</b>\n<code>${String(error?.message || error).slice(0, 900)}</code>`,
+        `❌ <b>CA scan error — ROUTER V13</b>\n<code>${String(error?.message || error).slice(0, 900)}</code>`,
         { reply_markup: this.keyboard() }
       );
     }
   }
 
   async runTeamScan(chatId, ca) {
-    await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — ROUTER V12 ACTIVE</b>", {
+    await this.sendMessage(chatId, "🕵️ <b>Team / Insider / Sniper scan started — ROUTER V13 ACTIVE</b>", {
       reply_markup: this.keyboard()
     });
 
@@ -496,7 +496,7 @@ export default class BotRouter {
       this.logger.log?.("runTeamScan error:", error?.stack || error?.message || String(error));
       await this.sendMessage(
         chatId,
-        `❌ <b>Team scan error — ROUTER V12</b>\n<code>${String(error?.message || error).slice(0, 900)}</code>`,
+        `❌ <b>Team scan error — ROUTER V13</b>\n<code>${String(error?.message || error).slice(0, 900)}</code>`,
         { reply_markup: this.keyboard() }
       );
     }
@@ -969,7 +969,7 @@ export default class BotRouter {
 
     if (action === "scan_ca") {
       this.setChatMode(chatId, "awaiting_ca");
-      await this.sendMessage(chatId, `${this.t("send_ca")}\n🔥 ROUTER V12 ACTIVE`, {
+      await this.sendMessage(chatId, `${this.t("send_ca")}\n🔥 ROUTER V13 ACTIVE`, {
         reply_markup: this.keyboard()
       });
       return;
@@ -1007,7 +1007,7 @@ export default class BotRouter {
 
     if (action === "team_scan") {
       this.setChatMode(chatId, "awaiting_team_scan_ca");
-      await this.sendMessage(chatId, `${this.t("send_team_ca")}\n🔥 ROUTER V12 ACTIVE`, {
+      await this.sendMessage(chatId, `${this.t("send_team_ca")}\n🔥 ROUTER V13 ACTIVE`, {
         reply_markup: this.keyboard()
       });
       return;
@@ -1158,7 +1158,7 @@ migration_survivor: ${(result.budget.migration_survivor * 100).toFixed(1)}%`,
 
     if (isLikelyCA(text)) {
       // Fallback: if Telegram/webhook lost the pending button state, a bare CA now runs Scan CA automatically.
-      // Team scan still works through the persisted pending state after pressing 🕵️ Team Scan V2,
+      // Team scan still works through the persisted pending state after pressing 🕵️ Team Scan V13,
       // or directly as: /teamscan CA
       await this.runScanCA(chatId, text);
       return;

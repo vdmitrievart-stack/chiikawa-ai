@@ -103,6 +103,7 @@ function uniqueByOwner(rows = []) {
       currentTokenAmount: 0,
       totalBought: 0,
       totalSold: 0,
+      totalTransferredIn: 0,
       firstBuyAt: 0,
       firstSeenAt: 0,
       latestBuyAt: 0,
@@ -119,6 +120,7 @@ function uniqueByOwner(rows = []) {
     prev.currentTokenAmount += safeNum(row?.currentTokenAmount, 0);
     prev.totalBought += safeNum(row?.totalBought, 0);
     prev.totalSold += safeNum(row?.totalSold, 0);
+    prev.totalTransferredIn += safeNum(row?.totalTransferredIn, 0);
     prev.selfBuyer = prev.selfBuyer || Boolean(row?.selfBuyer);
     prev.transferOnly = prev.transferOnly || Boolean(row?.transferOnly);
     prev.storageLike = prev.storageLike || Boolean(row?.storageLike);
@@ -143,6 +145,34 @@ function uniqueByOwner(rows = []) {
     map.set(owner, prev);
   }
   return [...map.values()];
+}
+
+const COMMON_CROSS_PROJECT_MINTS = new Set([
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoGQn1Vy9d5U8rWkzH", // USDT
+  "So11111111111111111111111111111111111111112", // wSOL
+  "So11111111111111111111111111111111111111111"
+]);
+
+function isCommonCrossProjectMint(mint = "") {
+  return COMMON_CROSS_PROJECT_MINTS.has(asText(mint));
+}
+
+function isStableOrBaseAssetProject(meta = {}) {
+  const ca = asText(meta?.ca || meta?.address || meta?.mint);
+  const name = String(meta?.name || "").toLowerCase();
+  const symbol = String(meta?.symbol || "").toLowerCase().replace(/^\$/, "");
+  if (isCommonCrossProjectMint(ca)) return true;
+  const stableSymbols = new Set(["usdc", "usdt", "usd", "usds", "pyusd", "uxd"]);
+  if (stableSymbols.has(symbol)) return true;
+  if (name.includes("usd coin") || name.includes("tether")) return true;
+  if (symbol === "sol" || symbol === "wsol" || name === "wrapped sol" || name === "solana") return true;
+  return false;
+}
+
+function hasUsefulProjectMeta(meta = {}) {
+  if (!meta || isStableOrBaseAssetProject(meta)) return false;
+  return Boolean(asText(meta?.ca));
 }
 
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 5500) {
@@ -363,16 +393,29 @@ export default class TeamWalletIntelligence {
       };
     }
 
-    return {
+    const baseAddress = asText(best?.baseToken?.address || '');
+    const quoteAddress = asText(best?.quoteToken?.address || '');
+    const matchedToken = baseAddress === ca
+      ? best?.baseToken
+      : quoteAddress === ca
+        ? best?.quoteToken
+        : best?.baseToken;
+
+    const meta = {
       ca,
-      name: asText(best?.baseToken?.name || best?.baseToken?.symbol || 'UNKNOWN'),
-      symbol: asText(best?.baseToken?.symbol || ''),
+      name: asText(matchedToken?.name || matchedToken?.symbol || 'UNKNOWN'),
+      symbol: asText(matchedToken?.symbol || ''),
       pairAddress: asText(best?.pairAddress || ''),
       fdv: safeNum(best?.fdv, 0),
       marketCap: safeNum(best?.marketCap, 0),
       liquidityUsd: safeNum(best?.liquidity?.usd, 0),
       volume24h: safeNum(best?.volume?.h24, 0),
       url: asText(best?.url || '')
+    };
+
+    return {
+      ...meta,
+      excludedAsCommonAsset: isStableOrBaseAssetProject(meta)
     };
   }
 
@@ -395,7 +438,7 @@ export default class TeamWalletIntelligence {
           const amount = safeNum(info?.tokenAmount?.uiAmount, 0);
           return { mint, amount };
         })
-        .filter((row) => row.mint && row.mint !== excludeMint && row.amount > 0)
+        .filter((row) => row.mint && row.mint !== excludeMint && row.amount > 0 && !isCommonCrossProjectMint(row.mint))
         .sort((a, b) => safeNum(b.amount, 0) - safeNum(a.amount, 0))
         .slice(0, this.maxCrossProjectTokensPerWallet);
     } catch (error) {
@@ -453,13 +496,24 @@ export default class TeamWalletIntelligence {
       .slice(0, this.maxCrossProjectReportRows);
 
     const projects = [];
+    const skippedCommonProjects = [];
     for (const entry of clustered) {
       const meta = await this.fetchTokenProjectMeta(entry.ca);
-      projects.push({
+      const project = {
         ...entry,
         ...(meta || {})
-      });
+      };
+      if (!hasUsefulProjectMeta(project)) {
+        skippedCommonProjects.push(project);
+        continue;
+      }
+      projects.push(project);
     }
+
+    projects.sort((a, b) =>
+      safeNum(b.walletCount, 0) - safeNum(a.walletCount, 0) ||
+      safeNum(b.liquidityUsd, 0) - safeNum(a.liquidityUsd, 0)
+    );
 
     const checkedWallets = priorityRows.length;
     const walletsWithOtherTokens = walletRows.filter((row) => safeNum(row?.tokenCount, 0) > 0).length;
@@ -487,6 +541,7 @@ export default class TeamWalletIntelligence {
       checkedWallets,
       walletsWithOtherTokens,
       clusteredProjectCount: projects.length,
+      skippedCommonProjectCount: skippedCommonProjects.length,
       maxClusterWallets,
       riskScore: clamp(Math.round(riskScore), 0, 100),
       riskLevel: riskScore >= 45 ? 'HIGH' : riskScore >= 25 ? 'MEDIUM' : riskScore >= 10 ? 'WATCH' : 'LOW',
@@ -501,26 +556,40 @@ export default class TeamWalletIntelligence {
       .map((row) => {
         const currentAmount = safeNum(row?.currentTokenAmount, 0);
         const totalBought = safeNum(row?.totalBought, 0);
-        const latestBuyAmount = safeNum(row?.latestBuyAmount, 0) || totalBought || currentAmount;
+        const totalTransferredIn = safeNum(row?.totalTransferredIn, 0);
+        const latestBuyAmount = safeNum(row?.latestBuyAmount, 0);
+        const totalSold = safeNum(row?.totalSold, 0);
         const supplyPct = safeNum(row?.supplyPct, 0);
         const totalBoughtPct = totalSupply > 0 ? (totalBought / totalSupply) * 100 : 0;
         const latestBuyPct = totalSupply > 0 ? (latestBuyAmount / totalSupply) * 100 : 0;
         const currentUsd = currentAmount * price;
         const latestBuyUsd = latestBuyAmount * price;
         const totalBoughtUsd = totalBought * price;
-        const holdingPct = totalBought > 0 ? clamp((currentAmount / Math.max(totalBought, 0.0000001)) * 100, 0, 100) : 0;
-        const soldPct = totalBought > 0 ? clamp((safeNum(row?.totalSold, 0) / Math.max(totalBought, 0.0000001)) * 100, 0, 100) : 0;
-        const isWhale = Boolean(
-          supplyPct >= this.whaleSupplyPct ||
+        const hasSelfBuy = totalBought > 0 || Boolean(row?.selfBuyer);
+        const holdingPct = hasSelfBuy
+          ? clamp((currentAmount / Math.max(totalBought, 0.0000001)) * 100, 0, 100)
+          : null;
+        const soldPct = hasSelfBuy
+          ? clamp((totalSold / Math.max(totalBought, 0.0000001)) * 100, 0, 100)
+          : null;
+        const isBuyWhale = Boolean(
           latestBuyPct >= this.whaleBuySupplyPct ||
           totalBoughtPct >= this.whaleSupplyPct ||
-          latestBuyUsd >= this.whaleBuyUsd ||
+          latestBuyUsd >= this.whaleBuyUsd
+        );
+        const isHolderWhale = Boolean(
+          supplyPct >= this.whaleSupplyPct ||
           currentUsd >= this.whaleBuyUsd
         );
+        const isWhale = isBuyWhale || isHolderWhale;
+        const status = isBuyWhale
+          ? (holdingPct !== null && holdingPct >= 60 ? 'buy_holding' : holdingPct !== null && holdingPct <= 40 ? 'buy_reduced' : 'buy_partial')
+          : (totalTransferredIn > 0 ? 'holder_transfer' : 'holder_only');
         return {
           owner: row?.owner,
           currentAmount,
           totalBought,
+          totalTransferredIn,
           latestBuyAmount,
           supplyPct,
           totalBoughtPct,
@@ -531,17 +600,32 @@ export default class TeamWalletIntelligence {
           holdingPct,
           soldPct,
           latestBuyAt: safeNum(row?.latestBuyAt, 0),
+          hasSelfBuy,
+          isBuyWhale,
+          isHolderWhale,
+          status,
           isWhale
         };
       })
       .filter((row) => row.isWhale)
-      .sort((a, b) => safeNum(b.latestBuyPct || b.supplyPct, 0) - safeNum(a.latestBuyPct || a.supplyPct, 0));
+      .sort((a, b) =>
+        safeNum(b.supplyPct, 0) - safeNum(a.supplyPct, 0) ||
+        safeNum(b.latestBuyPct, 0) - safeNum(a.latestBuyPct, 0)
+      );
 
-    const holdingRows = whaleRows.filter((row) => safeNum(row?.holdingPct, 0) >= 60);
-    const dumpingRows = whaleRows.filter((row) => safeNum(row?.soldPct, 0) >= 50 || safeNum(row?.holdingPct, 0) <= 40);
+    const buyWhaleRows = whaleRows.filter((row) => row.isBuyWhale);
+    const holderWhaleRows = whaleRows.filter((row) => row.isHolderWhale);
+    const holdingRows = whaleRows.filter((row) =>
+      safeNum(row?.currentAmount, 0) > 0 &&
+      (row.holdingPct === null || safeNum(row?.holdingPct, 0) >= 60)
+    );
+    const dumpingRows = whaleRows.filter((row) =>
+      row.hasSelfBuy &&
+      (safeNum(row?.soldPct, 0) >= 50 || safeNum(row?.holdingPct, 0) <= 40)
+    );
     const totalCurrentAmount = whaleRows.reduce((acc, row) => acc + safeNum(row.currentAmount, 0), 0);
-    const totalBoughtAmount = whaleRows.reduce((acc, row) => acc + safeNum(row.totalBought, 0), 0);
-    const latestBuyAmountSum = whaleRows.reduce((acc, row) => acc + safeNum(row.latestBuyAmount, 0), 0);
+    const totalBoughtAmount = buyWhaleRows.reduce((acc, row) => acc + safeNum(row.totalBought, 0), 0);
+    const latestBuyAmountSum = buyWhaleRows.reduce((acc, row) => acc + safeNum(row.latestBuyAmount, 0), 0);
 
     let signal = 'LOW';
     if (whaleRows.length >= 3 && totalSupply > 0 && (totalCurrentAmount / totalSupply) * 100 >= 3) signal = 'STRONG';
@@ -549,6 +633,8 @@ export default class TeamWalletIntelligence {
 
     return {
       whaleCount: whaleRows.length,
+      buyWhaleCount: buyWhaleRows.length,
+      holderWhaleCount: holderWhaleRows.length,
       holdingWhaleCount: holdingRows.length,
       dumpingWhaleCount: dumpingRows.length,
       totalCurrentAmount,
@@ -855,7 +941,7 @@ export default class TeamWalletIntelligence {
     const devHistorySource = hist?.source || "unavailable";
 
     const lines = [
-      `🕵️ <b>TEAM / INSIDER / SNIPER INTEL — V11</b>`,
+      `🕵️ <b>TEAM / INSIDER / SNIPER INTEL — V13</b>`,
       ``,
       `<b>${escapeHtml(token?.name || token?.symbol || "UNKNOWN")}</b>`,
       `<code>${escapeHtml(analysis?.mint || token?.ca || "")}</code>`,
@@ -881,7 +967,7 @@ export default class TeamWalletIntelligence {
       ``,
       `<b>🧩 Cross-project wallet overlap</b>`,
       `Проверено кошельков — ${safeNum(crossProjects?.checkedWallets, 0)} | с другими токенами — ${safeNum(crossProjects?.walletsWithOtherTokens, 0)}`,
-      `Скоплений в других проектах — ${safeNum(crossProjects?.clusteredProjectCount, 0)} | max cluster — ${safeNum(crossProjects?.maxClusterWallets, 0)} wallets | risk ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`,
+      `Скоплений в других проектах — ${safeNum(crossProjects?.clusteredProjectCount, 0)} | отфильтровано common/stable — ${safeNum(crossProjects?.skippedCommonProjectCount, 0)} | risk ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`,
       ...(Array.isArray(crossProjects?.projects) && crossProjects.projects.length
         ? crossProjects.projects.slice(0, 5).flatMap((project) => [
             `• ${escapeHtml(project?.name || project?.symbol || "UNKNOWN")} ${project?.symbol ? `($${escapeHtml(project.symbol)})` : ""} — ${safeNum(project?.walletCount, 0)} wallets`,
@@ -890,11 +976,16 @@ export default class TeamWalletIntelligence {
         : [`• явного скопления одних и тех же кошельков в других проектах пока нет`]),
       ``,
       `<b>🐋 Whale buys</b>`,
-      `Whale signal — ${escapeHtml(whaleBuys?.signal || "LOW")} | whales ${safeNum(whaleBuys?.whaleCount, 0)} | holding ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | reducing ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`,
+      `Whale signal — ${escapeHtml(whaleBuys?.signal || "LOW")} | holders ${safeNum(whaleBuys?.holderWhaleCount ?? whaleBuys?.whaleCount, 0)} | buyers ${safeNum(whaleBuys?.buyWhaleCount, 0)} | holding ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | reducing ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`,
       `Сейчас держат — ${fmtNum(whaleBuys?.totalCurrentAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalCurrentPct, 2)} | ${fmtUsd(whaleBuys?.currentUsd, 0)}`,
       `Суммарно куплено — ${fmtNum(whaleBuys?.totalBoughtAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalBoughtPct, 2)} | ${fmtUsd(whaleBuys?.totalBoughtUsd, 0)}`,
       ...(Array.isArray(whaleBuys?.rows) && whaleBuys.rows.length
-        ? whaleBuys.rows.slice(0, 5).map((row) => `• ${shortWallet(row.owner)} — now ${fmtPct(row.supplyPct, 2)} | latest buy ${fmtPct(row.latestBuyPct, 2)} | hold ${fmtPct(row.holdingPct, 0)}`)
+        ? whaleBuys.rows.slice(0, 5).map((row) => {
+            const buyPart = row?.isBuyWhale
+              ? `latest buy ${fmtPct(row.latestBuyPct, 2)} | hold ${row.holdingPct === null ? "n/a" : fmtPct(row.holdingPct, 0)}`
+              : `holder/transfer | bought ${fmtPct(row.totalBoughtPct, 2)}`;
+            return `• ${shortWallet(row.owner)} — now ${fmtPct(row.supplyPct, 2)} | ${buyPart}`;
+          })
         : [`• крупных whale-buy признаков среди top holders пока нет`]),
       ``,
       `<b>⏱ Changes by snapshots</b>`,
@@ -920,7 +1011,7 @@ export default class TeamWalletIntelligence {
     }
 
     lines.push(``);
-    lines.push(`⚠️ Dev wallet/dev-history — эвристика. Cross-project overlap показывает текущие ненулевые SPL-балансы кошельков; для полной истории прошлых участий нужен расширенный индексер.`);
+    lines.push(`⚠️ Dev wallet/dev-history — эвристика. Cross-project overlap показывает текущие ненулевые SPL-балансы кошельков; USDC/USDT/wSOL/common assets отфильтрованы. Для полной истории прошлых участий нужен расширенный индексер.`);
 
     return lines.join("\n");
   }

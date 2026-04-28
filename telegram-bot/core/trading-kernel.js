@@ -1438,7 +1438,7 @@ Send:
     const fmtNum = (value, d = 2) => safeNum(value, 0).toFixed(d);
 
     const lines = [
-      `🕵️ <b>Team / Insider / Sniper Intel — V12</b>`,
+      `🕵️ <b>Team / Insider / Sniper Intel — V13</b>`,
       `Risk — ${safeNum(risk?.score, 0) >= 70 ? "🚩" : safeNum(risk?.score, 0) >= 45 ? "🟡" : "✅"} ${escapeHtml(risk?.level || "LOW")} / ${safeNum(risk?.score, 0)}`,
       `Dev — ${dev?.devWallet ? `<code>${escapeHtml(dev.devWallet)}</code>` : "не определён"}`,
       `Dev launches — ${safeNum(hist?.launchesTotal, 0)} | dead/rug-like ${safeNum(hist?.scamLikeCount, 0)} | live/success ${safeNum(hist?.successfulLikeCount, 0)} | source ${escapeHtml(hist?.source || "unavailable")}`,
@@ -1446,7 +1446,7 @@ Send:
       `Team/insider wallets — ${safeNum(groups?.team?.count, 0)} | держат ${fmtPct(groups?.team?.pct, 2)} | dev держит ${fmtPct(groups?.dev?.pct, 2)}`,
       ``,
       `🧩 <b>Cross-project wallet overlap</b>`,
-      `Проверено — ${safeNum(crossProjects?.checkedWallets, 0)} wallets | с другими токенами — ${safeNum(crossProjects?.walletsWithOtherTokens, 0)} | clusters ${safeNum(crossProjects?.clusteredProjectCount, 0)} | risk ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`
+      `Проверено — ${safeNum(crossProjects?.checkedWallets, 0)} wallets | с другими токенами — ${safeNum(crossProjects?.walletsWithOtherTokens, 0)} | clusters ${safeNum(crossProjects?.clusteredProjectCount, 0)} | filtered ${safeNum(crossProjects?.skippedCommonProjectCount, 0)} | risk ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`
     ];
 
     if (projects.length) {
@@ -1460,20 +1460,23 @@ Send:
 
     lines.push(``);
     lines.push(`🐋 <b>Whale buys</b>`);
-    lines.push(`Whale signal — ${escapeHtml(whaleBuys?.signal || "LOW")} | whales ${safeNum(whaleBuys?.whaleCount, 0)} | holding ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | reducing ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`);
+    lines.push(`Whale signal — ${escapeHtml(whaleBuys?.signal || "LOW")} | holders ${safeNum(whaleBuys?.holderWhaleCount ?? whaleBuys?.whaleCount, 0)} | buyers ${safeNum(whaleBuys?.buyWhaleCount, 0)} | holding ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | reducing ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`);
     lines.push(`Сейчас держат — ${fmtNum(whaleBuys?.totalCurrentAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalCurrentPct, 2)} | ${fmtUsd(whaleBuys?.currentUsd, 0)}`);
     lines.push(`Суммарно куплено — ${fmtNum(whaleBuys?.totalBoughtAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalBoughtPct, 2)} | ${fmtUsd(whaleBuys?.totalBoughtUsd, 0)}`);
 
     if (whales.length) {
       for (const row of whales) {
-        lines.push(`• ${shortWallet(row?.owner)} — now ${fmtPct(row?.supplyPct, 2)} | latest buy ${fmtPct(row?.latestBuyPct, 2)} | hold ${fmtPct(row?.holdingPct, 0)}`);
+        const buyPart = row?.isBuyWhale
+          ? `latest buy ${fmtPct(row?.latestBuyPct, 2)} | hold ${row?.holdingPct === null ? "n/a" : fmtPct(row?.holdingPct, 0)}`
+          : `holder/transfer | bought ${fmtPct(row?.totalBoughtPct, 2)}`;
+        lines.push(`• ${shortWallet(row?.owner)} — now ${fmtPct(row?.supplyPct, 2)} | ${buyPart}`);
       }
     } else {
       lines.push(`• крупных whale-buy признаков среди top holders пока нет`);
     }
 
     lines.push(``);
-    lines.push(`⚠️ Cross-project overlap показывает текущие ненулевые SPL-балансы кошельков; для полной истории нужен расширенный индексер.`);
+    lines.push(`⚠️ Cross-project overlap показывает текущие ненулевые SPL-балансы кошельков; USDC/USDT/wSOL/common assets отфильтрованы. Для полной истории нужен расширенный индексер.`);
     return lines.join("\n");
   }
 
@@ -1487,7 +1490,7 @@ Send:
       return this.buildScanCaTeamIntelBlock(analysis);
     } catch (error) {
       this.logger.log?.("scan ca team intel append failed:", error?.message || String(error));
-      return `🕵️ <b>Team / Insider / Sniper Intel — V12</b>\n⚠️ Team/whale intel unavailable: <code>${escapeHtml(String(error?.message || error).slice(0, 240))}</code>`;
+      return `🕵️ <b>Team / Insider / Sniper Intel — V13</b>\n⚠️ Team/whale intel unavailable: <code>${escapeHtml(String(error?.message || error).slice(0, 240))}</code>`;
     }
   }
 

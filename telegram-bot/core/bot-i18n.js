@@ -67,7 +67,7 @@ export function buildKeyboard(t) {
       [b('📊 Status'), b('📑 Pending Intents')],
       [b('🔎 Scan CA'), b('🔍 Scan Market')],
       [b('💰 Balance'), b('👛 Wallets')],
-      [b('🕵️ Team Scan V9'), b('🎯 Snipers')],
+      [b('🕵️ Team Scan V13'), b('🎯 Snipers')],
       [b('📋 Copytrade'), b('🧮 Budget')],
       [b('🛰️ GMGN Status'), b('⚙️ GMGN Execution')],
       [b('📦 GMGN Orders'), b('❤️ Leader Health')],
