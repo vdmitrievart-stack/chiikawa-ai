@@ -1487,6 +1487,9 @@ Send:
         token: payload.token,
         candidate: payload.analyzed || { token: payload.token }
       });
+      if (typeof this.teamWalletIntelligence.buildCompactReport === "function") {
+        return this.teamWalletIntelligence.buildCompactReport(analysis);
+      }
       return this.buildScanCaTeamIntelBlock(analysis);
     } catch (error) {
       this.logger.log?.("scan ca team intel append failed:", error?.message || String(error));

@@ -895,6 +895,7 @@ export default class TeamWalletIntelligence {
     return {
       mint,
       token,
+      candidate,
       totalSupply,
       launchAt,
       dev,
@@ -918,6 +919,276 @@ export default class TeamWalletIntelligence {
     const d = deltas?.[key];
     if (!d) return `${label}: нет snapshot истории`;
     return `${label}: team ${fmtSigned(d.team?.pctDelta, 2, "%")} | snipers15m ${fmtSigned(d.snipers15m?.pctDelta, 2, "%")} | dev ${fmtSigned(d.dev?.pctDelta, 2, "%")}`;
+  }
+
+
+  pickFirst(...values) {
+    for (const value of values) {
+      if (value === null || value === undefined) continue;
+      if (typeof value === "string" && value.trim() === "") continue;
+      if (typeof value === "number" && !Number.isFinite(value)) continue;
+      return value;
+    }
+    return null;
+  }
+
+  getExternalIntel(analysis = {}) {
+    const token = analysis?.token || {};
+    const candidate = analysis?.candidate || {};
+    return (
+      analysis?.externalIntel ||
+      candidate?.externalIntel ||
+      token?.externalIntel ||
+      analysis?.devsNightmare ||
+      candidate?.devsNightmare ||
+      token?.devsNightmare ||
+      analysis?.devsnightmare ||
+      candidate?.devsnightmare ||
+      token?.devsnightmare ||
+      {}
+    );
+  }
+
+  displayWalletEntity(row = {}) {
+    const label = this.pickFirst(
+      row?.label,
+      row?.walletLabel,
+      row?.ownerLabel,
+      row?.entityLabel,
+      row?.entityName,
+      row?.name,
+      row?.username,
+      row?.solDomain,
+      row?.domain,
+      row?.twitter,
+      row?.tag
+    );
+
+    if (label) return escapeHtml(String(label));
+    return `<code>${escapeHtml(shortWallet(row?.owner || row?.wallet || row?.address || "-"))}</code>`;
+  }
+
+  normalizeFundingLabel(raw = "") {
+    const value = String(raw || "").trim();
+    if (!value) return "unknown";
+    const lower = value.toLowerCase().replace(/[_.-]+/g, " ");
+
+    if (lower.includes("binance")) return "Binance";
+    if (lower.includes("coinbase")) return "Coinbase";
+    if (lower.includes("mexc")) return "MEXC";
+    if (lower.includes("kucoin")) return "KuCoin";
+    if (lower.includes("change now") || lower.includes("changenow")) return "ChangeNOW";
+    if (lower.includes("okx")) return "OKX";
+    if (lower.includes("bybit")) return "Bybit";
+    if (lower.includes("gate")) return "Gate";
+    if (lower.includes("bitget")) return "Bitget";
+    if (lower.includes("kraken")) return "Kraken";
+    if (lower.includes("htx") || lower.includes("huobi")) return "HTX/Huobi";
+    if (lower.includes("crypto com") || lower.includes("cryptocom")) return "Crypto.com";
+
+    return value.length > 28 ? `${value.slice(0, 25)}…` : value;
+  }
+
+  isCexFundingLabel(label = "") {
+    return /^(Binance|Coinbase|MEXC|KuCoin|ChangeNOW|OKX|Bybit|Gate|Bitget|Kraken|HTX\/Huobi|Crypto\.com)$/i.test(String(label || ""));
+  }
+
+  buildFundingBreakdown(analysis = {}) {
+    const rows = Array.isArray(analysis?.rows) ? analysis.rows : [];
+    const totalSupply = safeNum(analysis?.totalSupply, 0);
+    const external = this.getExternalIntel(analysis);
+    const externalFunding = external?.cexFundingMap || external?.fundingMap || external?.cexMap || null;
+
+    if (externalFunding && typeof externalFunding === "object") {
+      const entries = Array.isArray(externalFunding)
+        ? externalFunding.map((row) => ({
+            label: this.normalizeFundingLabel(row?.label || row?.source || row?.name),
+            pct: safeNum(row?.pct ?? row?.supplyPct ?? row?.percent, 0),
+            wallets: safeNum(row?.wallets ?? row?.count, 0)
+          }))
+        : Object.entries(externalFunding).map(([source, value]) => ({
+            label: this.normalizeFundingLabel(source),
+            pct: typeof value === "object" ? safeNum(value?.pct ?? value?.supplyPct ?? value?.percent, 0) : safeNum(value, 0),
+            wallets: typeof value === "object" ? safeNum(value?.wallets ?? value?.count, 0) : 0
+          }));
+
+      const cleaned = entries.filter((row) => row.label && row.label !== "unknown" && safeNum(row.pct, 0) > 0);
+      const cexPct = cleaned.filter((row) => this.isCexFundingLabel(row.label)).reduce((acc, row) => acc + safeNum(row.pct, 0), 0);
+      return {
+        source: "external",
+        known: cleaned.length > 0,
+        cexPct,
+        entries: cleaned.sort((a, b) => safeNum(b.pct, 0) - safeNum(a.pct, 0)).slice(0, 8)
+      };
+    }
+
+    const map = new Map();
+    for (const row of rows) {
+      const label = this.normalizeFundingLabel(row?.fundingSource || row?.firstFundingSource || row?.sourceFunding || "");
+      if (!label || label === "unknown") continue;
+      const prev = map.get(label) || { label, wallets: 0, amount: 0, pct: 0 };
+      prev.wallets += 1;
+      prev.amount += safeNum(row?.currentTokenAmount, 0);
+      prev.pct += safeNum(row?.supplyPct, totalSupply > 0 ? (safeNum(row?.currentTokenAmount, 0) / totalSupply) * 100 : 0);
+      map.set(label, prev);
+    }
+
+    const entries = [...map.values()].sort((a, b) => safeNum(b.pct, 0) - safeNum(a.pct, 0)).slice(0, 8);
+    const cexPct = entries.filter((row) => this.isCexFundingLabel(row.label)).reduce((acc, row) => acc + safeNum(row.pct, 0), 0);
+    return {
+      source: "wallet_records",
+      known: entries.length > 0,
+      cexPct,
+      entries
+    };
+  }
+
+  buildHolderConcentrationStats(analysis = {}) {
+    const rows = Array.isArray(analysis?.rows) ? [...analysis.rows] : [];
+    const token = analysis?.token || {};
+    const external = this.getExternalIntel(analysis);
+    const sorted = rows.sort((a, b) => safeNum(b?.currentTokenAmount, 0) - safeNum(a?.currentTokenAmount, 0));
+    const totalSupply = safeNum(analysis?.totalSupply, 0);
+
+    const pctForRows = (list) => list.reduce((acc, row) => acc + safeNum(row?.supplyPct, totalSupply > 0 ? (safeNum(row?.currentTokenAmount, 0) / totalSupply) * 100 : 0), 0);
+    const top10Pct = this.pickFirst(
+      external?.top10Pct,
+      external?.holders?.top10Pct,
+      external?.topHolders?.top10Pct,
+      sorted.length ? pctForRows(sorted.slice(0, 10)) : null
+    );
+    const top70Pct = this.pickFirst(
+      external?.top70Pct,
+      external?.holders?.top70Pct,
+      external?.topHolders?.top70Pct,
+      sorted.length >= 70 ? pctForRows(sorted.slice(0, 70)) : null
+    );
+    const topTrackedPct = sorted.length ? pctForRows(sorted) : 0;
+    const holderCount = safeNum(this.pickFirst(
+      external?.holderCount,
+      external?.holders?.count,
+      token?.holderCount,
+      token?.holders,
+      token?.holdersCount
+    ), 0);
+
+    const marketCap = safeNum(this.pickFirst(token?.marketCap, token?.fdv, token?.mcap, external?.marketCap, external?.fdv), 0);
+    const avgBagUsd = safeNum(this.pickFirst(
+      external?.avgBagUsd,
+      external?.averageBagUsd,
+      external?.holders?.avgBagUsd,
+      holderCount > 0 && marketCap > 0 ? marketCap / holderCount : null
+    ), 0);
+
+    return {
+      trackedCount: sorted.length,
+      top10Pct: safeNum(top10Pct, 0),
+      top70Pct: top70Pct === null ? null : safeNum(top70Pct, 0),
+      topTrackedPct,
+      holderCount,
+      avgBagUsd,
+      topRows: sorted.slice(0, 7)
+    };
+  }
+
+  buildHolderFundingSummaryLines(analysis = {}, options = {}) {
+    const compact = options?.compact === true;
+    const token = analysis?.token || {};
+    const dev = analysis?.dev || {};
+    const groups = analysis?.groups || {};
+    const meta = groups?.meta || {};
+    const risk = analysis?.risk || {};
+    const walletCluster = analysis?.walletCluster || {};
+    const crossProjects = analysis?.crossProjects || {};
+    const external = this.getExternalIntel(analysis);
+    const funding = this.buildFundingBreakdown(analysis);
+    const holderStats = this.buildHolderConcentrationStats(analysis);
+
+    const snipers1m = safeNum(groups?.snipers1m?.count, 0);
+    const snipers5m = safeNum(groups?.snipers5m?.count, 0);
+    const snipers15m = safeNum(groups?.snipers15m?.count, 0);
+    const snipers15mPct = safeNum(groups?.snipers15m?.pct, 0);
+    const hasSniperRisk = snipers15m >= 3 || snipers15mPct >= 5;
+    const sniperText = hasSniperRisk
+      ? `⚠️ <b>Снайперы:</b> ${snipers1m}/${snipers5m}/${snipers15m} wallets | первые 15м держат <b>${fmtPct(snipers15mPct, 2)}</b>`
+      : `✅ <b>Снайперы:</b> major sniper pressure не видно | 1м/5м/15м: ${snipers1m}/${snipers5m}/${snipers15m}`;
+
+    const teamPct = safeNum(this.pickFirst(external?.teamHoldPct, external?.teamPct, external?.holders?.teamPct, groups?.team?.pct), 0);
+    const teamEmoji = teamPct >= 20 ? "🔴" : teamPct >= 10 ? "🟡" : "✅";
+    const devHoldPct = safeNum(groups?.dev?.pct, 0);
+
+    const devName = this.pickFirst(external?.devName, external?.developerName, external?.dev?.name, dev?.name, dev?.label);
+    const devDisplay = devName
+      ? `<b>${escapeHtml(devName)}</b>${dev?.devWallet ? ` / <code>${escapeHtml(shortWallet(dev.devWallet))}</code>` : ""}`
+      : (dev?.devWallet ? `<code>${escapeHtml(shortWallet(dev.devWallet))}</code>` : "не определён");
+
+    const localClusterRiskScore = Math.max(
+      safeNum(risk?.score, 0),
+      safeNum(walletCluster?.clusterRiskScore, 0),
+      safeNum(crossProjects?.riskScore, 0)
+    );
+    const externalMajorClusters = this.pickFirst(
+      external?.bubblemap?.majorClusters,
+      external?.bubbleMap?.majorClusters,
+      external?.majorClusters
+    );
+    const noMajorClusters = externalMajorClusters === false || (externalMajorClusters === null && localClusterRiskScore < 35 && safeNum(crossProjects?.clusteredProjectCount, 0) === 0);
+    const clusterLine = noMajorClusters
+      ? `✅ <b>Bubble/cluster:</b> крупных кластеров по локальной эвристике не видно${externalMajorClusters === null ? " | Bubblemap external: not connected" : ""}`
+      : `${localClusterRiskScore >= 65 ? "🔴" : "🟡"} <b>Bubble/cluster:</b> risk ${escapeHtml(risk?.level || walletCluster?.clusterRisk || "WATCH")} / ${localClusterRiskScore} | cross-project clusters ${safeNum(crossProjects?.clusteredProjectCount, 0)}`;
+
+    const cexPrefix = funding.known
+      ? `${funding.cexPct >= 50 ? "🟡" : funding.cexPct >= 20 ? "👀" : "✅"} <b>CEX funding map:</b> ${fmtPct(funding.cexPct, 2)} CEX-linked`
+      : `⚪ <b>CEX funding map:</b> funding labels не найдены`;
+    const fundingLine = funding.known
+      ? `${cexPrefix} — ${funding.entries.map((row) => `${escapeHtml(row.label)} ${fmtPct(row.pct, 1)}`).join(" | ")}`
+      : `${cexPrefix} — нужен devsnightmare/bubblemap/CEX индексер или поле fundingSource`;
+
+    const top70Text = holderStats.top70Pct === null
+      ? `n/a <i>(RPC видит top ${holderStats.trackedCount}, нужен holder-indexer для top 70)</i>`
+      : fmtPct(holderStats.top70Pct, 2);
+    const avgBagText = holderStats.avgBagUsd > 0 ? fmtUsd(holderStats.avgBagUsd, 0) : "n/a";
+    const holderCountText = holderStats.holderCount > 0 ? `${holderStats.holderCount}` : "n/a";
+
+    const topHoldersExternal = Array.isArray(external?.topHolders) ? external.topHolders : Array.isArray(external?.holders?.topHolders) ? external.holders.topHolders : null;
+    const topHolderLines = (topHoldersExternal && topHoldersExternal.length
+      ? topHoldersExternal.slice(0, compact ? 5 : 7).map((row, idx) => {
+          const name = this.pickFirst(row?.name, row?.label, row?.ownerLabel, row?.wallet, row?.address, `#${idx + 1}`);
+          const pct = safeNum(row?.pct ?? row?.supplyPct ?? row?.percent, 0);
+          return `• #${idx + 1} ${escapeHtml(String(name))}${pct > 0 ? ` — <b>${fmtPct(pct, 2)}</b>` : ""}`;
+        })
+      : holderStats.topRows.slice(0, compact ? 5 : 7).map((row, idx) => {
+          const bagUsd = safeNum(row?.currentUsd, 0) || safeNum(row?.currentTokenAmount, 0) * safeNum(token?.price, 0);
+          return `• #${idx + 1} ${this.displayWalletEntity(row)} — <b>${fmtPct(row?.supplyPct, 2)}</b>${bagUsd > 0 ? ` | bag ${fmtUsd(bagUsd, 0)}` : ""}`;
+        }));
+
+    const lines = [
+      `<b>🧷 Holder / Funding Quick Read</b>`,
+      sniperText,
+      `${teamEmoji} <b>Team/insider:</b> держат <b>${fmtPct(teamPct, 2)}</b> | wallets ${safeNum(groups?.team?.count, 0)} | dev hold ${fmtPct(devHoldPct, 2)}`,
+      `👨‍💻 <b>Dev:</b> ${devDisplay}`,
+      clusterLine,
+      fundingLine,
+      `👑 <b>Top holders:</b> top 10 <b>${fmtPct(holderStats.top10Pct, 2)}</b> | top 70 ${top70Text} | tracked top ${holderStats.trackedCount}: ${fmtPct(holderStats.topTrackedPct, 2)}`,
+      `👥 <b>Holder base:</b> holders ${holderCountText} | avg bag ${avgBagText}`,
+      `🔍 <b>Same-source hints:</b> same 15m ${safeNum(meta?.sameBuyWindowCount, 0)} wallets / ${fmtPct(meta?.sameBuyWindowSupplyPct, 2)} | same funding ${safeNum(meta?.sameFundingCount, 0)} wallets / ${fmtPct(meta?.sameFundingSupplyPct, 2)}`,
+      `<b>🔝 Top holder names/wallets</b>`,
+      ...(topHolderLines.length ? topHolderLines : [`• нет top-holder rows для отображения`]),
+      `⚠️ <b>NFA:</b> это risk/intel блок, не команда покупать или продавать.`
+    ];
+
+    return compact ? lines.slice(0, 11) : lines;
+  }
+
+  buildCompactReport(analysis = {}) {
+    return [
+      `🕵️ <b>TEAM / HOLDER / FUNDING INTEL — V14</b>`,
+      `<b>${escapeHtml(analysis?.token?.name || analysis?.token?.symbol || "UNKNOWN")}</b>`,
+      `<code>${escapeHtml(analysis?.mint || analysis?.token?.ca || "")}</code>`,
+      `Risk — ${safeNum(analysis?.risk?.score, 0) >= 70 ? "🚩" : safeNum(analysis?.risk?.score, 0) >= 45 ? "🟡" : "✅"} <b>${escapeHtml(analysis?.risk?.level || "LOW")}</b> / ${safeNum(analysis?.risk?.score, 0)}`,
+      ``,
+      ...this.buildHolderFundingSummaryLines(analysis, { compact: true })
+    ].join("\n");
   }
 
   buildReport(analysis = {}) {
@@ -946,6 +1217,8 @@ export default class TeamWalletIntelligence {
       `<b>${escapeHtml(token?.name || token?.symbol || "UNKNOWN")}</b>`,
       `<code>${escapeHtml(analysis?.mint || token?.ca || "")}</code>`,
       `Risk — ${safeNum(risk?.score, 0) >= 70 ? "🚩" : safeNum(risk?.score, 0) >= 45 ? "🟡" : "✅"} <b>${escapeHtml(risk?.level || "LOW")}</b> / ${safeNum(risk?.score, 0)}`,
+      ``,
+      ...this.buildHolderFundingSummaryLines(analysis, { compact: false }),
       ``,
       `<b>👨‍💻 Dev wallet</b>`,
       `Dev — ${dev?.devWallet ? `<code>${escapeHtml(dev.devWallet)}</code>` : "не определён"}`,
