@@ -211,6 +211,10 @@ export default class TeamWalletIntelligence {
     this.whaleSupplyPct = Number(options.whaleSupplyPct || process.env.WHALE_SUPPLY_PCT || 1);
     this.whaleBuySupplyPct = Number(options.whaleBuySupplyPct || process.env.WHALE_BUY_SUPPLY_PCT || 0.5);
     this.whaleBuyUsd = Number(options.whaleBuyUsd || process.env.WHALE_BUY_USD || 500);
+
+    // Optional external intel adapter. Works with Devs Nightmare/private APIs when configured.
+    // If no API is configured, local RPC/holder analysis keeps working as before.
+    this.externalIntelService = options.externalIntelService || options.devsNightmareService || null;
   }
 
   async initialize() {
@@ -768,7 +772,7 @@ export default class TeamWalletIntelligence {
     return out;
   }
 
-  buildRisk(groups = {}, devHistory = {}, walletCluster = {}, crossProjects = {}, whaleBuys = {}) {
+  buildRisk(groups = {}, devHistory = {}, walletCluster = {}, crossProjects = {}, whaleBuys = {}, externalIntel = {}) {
     let riskScore = 0;
     const reasons = [];
 
@@ -822,6 +826,47 @@ export default class TeamWalletIntelligence {
       reasons.push("whale-покупатели всё ещё удерживают позиции");
     }
 
+    const extSnipers = externalIntel?.snipers || externalIntel?.sniper || {};
+    const extInsiders = externalIntel?.insiders || externalIntel?.insider || {};
+    const extSniperPct = safeNum(this.pickFirst(extSnipers?.pct, extSnipers?.percent, externalIntel?.sniperPct), 0);
+    const extInsiderPct = safeNum(this.pickFirst(extInsiders?.pct, extInsiders?.percent, externalIntel?.insiderPct, externalIntel?.insidersPct), 0);
+    const extTeamPct = safeNum(this.pickFirst(externalIntel?.teamHoldPct, externalIntel?.teamPct, externalIntel?.holders?.teamPct), 0);
+    const extTop10Pct = safeNum(this.pickFirst(externalIntel?.top10Pct, externalIntel?.holders?.top10Pct), 0);
+    const extTop70Pct = safeNum(this.pickFirst(externalIntel?.top70Pct, externalIntel?.holders?.top70Pct), 0);
+    const extMajorClusters = this.pickFirst(externalIntel?.bubblemap?.majorClusters, externalIntel?.bubbleMap?.majorClusters, externalIntel?.majorClusters);
+
+    if (extSniperPct >= 8 || extSnipers?.hasSnipers === true) {
+      riskScore += extSniperPct >= 15 ? 16 : 8;
+      reasons.push("Devs Nightmare: есть заметный sniper-риск");
+    }
+    if (extInsiderPct >= 8 || extInsiders?.hasInsiders === true) {
+      riskScore += extInsiderPct >= 15 ? 18 : 9;
+      reasons.push("Devs Nightmare: есть insider-риск");
+    }
+    if (extTeamPct >= 20) {
+      riskScore += 16;
+      reasons.push("Devs Nightmare: высокая доля команды/team hold");
+    } else if (extTeamPct >= 12) {
+      riskScore += 8;
+      reasons.push("Devs Nightmare: умеренная доля команды/team hold");
+    }
+    if (extTop10Pct >= 35) {
+      riskScore += 10;
+      reasons.push("Devs Nightmare: высокая концентрация top 10 holders");
+    }
+    if (extTop70Pct >= 75) {
+      riskScore += 8;
+      reasons.push("Devs Nightmare: высокая концентрация top 70 holders");
+    }
+    if (extMajorClusters === true) {
+      riskScore += 12;
+      reasons.push("Devs Nightmare/Bubblemap: обнаружены крупные кластеры");
+    }
+    if (extSnipers?.hasSnipers === false && extInsiders?.hasInsiders === false && extTeamPct > 0 && extTeamPct < 15 && extMajorClusters === false) {
+      riskScore -= 8;
+      reasons.push("Devs Nightmare: снайперы/инсайдеры не обнаружены, крупных кластеров нет");
+    }
+
     riskScore = clamp(Math.round(riskScore), 0, 100);
     return {
       score: riskScore,
@@ -860,30 +905,70 @@ export default class TeamWalletIntelligence {
     }
   }
 
+  mergeExternalIntel(localIntel = {}, fetchedIntel = {}) {
+    const out = { ...(localIntel || {}) };
+    for (const [key, value] of Object.entries(fetchedIntel || {})) {
+      if (value === null || value === undefined) continue;
+      if (Array.isArray(value)) {
+        if (value.length) out[key] = value;
+        continue;
+      }
+      if (typeof value === "object") {
+        out[key] = this.mergeExternalIntel(out[key] && typeof out[key] === "object" ? out[key] : {}, value);
+        continue;
+      }
+      if (value !== "") out[key] = value;
+    }
+    return out;
+  }
+
+  async fetchExternalIntel(mint, token = {}, candidate = {}) {
+    const localIntel = this.getExternalIntel({ token, candidate }) || {};
+    if (!this.externalIntelService?.fetchTokenIntel) return localIntel;
+
+    try {
+      const fetched = await this.externalIntelService.fetchTokenIntel(mint, { token, candidate });
+      if (!fetched) return localIntel;
+      return this.mergeExternalIntel(localIntel, fetched);
+    } catch (error) {
+      this.logger.log?.("external intel fetch failed:", error?.message || String(error));
+      return this.mergeExternalIntel(localIntel, {
+        source: "devsnightmare",
+        status: "unavailable",
+        unavailableReason: String(error?.message || error).slice(0, 180)
+      });
+    }
+  }
+
   async analyze({ token = {}, candidate = {} } = {}) {
     await this.initialize();
     const mint = asText(token?.ca || candidate?.token?.ca);
     if (!mint) throw new Error("TeamWalletIntelligence requires token CA");
 
+    const externalIntel = await this.fetchExternalIntel(mint, token, candidate);
+    const tokenWithIntel = { ...token, externalIntel };
+    const candidateWithIntel = { ...candidate, externalIntel, token: { ...(candidate?.token || {}), ...token, externalIntel } };
+
     const totalSupply = await this.getTokenSupply(mint);
     const dev = await this.detectDevWallet(mint);
-    const launchAt = safeNum(token?.pairCreatedAt, 0) || safeNum(dev?.createdAt, 0) || Date.now();
+    const launchAt = safeNum(tokenWithIntel?.pairCreatedAt, 0) || safeNum(dev?.createdAt, 0) || Date.now();
     const devHistory = dev?.devWallet ? await this.fetchPumpFunDevHistory(dev.devWallet) : null;
-    const records = await this.ensureHolderRecords(token, candidate);
+    const records = await this.ensureHolderRecords(tokenWithIntel, candidateWithIntel);
     const rows = this.normalizeRowsWithSupply(records, totalSupply).slice(0, this.maxTrackedWallets);
     const groups = this.deriveGroups(rows, totalSupply, launchAt, dev.devWallet);
     const crossProjects = await this.detectCrossProjectWalletClusters(rows, mint, groups);
-    const whaleBuys = this.detectWhaleBuys(rows, totalSupply, { ...(candidate?.token || {}), ...token });
+    const whaleBuys = this.detectWhaleBuys(rows, totalSupply, { ...(candidateWithIntel?.token || {}), ...tokenWithIntel });
     const deltas = this.buildDeltas(mint, groups);
-    const walletCluster = candidate?.holderAccumulation?.walletCluster || this.holderAccumulationEngine?.getDashboardSummary?.()?.walletCluster || null;
-    const risk = this.buildRisk(groups, devHistory || {}, walletCluster || {}, crossProjects || {}, whaleBuys || {});
+    const walletCluster = candidateWithIntel?.holderAccumulation?.walletCluster || this.holderAccumulationEngine?.getDashboardSummary?.()?.walletCluster || null;
+    const risk = this.buildRisk(groups, devHistory || {}, walletCluster || {}, crossProjects || {}, whaleBuys || {}, externalIntel || {});
 
     const snapshot = {
       mint,
-      tokenName: token?.name || token?.symbol || candidate?.token?.name || "UNKNOWN",
+      tokenName: tokenWithIntel?.name || tokenWithIntel?.symbol || candidateWithIntel?.token?.name || "UNKNOWN",
       totalSupply,
       dev,
       groups,
+      externalIntel,
       risk,
       walletCluster,
       crossProjects,
@@ -894,8 +979,10 @@ export default class TeamWalletIntelligence {
 
     return {
       mint,
-      token,
-      candidate,
+      token: tokenWithIntel,
+      candidate: candidateWithIntel,
+      externalIntel,
+      devsNightmare: externalIntel?.source === "devsnightmare" ? externalIntel : null,
       totalSupply,
       launchAt,
       dev,
@@ -1108,10 +1195,31 @@ export default class TeamWalletIntelligence {
     const snipers5m = safeNum(groups?.snipers5m?.count, 0);
     const snipers15m = safeNum(groups?.snipers15m?.count, 0);
     const snipers15mPct = safeNum(groups?.snipers15m?.pct, 0);
-    const hasSniperRisk = snipers15m >= 3 || snipers15mPct >= 5;
-    const sniperText = hasSniperRisk
-      ? `⚠️ <b>Снайперы:</b> ${snipers1m}/${snipers5m}/${snipers15m} кошельков | первые 15м держат <b>${fmtPct(snipers15mPct, 2)}</b>`
-      : `✅ <b>Снайперы:</b> сильного давления снайперов не видно | 1м/5м/15м: ${snipers1m}/${snipers5m}/${snipers15m}`;
+    const extSnipers = external?.snipers || external?.sniper || {};
+    const extInsiders = external?.insiders || external?.insider || {};
+    const extSnipersKnown = this.pickFirst(extSnipers?.hasSnipers, extSnipers?.pct, extSnipers?.count, external?.sniperPct) !== null;
+    const extInsidersKnown = this.pickFirst(extInsiders?.hasInsiders, extInsiders?.pct, extInsiders?.count, external?.insiderPct, external?.insidersPct) !== null;
+    const extSniperPct = safeNum(this.pickFirst(extSnipers?.pct, extSnipers?.percent, external?.sniperPct), 0);
+    const extSniperCount = safeNum(this.pickFirst(extSnipers?.count, extSnipers?.wallets, external?.sniperCount), 0);
+    const extInsiderPct = safeNum(this.pickFirst(extInsiders?.pct, extInsiders?.percent, external?.insiderPct, external?.insidersPct), 0);
+    const extInsiderCount = safeNum(this.pickFirst(extInsiders?.count, extInsiders?.wallets, external?.insiderCount), 0);
+    const hasSniperRisk = extSnipersKnown
+      ? extSnipers?.hasSnipers === true || extSniperPct >= 5 || extSniperCount >= 3
+      : snipers15m >= 3 || snipers15mPct >= 5;
+    const sniperText = extSnipersKnown
+      ? (hasSniperRisk
+          ? `⚠️ <b>Снайперы:</b> Devs Nightmare видит риск${extSniperPct > 0 ? ` | держат <b>${fmtPct(extSniperPct, 2)}</b>` : ""}${extSniperCount > 0 ? ` | кошельков ${extSniperCount}` : ""}`
+          : `✅ <b>Снайперы:</b> Devs Nightmare не видит снайперов | локально 1м/5м/15м: ${snipers1m}/${snipers5m}/${snipers15m}`)
+      : (hasSniperRisk
+          ? `⚠️ <b>Снайперы:</b> ${snipers1m}/${snipers5m}/${snipers15m} кошельков | первые 15м держат <b>${fmtPct(snipers15mPct, 2)}</b>`
+          : `✅ <b>Снайперы:</b> сильного давления снайперов не видно | 1м/5м/15м: ${snipers1m}/${snipers5m}/${snipers15m}`);
+
+    const hasInsiderRisk = extInsidersKnown && (extInsiders?.hasInsiders === true || extInsiderPct >= 5 || extInsiderCount >= 3);
+    const insiderText = extInsidersKnown
+      ? (hasInsiderRisk
+          ? `⚠️ <b>Инсайдеры:</b> Devs Nightmare видит риск${extInsiderPct > 0 ? ` | держат <b>${fmtPct(extInsiderPct, 2)}</b>` : ""}${extInsiderCount > 0 ? ` | кошельков ${extInsiderCount}` : ""}`
+          : `✅ <b>Инсайдеры:</b> Devs Nightmare не видит insider-группу`)
+      : `⚪ <b>Инсайдеры:</b> внешний Devs Nightmare источник не подключён`;
 
     const teamPct = safeNum(this.pickFirst(external?.teamHoldPct, external?.teamPct, external?.holders?.teamPct, groups?.team?.pct), 0);
     const teamEmoji = teamPct >= 20 ? "🔴" : teamPct >= 10 ? "🟡" : "✅";
@@ -1134,8 +1242,8 @@ export default class TeamWalletIntelligence {
     );
     const noMajorClusters = externalMajorClusters === false || (externalMajorClusters === null && localClusterRiskScore < 35 && safeNum(crossProjects?.clusteredProjectCount, 0) === 0);
     const clusterLine = noMajorClusters
-      ? `✅ <b>Bubblemap / кластеры:</b> крупных кластеров по локальной эвристике не видно${externalMajorClusters === null ? " | внешний Bubblemap не подключён" : ""}`
-      : `${localClusterRiskScore >= 65 ? "🔴" : "🟡"} <b>Bubblemap / кластеры:</b> риск ${escapeHtml(risk?.level || walletCluster?.clusterRisk || "WATCH")} / ${localClusterRiskScore} | кластеры в других проектах ${safeNum(crossProjects?.clusteredProjectCount, 0)}`;
+      ? `✅ <b>Bubblemap / кластеры:</b> крупных кластеров не видно${externalMajorClusters === false ? " по Devs Nightmare/Bubblemap" : " по локальной эвристике"}${externalMajorClusters === null ? " | внешний Bubblemap не подключён" : ""}`
+      : `${localClusterRiskScore >= 65 || externalMajorClusters === true ? "🔴" : "🟡"} <b>Bubblemap / кластеры:</b> риск ${escapeHtml(risk?.level || walletCluster?.clusterRisk || "WATCH")} / ${localClusterRiskScore} | кластеры в других проектах ${safeNum(crossProjects?.clusteredProjectCount, 0)}`;
 
     const cexPrefix = funding.known
       ? `${funding.cexPct >= 50 ? "🟡" : funding.cexPct >= 20 ? "👀" : "✅"} <b>CEX funding map:</b> ${fmtPct(funding.cexPct, 2)} связано с CEX`
@@ -1162,9 +1270,17 @@ export default class TeamWalletIntelligence {
           return `• #${idx + 1} ${this.displayWalletEntity(row)} — <b>${fmtPct(row?.supplyPct, 2)}</b>${bagUsd > 0 ? ` | bag ${fmtUsd(bagUsd, 0)}` : ""}`;
         }));
 
+    const sourceLine = external?.source === "devsnightmare"
+      ? (external?.status === "unavailable"
+          ? `⚪ <b>Devs Nightmare:</b> источник настроен, но сейчас недоступен${external?.unavailableReason ? ` — ${escapeHtml(external.unavailableReason)}` : ""}`
+          : `🧪 <b>Devs Nightmare:</b> данные подключены и добавлены в отчёт`)
+      : `⚪ <b>Devs Nightmare:</b> API не настроен — используется локальная эвристика`;
+
     const lines = [
       `<b>🧷 Холдеры / Funding — быстрый вывод</b>`,
+      sourceLine,
       sniperText,
+      insiderText,
       `${teamEmoji} <b>Команда/инсайдеры:</b> держат <b>${fmtPct(teamPct, 2)}</b> | кошельков ${safeNum(groups?.team?.count, 0)} | dev держит ${fmtPct(devHoldPct, 2)}`,
       `👨‍💻 <b>Dev:</b> ${devDisplay}`,
       clusterLine,
@@ -1177,7 +1293,7 @@ export default class TeamWalletIntelligence {
       `⚠️ <b>NFA:</b> это блок риска/intel, а не команда покупать или продавать.`
     ];
 
-    return compact ? lines.slice(0, 11) : lines;
+    return compact ? lines.slice(0, 13) : lines;
   }
 
   buildCompactReport(analysis = {}) {

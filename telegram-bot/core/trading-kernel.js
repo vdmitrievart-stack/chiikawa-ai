@@ -46,6 +46,7 @@ import GMGNWalletService from "../gmgn/gmgn-wallet-service.js";
 import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
 import GMGNExecutionService from "../gmgn/gmgn-execution-service.js";
 import GMGNSmartWalletFeed from "./gmgn-smart-wallet-feed.js";
+import DevsNightmareService from "./devsnightmare-service.js";
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -211,12 +212,17 @@ export default class TradingKernel {
       logger: this.logger
     });
 
+    this.devsNightmareService = new DevsNightmareService({
+      logger: this.logger
+    });
+
     this.teamWalletIntelligence = new TeamWalletIntelligence({
       logger: this.logger,
       rpcUrl: process.env.SOLANA_RPC_URL,
       holderAccumulationEngine: this.holderAccumulationEngine,
       holderStore: this.holderAccumulationStore,
-      store: this.teamWalletStore
+      store: this.teamWalletStore,
+      externalIntelService: this.devsNightmareService
     });
 
     this.gmgnSmartWalletFeed = new GMGNSmartWalletFeed({
@@ -256,6 +262,7 @@ export default class TradingKernel {
 
   async initialize() {
     await this.gmgnOrderStore.load();
+    await this.devsNightmareService.initialize?.();
     await this.holderAccumulationEngine.initialize();
     await this.teamWalletIntelligence.initialize();
     await this.restoreIfAvailable();
