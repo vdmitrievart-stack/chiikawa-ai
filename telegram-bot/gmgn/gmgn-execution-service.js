@@ -378,8 +378,8 @@ export default class GMGNExecutionService {
     return this.orderStore.listOpenOrders();
   }
 
-  buildOrdersText(limit = 15) {
-    return this.orderStore.buildOrdersText(limit);
+  buildOrdersText(limit = 15, runtimeConfig = {}) {
+    return this.orderStore.buildOrdersText(limit, runtimeConfig);
   }
 
   buildExecutionSummaryText(runtimeConfig) {
@@ -387,6 +387,7 @@ export default class GMGNExecutionService {
     const mode = asText(this.defaultMode, "dry_run");
     const statusCounts = this.orderStore.countByStatus();
     const opCounts = this.orderStore.countByOperation();
+    const isRu = String(runtimeConfig?.language || "en").toLowerCase().startsWith("ru");
 
     const strategyLines = [
       "scalp",
@@ -401,7 +402,8 @@ export default class GMGNExecutionService {
       })
       .join("\n");
 
-    return `📦 <b>GMGN Execution</b>
+    if (!isRu) {
+      return `📦 <b>GMGN Execution</b>
 
 mode: ${mode}
 open orders: ${openOrders.length}
@@ -421,6 +423,29 @@ close: ${safeNum(opCounts.close)}
 partial: ${safeNum(opCounts.partial)}
 
 <b>Primary wallets</b>
+${strategyLines}`;
+    }
+
+    return `📦 <b>GMGN Execution</b>
+
+Режим: <b>${mode}</b>
+Открытые ордера: <b>${openOrders.length}</b>
+Default slippage: ${safeNum(this.defaultSlippagePct, 0)}%
+
+<b>Счётчики статусов</b>
+Созданы: ${safeNum(statusCounts.created)}
+Отправлены: ${safeNum(statusCounts.submitted)}
+Исполнены: ${safeNum(statusCounts.filled)}
+Частично исполнены: ${safeNum(statusCounts.partial)}
+Ошибки: ${safeNum(statusCounts.failed)}
+Отменены: ${safeNum(statusCounts.cancelled)}
+
+<b>Счётчики операций</b>
+Открытие: ${safeNum(opCounts.open)}
+Закрытие: ${safeNum(opCounts.close)}
+Частичная фиксация: ${safeNum(opCounts.partial)}
+
+<b>Основные кошельки</b>
 ${strategyLines}`;
   }
 }

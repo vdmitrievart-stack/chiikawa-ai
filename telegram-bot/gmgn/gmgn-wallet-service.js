@@ -197,41 +197,68 @@ export default class GMGNWalletService {
 
   buildWalletSummaryText(runtimeConfig) {
     const wallets = this.getWallets(runtimeConfig);
-    const lines = ["👛 <b>GMGN Wallet Mapping</b>", ""];
+    const isRu = String(runtimeConfig?.language || "en").toLowerCase().startsWith("ru");
+    const yesNo = (value) => isRu ? (value ? "да" : "нет") : (value ? "yes" : "no");
 
-    for (const [walletId, wallet] of Object.entries(wallets)) {
-      const readiness = this.isGMGNWalletReady(wallet);
-
-      lines.push(
-        `• <b>${walletId}</b>
+    if (!isRu) {
+      const lines = ["👛 <b>GMGN Wallet Mapping</b>", ""];
+      for (const [walletId, wallet] of Object.entries(wallets)) {
+        const readiness = this.isGMGNWalletReady(wallet);
+        lines.push(
+          `• <b>${walletId}</b>
 label: ${asText(wallet.label, "-")}
 role: ${asText(wallet.role, "-")}
-enabled: ${wallet.enabled ? "yes" : "no"}
+enabled: ${yesNo(wallet.enabled)}
 backend: ${asText(wallet.executionBackend || "gmgn", "gmgn")}
 mode: ${asText(wallet.executionMode || "live", "live")}
 gmgnWalletId: ${asText(wallet.gmgnWalletId, "-")}
 gmgnAccountId: ${asText(wallet.gmgnAccountId, "-")}
 publicKey: ${asText(wallet.publicKey || wallet.address, "-")}
 strategies: ${asText((wallet.allowedStrategies || []).join(", "), "-")}
-ready: ${readiness.ok ? "yes" : "no"} (${asText(readiness.reason, "unknown")})`
+ready: ${yesNo(readiness.ok)} (${asText(readiness.reason, "unknown")})`
+        );
+        lines.push("");
+      }
+      return lines.join("\n");
+    }
+
+    const lines = ["👛 <b>GMGN-кошельки</b>", ""];
+    for (const [walletId, wallet] of Object.entries(wallets)) {
+      const readiness = this.isGMGNWalletReady(wallet);
+      lines.push(
+        `• <b>${walletId}</b>
+Метка: ${asText(wallet.label, "-")}
+Роль: ${asText(wallet.role, "-")}
+Включён: ${yesNo(wallet.enabled)}
+Backend: ${asText(wallet.executionBackend || "gmgn", "gmgn")}
+Режим: ${asText(wallet.executionMode || "live", "live")}
+GMGN wallet ID: ${asText(wallet.gmgnWalletId, "-")}
+GMGN account ID: ${asText(wallet.gmgnAccountId, "-")}
+Public key: ${asText(wallet.publicKey || wallet.address, "-")}
+Стратегии: ${asText((wallet.allowedStrategies || []).join(", "), "-")}
+Готов к исполнению: <b>${yesNo(readiness.ok)}</b> (${asText(readiness.reason, "unknown")})`
       );
       lines.push("");
     }
-
     return lines.join("\n");
   }
 
   buildStrategyMappingText(runtimeConfig) {
     const routing = this.getStrategyRouting(runtimeConfig);
     const strategyKeys = ["scalp", "reversal", "runner", "copytrade"];
-    const lines = ["🧭 <b>Strategy → GMGN Wallets</b>", ""];
+    const isRu = String(runtimeConfig?.language || "en").toLowerCase().startsWith("ru");
+    const lines = [isRu ? "🧭 <b>Стратегия → GMGN-кошельки</b>" : "🧭 <b>Strategy → GMGN Wallets</b>", ""];
 
     for (const strategyKey of strategyKeys) {
       const mapped = Array.isArray(routing[strategyKey]) ? routing[strategyKey] : [];
       const primary = this.getPrimaryWalletId(runtimeConfig, strategyKey);
 
       lines.push(
-        `• <b>${strategyKey}</b>
+        isRu
+          ? `• <b>${strategyKey}</b>
+Подключены: ${mapped.length ? mapped.join(", ") : "-"}
+Основной: ${asText(primary, "-")}`
+          : `• <b>${strategyKey}</b>
 mapped: ${mapped.length ? mapped.join(", ") : "-"}
 primary: ${asText(primary, "-")}`
       );

@@ -461,20 +461,45 @@ export default class GMGNOrderStateStore {
     return counters;
   }
 
-  buildOrdersText(limit = 15) {
+  buildOrdersText(limit = 15, runtimeConfig = {}) {
     const rows = this.listRecentOrders(limit);
+    const isRu = String(runtimeConfig?.language || "en").toLowerCase().startsWith("ru");
 
     if (!rows.length) {
-      return `📦 <b>GMGN Orders</b>
+      return isRu
+        ? `📦 <b>GMGN-ордера</b>
+
+нет ордеров`
+        : `📦 <b>GMGN Orders</b>
 
 none`;
     }
 
-    const lines = ["📦 <b>GMGN Orders</b>", ""];
+    const lines = [isRu ? "📦 <b>GMGN-ордера</b>" : "📦 <b>GMGN Orders</b>", ""];
 
     for (const row of rows) {
       lines.push(
-        `• <b>${asText(row.clientOrderId || row.orderId, "-")}</b>
+        isRu
+          ? `• <b>${asText(row.clientOrderId || row.orderId, "-")}</b>
+Операция: ${asText(row.operation, "-")}
+Статус: <b>${asText(row.status, "-")}</b>
+Кошелёк: ${asText(row.walletId, "-")}
+GMGN wallet ID: ${asText(row.gmgnWalletId, "-")}
+Стратегия: ${asText(row.strategy, "-")}
+Сторона: ${asText(row.side, "-")}
+Токен: ${asText(row?.token?.name || row?.token?.ca, "-")}
+Размер SOL: ${safeNum(row?.size?.amountSol, 0)}
+Размер токена: ${safeNum(row?.size?.tokenAmount, 0)}
+Ожидаемый вход: ${safeNum(row?.pricing?.expectedEntryPrice, 0)}
+Фактический вход: ${safeNum(row?.pricing?.executedEntryPrice, 0)}
+Ожидаемый выход: ${safeNum(row?.pricing?.expectedExitPrice, 0)}
+Фактический выход: ${safeNum(row?.pricing?.executedExitPrice, 0)}
+PnL hint %: ${safeNum(row?.metrics?.pnlHintPct, 0)}
+PnL hint SOL: ${safeNum(row?.metrics?.pnlHintSol, 0)}
+Доля продажи: ${safeNum(row?.metrics?.soldFraction, 0)}
+Заметка: ${asText(row.note, "-")}
+Обновлено: ${asText(row.updatedAt, "-")}`
+          : `• <b>${asText(row.clientOrderId || row.orderId, "-")}</b>
 operation: ${asText(row.operation, "-")}
 status: ${asText(row.status, "-")}
 wallet: ${asText(row.walletId, "-")}
