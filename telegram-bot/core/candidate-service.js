@@ -266,6 +266,88 @@ export default class CandidateService {
     };
   }
 
+  getReportLanguage(options = {}) {
+    const raw = typeof options === "string" ? options : (options?.language || options?.lang || options?.locale || "en");
+    const lang = String(raw || "en").toLowerCase().trim();
+    return lang === "ru" || lang === "ru-ru" || lang === "russian" ? "ru" : "en";
+  }
+
+  isRussianReport(options = {}) {
+    return this.getReportLanguage(options) === "ru";
+  }
+
+  yesNo(value, lang = "en") {
+    return this.getReportLanguage(lang) === "ru" ? (value ? "да" : "нет") : (value ? "yes" : "no");
+  }
+
+  translateRiskLevel(value = "", lang = "en") {
+    if (this.getReportLanguage(lang) !== "ru") return String(value || "-");
+    const key = String(value || "").toUpperCase().trim();
+    const map = {
+      LOW: "низкий",
+      MEDIUM: "средний",
+      MID: "средний",
+      WATCH: "наблюдать",
+      HIGH: "высокий",
+      CRITICAL: "критический",
+      CLEAN: "чисто",
+      RISKY: "рискованно",
+      HARD_BLOCK: "жёсткий блок",
+      SOFT_BLOCK: "мягкий блок"
+    };
+    return map[key] || String(value || "-");
+  }
+
+  translateTradingMode(value = "balanced", lang = "en") {
+    const mode = this.normalizeTradingMode(value);
+    if (this.getReportLanguage(lang) !== "ru") return mode;
+    if (mode === "aggressive") return "агрессивный";
+    if (mode === "sniper") return "строгий / sniper";
+    return "сбалансированный";
+  }
+
+  translateDiscoveryBucket(value = "", lang = "en") {
+    const raw = String(value || "-");
+    if (this.getReportLanguage(lang) !== "ru") return raw;
+    const map = {
+      fresh: "свежие пары",
+      packaging: "упаковка / накопление",
+      migration: "миграция",
+      momentum: "импульс",
+      forgotten: "забытые / revival",
+      smart_wallets: "smart-wallets",
+      telegram_signals: "Telegram-сигналы"
+    };
+    return map[raw] || raw;
+  }
+
+  translateStrategyKey(value = "", lang = "en") {
+    const key = String(value || "").trim();
+    if (this.getReportLanguage(lang) !== "ru") return key;
+    const map = {
+      scalp: "Scalp / быстрый вход",
+      reversal: "Reversal / разворот",
+      runner: "Runner / тренд",
+      copytrade: "Copytrade",
+      migration_survivor: "Migration survivor",
+      MIGRATION_ACCUMULATION: "Migration accumulation",
+      MIGRATION_SURVIVOR: "Migration survivor",
+      REVERSAL: "Reversal / разворот",
+      WATCH: "наблюдение"
+    };
+    return map[key] || map[key.toLowerCase()] || key;
+  }
+
+  translatePlanList(plans = [], lang = "en") {
+    const keys = (plans || []).map((p) => p?.strategyKey).filter(Boolean);
+    if (!keys.length) return this.getReportLanguage(lang) === "ru" ? "нет активного плана" : "none";
+    return keys.map((key) => this.translateStrategyKey(key, lang)).join(", ");
+  }
+
+  fmtMetricPct(value, digits = 2) {
+    return `${safeNum(value, 0).toFixed(digits)}%`;
+  }
+
   applyTradingModeToScore(score, antiRug = {}, modeInput = "balanced") {
     const cfg = this.getTradingModeConfig(modeInput);
     let nextScore = safeNum(score, 0) + safeNum(cfg.scoreOffset, 0);
@@ -2121,15 +2203,28 @@ async fetchCandidatesFromSmartWalletFeed() {
     return String(preferred.strategyKey).toUpperCase();
   }
 
-  buildTopSignalHeader(candidate = {}, plans = []) {
+  buildTopSignalHeader(candidate = {}, plans = [], options = {}) {
+    const lang = this.getReportLanguage(options);
     const anti = this.getAntiRugBadge(candidate);
     const mainPlan = this.getMainPlanLabel(plans, candidate);
-    const planLine = (plans || []).map((p) => p.strategyKey).filter(Boolean).join(", ") || "none";
-    return `${anti.emoji} <b>Anti-rug:</b> <b>${escapeHtml(anti.verdict)}</b> / ${safeNum(anti.riskScore, 0)}
+    const planLine = this.translatePlanList(plans, lang);
+    const clusterRisk = candidate?.holderAccumulation?.walletCluster?.clusterRisk || "-";
+    const clusterScore = safeNum(candidate?.holderAccumulation?.walletCluster?.clusterRiskScore, 0);
+    const youngSupply = safeNum(candidate?.holderAccumulation?.walletCluster?.youngSupplyPct, 0).toFixed(1);
+
+    if (lang !== "ru") {
+      return `${anti.emoji} <b>Anti-rug:</b> <b>${escapeHtml(anti.verdict)}</b> / ${safeNum(anti.riskScore, 0)}
 🎯 <b>Main plan:</b> <b>${escapeHtml(mainPlan)}</b>
 📌 <b>Plans:</b> ${escapeHtml(planLine)}
-👛 <b>Wallet cluster:</b> ${escapeHtml(candidate?.holderAccumulation?.walletCluster?.clusterRisk || "-")} / ${safeNum(candidate?.holderAccumulation?.walletCluster?.clusterRiskScore, 0)} | young supply ${safeNum(candidate?.holderAccumulation?.walletCluster?.youngSupplyPct, 0).toFixed(1)}%
+👛 <b>Wallet cluster:</b> ${escapeHtml(clusterRisk)} / ${clusterScore} | young supply ${youngSupply}%
 ↩️ <b>Reversal score:</b> ${safeNum(candidate?.reversal?.score, 0)} | 🧬 <b>Migration accumulation:</b> ${safeNum(candidate?.migrationAccumulation?.score, 0)} | 🏃 <b>Runner-like:</b> ${safeNum(candidate?.runnerLike?.score, 0)} | 📦 <b>Packaging:</b> ${safeNum(candidate?.packaging?.score, 0)}`;
+    }
+
+    return `${anti.emoji} <b>Anti-rug:</b> <b>${escapeHtml(this.translateRiskLevel(anti.verdict, lang))}</b> / риск ${safeNum(anti.riskScore, 0)}
+🎯 <b>Главный план:</b> <b>${escapeHtml(this.translateStrategyKey(mainPlan, lang))}</b>
+📌 <b>Стратегии:</b> ${escapeHtml(planLine)}
+👛 <b>Кластер кошельков:</b> ${escapeHtml(this.translateRiskLevel(clusterRisk, lang))} / ${clusterScore} | молодая доля ${youngSupply}%
+↩️ <b>Reversal:</b> ${safeNum(candidate?.reversal?.score, 0)} | 🧬 <b>Migration accumulation:</b> ${safeNum(candidate?.migrationAccumulation?.score, 0)} | 🏃 <b>Runner-like:</b> ${safeNum(candidate?.runnerLike?.score, 0)} | 📦 <b>Packaging:</b> ${safeNum(candidate?.packaging?.score, 0)}`;
   }
 
   buildReversalPlan(candidate = {}) {
@@ -2547,11 +2642,14 @@ async findBestCandidate({ runtime, openPositions = [], recentlyTraded = [] }) {
     };
   }
 
-  buildHeroCaption(candidate) {
+  buildHeroCaption(candidate, options = {}) {
+    const lang = this.getReportLanguage(options);
     const token = candidate?.token || {};
     const plans = this.buildPlans(candidate, "all");
-    const topHeader = this.buildTopSignalHeader(candidate, plans);
-    return `🧭 <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
+    const topHeader = this.buildTopSignalHeader(candidate, plans, { language: lang });
+
+    if (lang !== "ru") {
+      return `🧭 <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
 ${topHeader}
 chain: ${escapeHtml(token.chainId || "-")}
 score: ${safeNum(candidate?.score, 0)}
@@ -2563,7 +2661,7 @@ scalp score: ${safeNum(candidate?.scalp?.score, 0)}
 scalp mode: ${escapeHtml(candidate?.scalp?.primaryMode || "-")}
 reversal score: ${safeNum(candidate?.reversal?.score, 0)}
 reversal mode: ${escapeHtml(candidate?.reversal?.primaryMode || "-")}
-quiet accumulation: ${candidate?.holderAccumulation?.quietAccumulationPass ? "yes" : "no"}
+quiet accumulation: ${this.yesNo(candidate?.holderAccumulation?.quietAccumulationPass, lang)}
 control pct: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFixed(2)}
 migration score: ${safeNum(candidate?.migration?.survivorScore, 0)}
 migration accumulation: ${safeNum(candidate?.migrationAccumulation?.score, 0)} / ${escapeHtml(candidate?.migrationAccumulation?.mode || "-")}
@@ -2578,12 +2676,35 @@ fdv: ${safeNum(token.fdv, 0)}
 pair age min: ${safeNum(candidate?.migration?.pairAgeMin, 0).toFixed(1)}
 dex: ${escapeHtml(token.dexId || "-")}
 url: ${escapeHtml(token.url || "-")}`;
+    }
+
+    return `🧭 <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
+${topHeader}
+
+🧾 <b>Кратко</b>
+Сеть: ${escapeHtml(token.chainId || "-")}
+Оценка: <b>${safeNum(candidate?.score, 0)}</b>
+Anti-rug: ${escapeHtml(this.translateRiskLevel(candidate?.antiRug?.verdict || '-', lang))} | риск ${safeNum(candidate?.antiRug?.riskScore, 0)}
+Источник: ${escapeHtml(candidate?.discoverySource || this.translateDiscoveryBucket(candidate?.discoveryBucket, lang) || "-")}
+Smart-wallet hits: ${safeNum(candidate?.smartWalletFeed?.walletHits, 0)}
+
+📈 <b>Рынок</b>
+Цена: ${safeNum(token.price, 0)}
+Ликвидность: ${safeNum(token.liquidity, 0)}
+Объём 1ч / 24ч: ${safeNum(token.volumeH1, 0)} / ${safeNum(token.volumeH24, token.volume, 0)}
+Транзакции 1ч / 24ч: ${safeNum(token.txnsH1, 0)} / ${safeNum(token.txnsH24, token.txns, 0)}
+FDV: ${safeNum(token.fdv, 0)}
+Возраст пары: ${safeNum(candidate?.migration?.pairAgeMin, 0).toFixed(1)} мин
+DEX: ${escapeHtml(token.dexId || "-")}
+URL: ${escapeHtml(token.url || "-")}`;
   }
 
-  buildAnalysisText(candidate, plans = []) {
+  buildAnalysisText(candidate, plans = [], options = {}) {
+    const lang = this.getReportLanguage(options);
     const token = candidate?.token || {};
     const socials = candidate?.socials?.links || {};
-    const planLine = plans.map((p) => p.strategyKey).join(", ") || "none";
+    const planLineRaw = plans.map((p) => p.strategyKey).join(", ") || "none";
+    const planLine = this.translatePlanList(plans, lang);
     const migration = candidate?.migration || {};
     const scalp = candidate?.scalp || {};
     const reversal = candidate?.reversal || {};
@@ -2591,9 +2712,12 @@ url: ${escapeHtml(token.url || "-")}`;
     const holder = candidate?.holderAccumulation || {};
     const scalpMetrics = scalp?.metrics || {};
     const reversalMetrics = reversal?.metrics || {};
+    const yesNo = (value) => this.yesNo(value, lang);
+    const fmtPct = (value, d = 2) => this.fmtMetricPct(value, d);
 
-    return `🔎 <b>ANALYSIS</b>
-${this.buildTopSignalHeader(candidate, plans)}
+    if (lang !== "ru") {
+      return `🔎 <b>ANALYSIS</b>
+${this.buildTopSignalHeader(candidate, plans, { language: lang })}
 
 Token: ${escapeHtml(token.name || token.symbol || "UNKNOWN")}
 CA: <code>${escapeHtml(token.ca || "-")}</code>
@@ -2692,12 +2816,117 @@ Narrative summary:
 ${escapeHtml(candidate?.narrative?.summary || "No narrative available.")}
 
 Plans:
-${escapeHtml(planLine)}
+${escapeHtml(planLineRaw)}
 
 Links:
 twitter: ${escapeHtml(socials.twitter || "-")}
 telegram: ${escapeHtml(socials.telegram || "-")}
 website: ${escapeHtml(socials.website || "-")}`;
+    }
+
+    const antiVerdict = this.translateRiskLevel(candidate?.antiRug?.verdict || "-", lang);
+    const clusterRisk = this.translateRiskLevel(candidate?.holderAccumulation?.walletCluster?.clusterRisk || "-", lang);
+    const socialLinks = [
+      socials.twitter ? `X/Twitter: ${escapeHtml(socials.twitter)}` : "",
+      socials.telegram ? `Telegram: ${escapeHtml(socials.telegram)}` : "",
+      socials.website ? `Сайт: ${escapeHtml(socials.website)}` : ""
+    ].filter(Boolean).join("\n") || "-";
+
+    return `🔎 <b>АНАЛИЗ</b>
+${this.buildTopSignalHeader(candidate, plans, { language: lang })}
+
+<b>🧾 Токен</b>
+Название: <b>${escapeHtml(token.name || token.symbol || "UNKNOWN")}</b>
+CA: <code>${escapeHtml(token.ca || "-")}</code>
+Сеть: ${escapeHtml(token.chainId || "-")}
+Итоговая оценка: <b>${safeNum(candidate?.score, 0)}</b>
+Режим торговли: ${escapeHtml(this.translateTradingMode(candidate?.tradingMode || this.getTradingMode(), lang))}
+Бакет обнаружения: ${escapeHtml(this.translateDiscoveryBucket(candidate?.discoveryBucket || "-", lang))}
+Источник обнаружения: ${escapeHtml(candidate?.discoverySource || "-")}
+Smart-wallet hits: ${safeNum(candidate?.smartWalletFeed?.walletHits, 0)}
+
+<b>📈 Рынок и активность</b>
+Цена: ${safeNum(token.price, 0)}
+Ликвидность: <b>${safeNum(token.liquidity, 0)}</b>
+Объём 1ч / 24ч: <b>${safeNum(token.volumeH1, 0)}</b> / ${safeNum(token.volumeH24, token.volume, 0)}
+Транзакции 1ч / 24ч: ${safeNum(token.txnsH1, 0)} / ${safeNum(token.txnsH24, token.txns, 0)}
+FDV: <b>${safeNum(token.fdv, 0)}</b>
+
+<b>🛡️ Риски и защита</b>
+⚠️ Rug-риск: ${safeNum(candidate?.rug?.risk, 0)}
+🛡️ Anti-rug: <b>${escapeHtml(antiVerdict)}</b> | риск ${safeNum(candidate?.antiRug?.riskScore, 0)} | защита ${safeNum(candidate?.antiRug?.protectionScore, 0)}
+🧟 Corpse-score: ${safeNum(candidate?.corpse?.score, 0)}
+👥 Концентрация: ${safeNum(candidate?.wallet?.concentration, 0)}
+🤖 Активность ботов: ${safeNum(candidate?.bots?.botActivity, 0)}
+🧠 Нарратив: ${escapeHtml(candidate?.narrative?.verdict || "-")}
+🌐 Соцсети: ${safeNum(candidate?.socials?.socialCount, 0)}
+🧩 Тип токена: ${escapeHtml(candidate?.mechanics?.tokenType || "-")}
+🎁 Модель rewards: ${escapeHtml(candidate?.mechanics?.rewardModel || "-")}
+💵 Dex paid: ${yesNo(candidate?.dexPaid)}
+
+<b>🫧 Scalp</b>
+Доступен: ${yesNo(scalp?.allow)} | score: <b>${safeNum(scalp?.score, 0)}</b>
+Режим: ${escapeHtml(scalp?.primaryMode || "-")}
+Сработавшие режимы: ${escapeHtml((scalp?.passedModes || []).join(", ") || "-")}
+Давление покупок M5 / 1ч / 24ч: ${fmtPct(scalpMetrics?.buyPressureM5, 1)} / ${fmtPct(scalpMetrics?.buyPressureH1, 1)} / ${fmtPct(scalpMetrics?.buyPressureH24, 1)}
+Цена M5 / 1ч / 6ч / 24ч: ${fmtPct(scalpMetrics?.priceM5, 1)} / ${fmtPct(scalpMetrics?.priceH1, 1)} / ${fmtPct(scalpMetrics?.priceH6, 1)} / ${fmtPct(scalpMetrics?.priceH24, 1)}
+Объём/ликвидность M5 / 1ч / 24ч: ${fmtPct(scalpMetrics?.volToLiqM5, 1)} / ${fmtPct(scalpMetrics?.volToLiqH1, 1)} / ${fmtPct(scalpMetrics?.volToLiqH24, 1)}
+
+<b>↩️ Reversal</b>
+Доступен: ${yesNo(reversal?.allow)} | score: <b>${safeNum(reversal?.score, 0)}</b>
+Режим: ${escapeHtml(reversal?.primaryMode || "-")}
+Тихое накопление: ${yesNo(reversal?.quietAccumulation)} | bottom-pack: ${yesNo(reversal?.bottomPack)}
+Удержание 30м / 2ч: ${fmtPct(reversalMetrics?.retention30m, 1)} / ${fmtPct(reversalMetrics?.retention2h, 1)}
+Чистый контроль: <b>${fmtPct(reversalMetrics?.netControlPct, 2)}</b>
+Новые кошельки: ${safeNum(reversalMetrics?.freshWalletBuyCount, 0)} | reloads: ${safeNum(reversalMetrics?.reloadCount, 0)} | dip-buy ratio: ${safeNum(reversalMetrics?.dipBuyRatio, 0).toFixed(2)}
+
+<b>🧺 Накопление холдеров</b>
+Отслежено кошельков: <b>${safeNum(holder?.trackedWallets, 0)}</b>
+Новая когорта: ${safeNum(holder?.freshWalletBuyCount, 0)}
+Удержание 30м / 2ч: ${fmtPct(holder?.retention30mPct, 1)} / ${fmtPct(holder?.retention2hPct, 1)}
+Чистое накопление: <b>${fmtPct(holder?.netAccumulationPct, 2)}</b>
+Контроль когорты: <b>${fmtPct(holder?.netControlPct, 2)}</b>
+Повторные докупки/reloads: ${safeNum(holder?.reloadCount, 0)} | dip-buy ratio: ${safeNum(holder?.dipBuyRatio, 0).toFixed(2)}
+Касания дна: ${safeNum(holder?.bottomTouches, 0)}
+Тихое накопление подтверждено: ${yesNo(holder?.quietAccumulationPass)}
+Bottom-pack reversal подтвержден: ${yesNo(holder?.bottomPackReversalPass)}
+
+<b>🌊 Миграция</b>
+Возраст пары: ${safeNum(migration?.pairAgeMin, 0).toFixed(1)} мин
+Оценка выживания: <b>${safeNum(migration?.survivorScore, 0)}</b>
+Ликвидность/FDV: ${fmtPct(migration?.liqToMcapPct, 1)}
+Объём/ликвидность: ${fmtPct(migration?.volToLiqPct, 1)}
+Фильтр пройден: ${yesNo(migration?.passes)}
+
+<b>📣 Telegram-сигналы</b>
+Каналов: ${safeNum(candidate?.telegramSignal?.channelHits, 0)}
+Список источников: ${escapeHtml((candidate?.telegramSignal?.channels || []).join(", ") || "-")}
+Возраст свежего сигнала: ${safeNum(candidate?.telegramSignal?.newestAgeMin, 0).toFixed(1)} мин
+
+<b>👛 Кластеры кошельков</b>
+Риск кластера: ${escapeHtml(clusterRisk)} / ${safeNum(candidate?.holderAccumulation?.walletCluster?.clusterRiskScore, 0)}
+Молодая доля 7д: ${fmtPct(candidate?.holderAccumulation?.walletCluster?.youngSupplyPct, 1)}
+Очень молодая доля 3д: ${fmtPct(candidate?.holderAccumulation?.walletCluster?.veryYoungSupplyPct, 1)}
+Кластер одного дня: ${safeNum(candidate?.holderAccumulation?.walletCluster?.sameDayClusterCount, 0)} кошельков / ${fmtPct(candidate?.holderAccumulation?.walletCluster?.sameDayClusterSupplyPct, 1)}
+Окно покупок 15м: ${safeNum(candidate?.holderAccumulation?.walletCluster?.sameBuyWindowClusterCount, 0)} кошельков
+Сходство размера покупок CV: ${safeNum(candidate?.holderAccumulation?.walletCluster?.sameDayBuySizeCv, 999).toFixed(3)}
+Средний возраст: ${safeNum(candidate?.holderAccumulation?.walletCluster?.avgAgeDays, 0).toFixed(1)} дн.
+
+<b>🧬 Накопление после миграции</b>
+Доступен: ${yesNo(migrationAccumulation?.allow)} | приоритетный watchlist: ${yesNo(migrationAccumulation?.priorityWatch)} | пробный вход доступен: ${yesNo(migrationAccumulation?.probeEligible)}
+Оценка: <b>${safeNum(migrationAccumulation?.score, 0)}</b>
+Режим: ${escapeHtml(migrationAccumulation?.mode || "-")}
+Возрастное окно: ${yesNo(migrationAccumulation?.ageWindow)} | глубокая коррекция: ${yesNo(migrationAccumulation?.deepCorrection)} | ещё живой: ${yesNo(migrationAccumulation?.stillBreathing)}
+База стабилизируется: ${yesNo(migrationAccumulation?.baseStabilizing)} | признаки накопления: ${yesNo(migrationAccumulation?.accumulationEvidence)}
+
+<b>🧠 Нарратив</b>
+${escapeHtml(candidate?.narrative?.summary || "Нарратив не найден.")}
+
+<b>📌 Планы</b>
+${escapeHtml(planLine)}
+
+<b>🔗 Ссылки</b>
+${socialLinks}`;
   }
 
   async scanCA({ runtime, fetchTokenByCA, ca }) {

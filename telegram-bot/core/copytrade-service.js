@@ -20,6 +20,14 @@ function asText(v, fallback = "") {
   return s || fallback;
 }
 
+function isRu(runtimeConfig = {}) {
+  return String(runtimeConfig?.language || "").toLowerCase().startsWith("ru");
+}
+
+function yesNo(value, runtimeConfig = {}) {
+  return isRu(runtimeConfig) ? (value ? "да" : "нет") : (value ? "yes" : "no");
+}
+
 function isBadDevVerdict(verdict) {
   const v = asText(verdict).toLowerCase();
   return v === "bad" || v === "danger" || v === "risky";
@@ -413,55 +421,99 @@ export default class CopytradeService {
     return clone(leader);
   }
 
-  buildExecutionModeText() {
+  buildExecutionModeText(runtimeConfig = {}) {
     const r = this.rules;
-    return `🧠 <b>Execution Model</b>
+    if (!isRu(runtimeConfig)) {
+      return `🧭 <b>Execution rules</b>
 entry by leader: ${r.entryUsesLeader ? "yes" : "no"}
 exit by bot strategy: yes
-leader sell mode: ${asText(r.exitUsesLeaderMode, "soft_only")}
+leader sell mode: ${r.exitUsesLeaderMode}
 leader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}
 leader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}
 own TP priority: ${r.ownTpPriority ? "yes" : "no"}
 own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
+    }
+    return `🧭 <b>Правила исполнения</b>
+Вход по лидеру: ${yesNo(r.entryUsesLeader, runtimeConfig)}
+Выход по стратегии бота: да
+Режим sell-сигнала лидера: ${asText(r.exitUsesLeaderMode, "soft_only")}
+Sell лидера ужесточает SL: ${yesNo(r.leaderSellTightensStop, runtimeConfig)}
+Sell лидера закрывает сразу: ${yesNo(r.leaderSellImmediateExit, runtimeConfig)}
+Приоритет собственного TP: ${yesNo(r.ownTpPriority, runtimeConfig)}
+Приоритет собственного trail: ${yesNo(r.ownTrailPriority, runtimeConfig)}`;
   }
 
   buildCopytradeText(runtimeConfig) {
     const leaders = this.copytradeManager.listLeaders(runtimeConfig);
     const r = this.rules;
+    const ru = isRu(runtimeConfig);
 
-    const lines = ["📋 <b>Copytrade</b>", ""];
-    lines.push(`enabled: ${runtimeConfig.copytrade.enabled ? "yes" : "no"}`);
-    lines.push(
-      `rescoring: ${runtimeConfig.copytrade.rescoringEnabled ? "yes" : "no"}`
-    );
-    lines.push(`leader min score: ${r.leaderMinScore}`);
-    lines.push(`token min score: ${r.copytradeTokenMinScore}`);
-    lines.push(`max delay sec: ${r.maxFollowDelaySec}`);
-    lines.push(`max extension pct: ${r.maxPriceExtensionPct}`);
-    lines.push(`max rug risk: ${r.maxRugRisk}`);
-    lines.push(`min liquidity usd: ${r.minLiquidityUsd}`);
-    lines.push(`concentration safe max: ${r.concentrationSafeMax}`);
-    lines.push(`concentration probe max: ${r.concentrationProbeMax}`);
-    lines.push(`concentration hard reject above: ${r.concentrationHardRejectAbove}`);
-    lines.push(`copytrade hard stop pct: ${r.copytradeHardStopPct}`);
-    lines.push("");
-    lines.push(this.buildExecutionModeText());
-    lines.push("");
+    if (!ru) {
+      const lines = ["📋 <b>Copytrade</b>", ""];
+      lines.push(`enabled: ${runtimeConfig.copytrade.enabled ? "yes" : "no"}`);
+      lines.push(`rescoring: ${runtimeConfig.copytrade.rescoringEnabled ? "yes" : "no"}`);
+      lines.push(`leader min score: ${r.leaderMinScore}`);
+      lines.push(`token min score: ${r.copytradeTokenMinScore}`);
+      lines.push(`max delay sec: ${r.maxFollowDelaySec}`);
+      lines.push(`max extension pct: ${r.maxPriceExtensionPct}`);
+      lines.push(`max rug risk: ${r.maxRugRisk}`);
+      lines.push(`min liquidity usd: ${r.minLiquidityUsd}`);
+      lines.push(`concentration safe max: ${r.concentrationSafeMax}`);
+      lines.push(`concentration probe max: ${r.concentrationProbeMax}`);
+      lines.push(`concentration hard reject above: ${r.concentrationHardRejectAbove}`);
+      lines.push(`copytrade hard stop pct: ${r.copytradeHardStopPct}`);
+      lines.push("");
+      lines.push(this.buildExecutionModeText(runtimeConfig));
+      lines.push("");
 
-    if (!leaders.length) {
-      lines.push("leaders: none");
-    } else {
-      for (const leader of leaders) {
-        this.ensureLeaderShape(leader);
-        lines.push(
-          `• <b>${leader.address}</b>
+      if (!leaders.length) {
+        lines.push("leaders: none");
+      } else {
+        for (const leader of leaders) {
+          this.ensureLeaderShape(leader);
+          lines.push(`• <b>${leader.address}</b>
 state: ${leader.state}
 score: ${safeNum(leader.score)}
 source: ${asText(leader.source, "manual")}
 rejected traps: ${safeNum(leader.rejectedTrapCount)}
 accepted good: ${safeNum(leader.acceptedGoodCount)}
-last sync: ${asText(leader.lastSyncAt, "-")}`
-        );
+last sync: ${asText(leader.lastSyncAt, "-")}`);
+          lines.push("");
+        }
+      }
+      lines.push(`<code>/addleader</code>`);
+      return lines.join("\n");
+    }
+
+    const lines = ["📋 <b>Copytrade</b>", ""];
+    lines.push(`Включён: ${yesNo(runtimeConfig.copytrade.enabled, runtimeConfig)}`);
+    lines.push(`Повторная оценка лидеров: ${yesNo(runtimeConfig.copytrade.rescoringEnabled, runtimeConfig)}`);
+    lines.push(`Минимальная оценка лидера: <b>${r.leaderMinScore}</b>`);
+    lines.push(`Минимальная оценка токена: <b>${r.copytradeTokenMinScore}</b>`);
+    lines.push(`Макс. задержка входа: ${r.maxFollowDelaySec} сек`);
+    lines.push(`Макс. растяжение цены: ${r.maxPriceExtensionPct}%`);
+    lines.push(`Макс. rug-риск: ${r.maxRugRisk}`);
+    lines.push(`Мин. ликвидность: $${r.minLiquidityUsd}`);
+    lines.push(`Безопасная концентрация: ${r.concentrationSafeMax}`);
+    lines.push(`Probe-концентрация: ${r.concentrationProbeMax}`);
+    lines.push(`Жёсткий reject выше концентрации: ${r.concentrationHardRejectAbove}`);
+    lines.push(`Жёсткий SL copytrade: ${r.copytradeHardStopPct}%`);
+    lines.push("");
+    lines.push(this.buildExecutionModeText(runtimeConfig));
+    lines.push("");
+
+    if (!leaders.length) {
+      lines.push("Лидеров нет");
+    } else {
+      for (const leader of leaders) {
+        this.ensureLeaderShape(leader);
+        lines.push(`• <b>${leader.address}</b>
+Состояние: ${leader.state}
+Оценка: ${safeNum(leader.score)}
+Источник: ${asText(leader.source, "manual")}
+Отклонённых ловушек: ${safeNum(leader.rejectedTrapCount)}
+Принятых качественных входов: ${safeNum(leader.acceptedGoodCount)}
+Последняя синхронизация: ${asText(leader.lastSyncAt, "-")}`);
         lines.push("");
       }
     }
@@ -473,7 +525,9 @@ last sync: ${asText(leader.lastSyncAt, "-")}`
   async buildLeaderHealthText(runtimeConfig) {
     const leaders = this.copytradeManager.listLeaders(runtimeConfig);
     if (!leaders.length) {
-      return `🫀 <b>Leader Health</b>
+      return isRu(runtimeConfig) ? `🫀 <b>Здоровье лидеров</b>
+
+Лидеров нет` : `🫀 <b>Leader Health</b>
 
 leaders: none`;
     }
@@ -482,7 +536,7 @@ leaders: none`;
       leaders.map((x) => x.address)
     );
 
-    const lines = ["🫀 <b>Leader Health</b>", ""];
+    const lines = isRu(runtimeConfig) ? ["🫀 <b>Здоровье лидеров</b>", ""] : ["🫀 <b>Leader Health</b>", ""];
     for (const row of intel) {
       const leader = runtimeConfig?.copytrade?.leaders?.find(
         (x) => x.address === row.address
@@ -490,7 +544,16 @@ leaders: none`;
       this.ensureLeaderShape(leader);
 
       lines.push(
-        `• <b>${row.address}</b>
+        isRu(runtimeConfig) ? `• <b>${row.address}</b>
+Состояние: ${row.state}
+Оценка: ${safeNum(row.score)}
+Winrate за период: ${safeNum(row.recentWinrate)}%
+PnL за период: ${safeNum(row.recentPnlPct)}%
+Макс. просадка: ${safeNum(row.maxDrawdownPct)}%
+Отклонённых ловушек: ${safeNum(leader?.rejectedTrapCount)}
+Принятых качественных входов: ${safeNum(leader?.acceptedGoodCount)}
+Источник: ${asText(row.source, "-")}
+Последняя синхронизация: ${asText(row.lastSyncAt, "-")}` : `• <b>${row.address}</b>
 state: ${row.state}
 score: ${safeNum(row.score)}
 recent winrate: ${safeNum(row.recentWinrate)}%
@@ -507,9 +570,10 @@ last sync: ${asText(row.lastSyncAt, "-")}`
     return lines.join("\n");
   }
 
-  buildGmgnStatusText() {
+  buildGmgnStatusText(runtimeConfig = {}) {
     const h = this.gmgnLeaderIntel.getHealth();
-    return `🛰 <b>GMGN Status</b>
+    if (!isRu(runtimeConfig)) {
+      return `🛰 <b>GMGN Status</b>
 
 enabled: ${h.enabled ? "yes" : "no"}
 mode: ${asText(h.mode, "-")}
@@ -519,5 +583,18 @@ min recent pnl pct: ${safeNum(h.minRecentPnlPct)}
 max drawdown pct: ${safeNum(h.maxLeaderDrawdownPct)}
 cooldown min: ${safeNum(h.cooldownMin)}
 cached leaders: ${safeNum(h.cachedLeaders)}`;
+    }
+
+    return `🛰 <b>GMGN статус</b>
+
+Включён: ${yesNo(h.enabled, runtimeConfig)}
+Режим: ${asText(h.mode, "-")}
+Автообновление: ${safeNum(h.autoRefreshSec)} сек
+Мин. winrate за период: ${safeNum(h.minRecentWinrate)}
+Мин. PnL за период: ${safeNum(h.minRecentPnlPct)}%
+Макс. просадка лидера: ${safeNum(h.maxLeaderDrawdownPct)}%
+Cooldown: ${safeNum(h.cooldownMin)} мин
+Кэшированных лидеров: ${safeNum(h.cachedLeaders)}`;
   }
+
 }

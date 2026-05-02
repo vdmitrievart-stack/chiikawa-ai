@@ -523,18 +523,18 @@ export default class TeamWalletIntelligence {
     const reasons = [];
     if (maxClusterWallets >= 5) {
       riskScore += 30;
-      reasons.push('many tracked wallets also sit in the same external project');
+      reasons.push('много отслеженных кошельков также сидят в одном внешнем проекте');
     } else if (maxClusterWallets >= 3) {
       riskScore += 16;
-      reasons.push('several tracked wallets overlap in another project');
+      reasons.push('несколько отслеженных кошельков пересекаются в другом проекте');
     }
     if (projects.length >= 3) {
       riskScore += 12;
-      reasons.push('multiple repeated cross-project overlaps');
+      reasons.push('повторяющиеся пересечения кошельков между проектами');
     }
     if (checkedWallets > 0 && walletsWithOtherTokens / checkedWallets >= 0.75) {
       riskScore += 10;
-      reasons.push('most checked team/sniper wallets hold other projects');
+      reasons.push('большинство проверенных team/sniper кошельков держат другие проекты');
     }
 
     return {
@@ -774,52 +774,52 @@ export default class TeamWalletIntelligence {
 
     if (safeNum(groups?.team?.pct, 0) >= 18) {
       riskScore += 24;
-      reasons.push("team/insider cluster holds large supply");
+      reasons.push("team/insider-кластер держит большую долю supply");
     }
     if (safeNum(groups?.snipers15m?.pct, 0) >= 15) {
       riskScore += 16;
-      reasons.push("early snipers still hold meaningful supply");
+      reasons.push("ранние снайперы всё ещё держат заметную долю supply");
     }
     if (safeNum(groups?.meta?.sameBuyWindowCount, 0) >= 5) {
       riskScore += 12;
-      reasons.push("many wallets bought in same 15m window");
+      reasons.push("много кошельков купили в одном 15-минутном окне");
     }
     if (safeNum(groups?.meta?.sameWalletAgeCount, 0) >= 5) {
       riskScore += 14;
-      reasons.push("many wallets were created/first active same day");
+      reasons.push("много кошельков создано или впервые активно в один день");
     }
     if (safeNum(groups?.meta?.sameFundingCount, 0) >= 4) {
       riskScore += 18;
-      reasons.push("shared funding source cluster");
+      reasons.push("кластер с общим источником funding");
     }
     if (safeNum(devHistory?.launchesTotal, 0) >= 4) {
       const scamRatio = safeNum(devHistory?.scamLikeCount, 0) / Math.max(1, safeNum(devHistory?.launchesTotal, 0));
       if (scamRatio >= 0.65) {
         riskScore += 22;
-        reasons.push("dev history mostly dead/rug-like launches");
+        reasons.push("история dev в основном состоит из мёртвых/rug-like запусков");
       } else if (scamRatio >= 0.35) {
         riskScore += 10;
-        reasons.push("dev history has several weak launches");
+        reasons.push("в истории dev несколько слабых запусков");
       }
     }
     if (safeNum(walletCluster?.clusterRiskScore, 0) >= 70) {
       riskScore += 12;
-      reasons.push("holder cluster risk already high");
+      reasons.push("риск кластера холдеров уже высокий");
     }
     if (safeNum(crossProjects?.maxClusterWallets, 0) >= 4) {
       riskScore += 14;
-      reasons.push("tracked wallets overlap in other projects");
+      reasons.push("отслеженные кошельки пересекаются в других проектах");
     } else if (safeNum(crossProjects?.maxClusterWallets, 0) >= 3) {
       riskScore += 8;
-      reasons.push("small cross-project wallet overlap detected");
+      reasons.push("обнаружено небольшое пересечение кошельков с другими проектами");
     }
     if (safeNum(whaleBuys?.dumpingWhaleCount, 0) >= 2) {
       riskScore += 12;
-      reasons.push("whale buyers already reduced holdings");
+      reasons.push("whale-покупатели уже сократили позиции");
     }
     if (safeNum(whaleBuys?.holdingWhaleCount, 0) >= 2 && safeNum(whaleBuys?.totalCurrentPct, 0) >= 2) {
       riskScore -= 6;
-      reasons.push("whale buyers are still holding");
+      reasons.push("whale-покупатели всё ещё удерживают позиции");
     }
 
     riskScore = clamp(Math.round(riskScore), 0, 100);
@@ -912,13 +912,13 @@ export default class TeamWalletIntelligence {
   }
 
   formatGroupLine(label, group = {}) {
-    return `${label} — ${safeNum(group?.count, 0)} wallets | ${fmtNum(group?.amount, 2)} tokens | ${fmtPct(group?.pct, 2)}`;
+    return `${label} — ${safeNum(group?.count, 0)} кошельков | ${fmtNum(group?.amount, 2)} токенов | ${fmtPct(group?.pct, 2)}`;
   }
 
   formatDeltaLine(label, key, deltas = {}) {
     const d = deltas?.[key];
-    if (!d) return `${label}: нет snapshot истории`;
-    return `${label}: team ${fmtSigned(d.team?.pctDelta, 2, "%")} | snipers15m ${fmtSigned(d.snipers15m?.pctDelta, 2, "%")} | dev ${fmtSigned(d.dev?.pctDelta, 2, "%")}`;
+    if (!d) return `${label}: нет истории snapshot`;
+    return `${label}: команда ${fmtSigned(d.team?.pctDelta, 2, "%")} | снайперы 15м ${fmtSigned(d.snipers15m?.pctDelta, 2, "%")} | dev ${fmtSigned(d.dev?.pctDelta, 2, "%")}`;
   }
 
 
@@ -1110,8 +1110,8 @@ export default class TeamWalletIntelligence {
     const snipers15mPct = safeNum(groups?.snipers15m?.pct, 0);
     const hasSniperRisk = snipers15m >= 3 || snipers15mPct >= 5;
     const sniperText = hasSniperRisk
-      ? `⚠️ <b>Снайперы:</b> ${snipers1m}/${snipers5m}/${snipers15m} wallets | первые 15м держат <b>${fmtPct(snipers15mPct, 2)}</b>`
-      : `✅ <b>Снайперы:</b> major sniper pressure не видно | 1м/5м/15м: ${snipers1m}/${snipers5m}/${snipers15m}`;
+      ? `⚠️ <b>Снайперы:</b> ${snipers1m}/${snipers5m}/${snipers15m} кошельков | первые 15м держат <b>${fmtPct(snipers15mPct, 2)}</b>`
+      : `✅ <b>Снайперы:</b> сильного давления снайперов не видно | 1м/5м/15м: ${snipers1m}/${snipers5m}/${snipers15m}`;
 
     const teamPct = safeNum(this.pickFirst(external?.teamHoldPct, external?.teamPct, external?.holders?.teamPct, groups?.team?.pct), 0);
     const teamEmoji = teamPct >= 20 ? "🔴" : teamPct >= 10 ? "🟡" : "✅";
@@ -1134,18 +1134,18 @@ export default class TeamWalletIntelligence {
     );
     const noMajorClusters = externalMajorClusters === false || (externalMajorClusters === null && localClusterRiskScore < 35 && safeNum(crossProjects?.clusteredProjectCount, 0) === 0);
     const clusterLine = noMajorClusters
-      ? `✅ <b>Bubble/cluster:</b> крупных кластеров по локальной эвристике не видно${externalMajorClusters === null ? " | Bubblemap external: not connected" : ""}`
-      : `${localClusterRiskScore >= 65 ? "🔴" : "🟡"} <b>Bubble/cluster:</b> risk ${escapeHtml(risk?.level || walletCluster?.clusterRisk || "WATCH")} / ${localClusterRiskScore} | cross-project clusters ${safeNum(crossProjects?.clusteredProjectCount, 0)}`;
+      ? `✅ <b>Bubblemap / кластеры:</b> крупных кластеров по локальной эвристике не видно${externalMajorClusters === null ? " | внешний Bubblemap не подключён" : ""}`
+      : `${localClusterRiskScore >= 65 ? "🔴" : "🟡"} <b>Bubblemap / кластеры:</b> риск ${escapeHtml(risk?.level || walletCluster?.clusterRisk || "WATCH")} / ${localClusterRiskScore} | кластеры в других проектах ${safeNum(crossProjects?.clusteredProjectCount, 0)}`;
 
     const cexPrefix = funding.known
-      ? `${funding.cexPct >= 50 ? "🟡" : funding.cexPct >= 20 ? "👀" : "✅"} <b>CEX funding map:</b> ${fmtPct(funding.cexPct, 2)} CEX-linked`
-      : `⚪ <b>CEX funding map:</b> funding labels не найдены`;
+      ? `${funding.cexPct >= 50 ? "🟡" : funding.cexPct >= 20 ? "👀" : "✅"} <b>CEX funding map:</b> ${fmtPct(funding.cexPct, 2)} связано с CEX`
+      : `⚪ <b>CEX funding map:</b> funding-метки не найдены`;
     const fundingLine = funding.known
       ? `${cexPrefix} — ${funding.entries.map((row) => `${escapeHtml(row.label)} ${fmtPct(row.pct, 1)}`).join(" | ")}`
-      : `${cexPrefix} — нужен devsnightmare/bubblemap/CEX индексер или поле fundingSource`;
+      : `${cexPrefix} — нужен devsnightmare / Bubblemap / CEX-индексер или поле fundingSource`;
 
     const top70Text = holderStats.top70Pct === null
-      ? `n/a <i>(RPC видит top ${holderStats.trackedCount}, нужен holder-indexer для top 70)</i>`
+      ? `n/a <i>(RPC видит top ${holderStats.trackedCount}, для top 70 нужен holder-indexer)</i>`
       : fmtPct(holderStats.top70Pct, 2);
     const avgBagText = holderStats.avgBagUsd > 0 ? fmtUsd(holderStats.avgBagUsd, 0) : "n/a";
     const holderCountText = holderStats.holderCount > 0 ? `${holderStats.holderCount}` : "n/a";
@@ -1163,18 +1163,18 @@ export default class TeamWalletIntelligence {
         }));
 
     const lines = [
-      `<b>🧷 Holder / Funding Quick Read</b>`,
+      `<b>🧷 Холдеры / Funding — быстрый вывод</b>`,
       sniperText,
-      `${teamEmoji} <b>Team/insider:</b> держат <b>${fmtPct(teamPct, 2)}</b> | wallets ${safeNum(groups?.team?.count, 0)} | dev hold ${fmtPct(devHoldPct, 2)}`,
+      `${teamEmoji} <b>Команда/инсайдеры:</b> держат <b>${fmtPct(teamPct, 2)}</b> | кошельков ${safeNum(groups?.team?.count, 0)} | dev держит ${fmtPct(devHoldPct, 2)}`,
       `👨‍💻 <b>Dev:</b> ${devDisplay}`,
       clusterLine,
       fundingLine,
-      `👑 <b>Top holders:</b> top 10 <b>${fmtPct(holderStats.top10Pct, 2)}</b> | top 70 ${top70Text} | tracked top ${holderStats.trackedCount}: ${fmtPct(holderStats.topTrackedPct, 2)}`,
-      `👥 <b>Holder base:</b> holders ${holderCountText} | avg bag ${avgBagText}`,
-      `🔍 <b>Same-source hints:</b> same 15m ${safeNum(meta?.sameBuyWindowCount, 0)} wallets / ${fmtPct(meta?.sameBuyWindowSupplyPct, 2)} | same funding ${safeNum(meta?.sameFundingCount, 0)} wallets / ${fmtPct(meta?.sameFundingSupplyPct, 2)}`,
-      `<b>🔝 Top holder names/wallets</b>`,
-      ...(topHolderLines.length ? topHolderLines : [`• нет top-holder rows для отображения`]),
-      `⚠️ <b>NFA:</b> это risk/intel блок, не команда покупать или продавать.`
+      `👑 <b>Топ-холдеры:</b> top 10 <b>${fmtPct(holderStats.top10Pct, 2)}</b> | top 70 ${top70Text} | отслеженный top ${holderStats.trackedCount}: ${fmtPct(holderStats.topTrackedPct, 2)}`,
+      `👥 <b>База холдеров:</b> холдеров ${holderCountText} | средний размер позиции ${avgBagText}`,
+      `🔍 <b>Признаки общего источника:</b> окно покупок 15м — ${safeNum(meta?.sameBuyWindowCount, 0)} кошельков / ${fmtPct(meta?.sameBuyWindowSupplyPct, 2)} | одинаковый funding — ${safeNum(meta?.sameFundingCount, 0)} кошельков / ${fmtPct(meta?.sameFundingSupplyPct, 2)}`,
+      `<b>🔝 Топ-холдеры: имена / кошельки</b>`,
+      ...(topHolderLines.length ? topHolderLines : [`• нет строк top holders для отображения`]),
+      `⚠️ <b>NFA:</b> это блок риска/intel, а не команда покупать или продавать.`
     ];
 
     return compact ? lines.slice(0, 11) : lines;
@@ -1182,10 +1182,10 @@ export default class TeamWalletIntelligence {
 
   buildCompactReport(analysis = {}) {
     return [
-      `🕵️ <b>TEAM / HOLDER / FUNDING INTEL — V14</b>`,
+      `🕵️ <b>КОМАНДА / ХОЛДЕРЫ / FUNDING — V15 RU</b>`,
       `<b>${escapeHtml(analysis?.token?.name || analysis?.token?.symbol || "UNKNOWN")}</b>`,
       `<code>${escapeHtml(analysis?.mint || analysis?.token?.ca || "")}</code>`,
-      `Risk — ${safeNum(analysis?.risk?.score, 0) >= 70 ? "🚩" : safeNum(analysis?.risk?.score, 0) >= 45 ? "🟡" : "✅"} <b>${escapeHtml(analysis?.risk?.level || "LOW")}</b> / ${safeNum(analysis?.risk?.score, 0)}`,
+      `Риск — ${safeNum(analysis?.risk?.score, 0) >= 70 ? "🚩" : safeNum(analysis?.risk?.score, 0) >= 45 ? "🟡" : "✅"} <b>${escapeHtml(analysis?.risk?.level || "LOW")}</b> / ${safeNum(analysis?.risk?.score, 0)}`,
       ``,
       ...this.buildHolderFundingSummaryLines(analysis, { compact: true })
     ].join("\n");
@@ -1212,79 +1212,79 @@ export default class TeamWalletIntelligence {
     const devHistorySource = hist?.source || "unavailable";
 
     const lines = [
-      `🕵️ <b>TEAM / INSIDER / SNIPER INTEL — V13</b>`,
+      `🕵️ <b>КОМАНДА / ИНСАЙДЕРЫ / СНАЙПЕРЫ — V15 RU</b>`,
       ``,
       `<b>${escapeHtml(token?.name || token?.symbol || "UNKNOWN")}</b>`,
       `<code>${escapeHtml(analysis?.mint || token?.ca || "")}</code>`,
-      `Risk — ${safeNum(risk?.score, 0) >= 70 ? "🚩" : safeNum(risk?.score, 0) >= 45 ? "🟡" : "✅"} <b>${escapeHtml(risk?.level || "LOW")}</b> / ${safeNum(risk?.score, 0)}`,
+      `Риск — ${safeNum(risk?.score, 0) >= 70 ? "🚩" : safeNum(risk?.score, 0) >= 45 ? "🟡" : "✅"} <b>${escapeHtml(risk?.level || "LOW")}</b> / ${safeNum(risk?.score, 0)}`,
       ``,
       ...this.buildHolderFundingSummaryLines(analysis, { compact: false }),
       ``,
       `<b>👨‍💻 Dev wallet</b>`,
       `Dev — ${dev?.devWallet ? `<code>${escapeHtml(dev.devWallet)}</code>` : "не определён"}`,
-      `Source — ${escapeHtml(devSource)}`,
-      `Запусков dev — ${safeNum(hist?.launchesTotal, 0)} | dead/rug-like — ${safeNum(hist?.scamLikeCount, 0)} | живых/успешных — ${safeNum(hist?.successfulLikeCount, 0)} | unclear — ${safeNum(hist?.unclearCount, 0)}`,
-      `Dev history source — ${escapeHtml(devHistorySource)}`,
+      `Источник — ${escapeHtml(devSource)}`,
+      `Запусков dev — ${safeNum(hist?.launchesTotal, 0)} | мёртвых/rug-like — ${safeNum(hist?.scamLikeCount, 0)} | живых/успешных — ${safeNum(hist?.successfulLikeCount, 0)} | неясных — ${safeNum(hist?.unclearCount, 0)}`,
+      `Источник dev history — ${escapeHtml(devHistorySource)}`,
       ``,
-      `<b>🎯 Snipers</b>`,
+      `<b>🎯 Снайперы</b>`,
       this.formatGroupLine("Первые 1м", groups?.snipers1m),
       this.formatGroupLine("Первые 5м", groups?.snipers5m),
       this.formatGroupLine("Первые 15м", groups?.snipers15m),
       ``,
-      `<b>🧬 Insider / team cluster</b>`,
-      this.formatGroupLine("Team/insider wallets", groups?.team),
+      `<b>🧬 Инсайдерский / team-кластер</b>`,
+      this.formatGroupLine("Команда/инсайдеры", groups?.team),
       this.formatGroupLine("Dev wallet сейчас", groups?.dev),
-      `Same 15m buy-window — ${safeNum(meta?.sameBuyWindowCount, 0)} wallets / ${fmtPct(meta?.sameBuyWindowSupplyPct, 2)} | CV ${fmtNum(meta?.sameBuyWindowCv, 3)}`,
-      `Same-day wallet age — ${safeNum(meta?.sameWalletAgeCount, 0)} wallets / ${fmtPct(meta?.sameWalletAgeSupplyPct, 2)} | CV ${fmtNum(meta?.sameWalletAgeCv, 3)}`,
-      `Same funding — ${safeNum(meta?.sameFundingCount, 0)} wallets / ${fmtPct(meta?.sameFundingSupplyPct, 2)}${meta?.sameFundingSource ? ` | ${escapeHtml(String(meta.sameFundingSource).slice(0, 24))}` : ""}`,
+      `Окно покупок 15м — ${safeNum(meta?.sameBuyWindowCount, 0)} кошельков / ${fmtPct(meta?.sameBuyWindowSupplyPct, 2)} | CV ${fmtNum(meta?.sameBuyWindowCv, 3)}`,
+      `Одинаковый возраст кошельков — ${safeNum(meta?.sameWalletAgeCount, 0)} кошельков / ${fmtPct(meta?.sameWalletAgeSupplyPct, 2)} | CV ${fmtNum(meta?.sameWalletAgeCv, 3)}`,
+      `Одинаковый funding — ${safeNum(meta?.sameFundingCount, 0)} кошельков / ${fmtPct(meta?.sameFundingSupplyPct, 2)}${meta?.sameFundingSource ? ` | ${escapeHtml(String(meta.sameFundingSource).slice(0, 24))}` : ""}`,
       ``,
-      `<b>🧩 Cross-project wallet overlap</b>`,
+      `<b>🧩 Пересечение кошельков с другими проектами</b>`,
       `Проверено кошельков — ${safeNum(crossProjects?.checkedWallets, 0)} | с другими токенами — ${safeNum(crossProjects?.walletsWithOtherTokens, 0)}`,
-      `Скоплений в других проектах — ${safeNum(crossProjects?.clusteredProjectCount, 0)} | отфильтровано common/stable — ${safeNum(crossProjects?.skippedCommonProjectCount, 0)} | risk ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`,
+      `Скоплений в других проектах — ${safeNum(crossProjects?.clusteredProjectCount, 0)} | отфильтровано common/stable — ${safeNum(crossProjects?.skippedCommonProjectCount, 0)} | риск ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`,
       ...(Array.isArray(crossProjects?.projects) && crossProjects.projects.length
         ? crossProjects.projects.slice(0, 5).flatMap((project) => [
-            `• ${escapeHtml(project?.name || project?.symbol || "UNKNOWN")} ${project?.symbol ? `($${escapeHtml(project.symbol)})` : ""} — ${safeNum(project?.walletCount, 0)} wallets`,
-            `  CA: <code>${escapeHtml(project?.ca || "")}</code> | liq ${fmtUsd(project?.liquidityUsd, 0)} | FDV ${fmtUsd(project?.fdv || project?.marketCap, 0)}`
+            `• ${escapeHtml(project?.name || project?.symbol || "UNKNOWN")} ${project?.symbol ? `($${escapeHtml(project.symbol)})` : ""} — ${safeNum(project?.walletCount, 0)} кошельков`,
+            `  CA: <code>${escapeHtml(project?.ca || "")}</code> | ликвидность ${fmtUsd(project?.liquidityUsd, 0)} | FDV ${fmtUsd(project?.fdv || project?.marketCap, 0)}`
           ])
         : [`• явного скопления одних и тех же кошельков в других проектах пока нет`]),
       ``,
-      `<b>🐋 Whale buys</b>`,
-      `Whale signal — ${escapeHtml(whaleBuys?.signal || "LOW")} | holders ${safeNum(whaleBuys?.holderWhaleCount ?? whaleBuys?.whaleCount, 0)} | buyers ${safeNum(whaleBuys?.buyWhaleCount, 0)} | holding ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | reducing ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`,
-      `Сейчас держат — ${fmtNum(whaleBuys?.totalCurrentAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalCurrentPct, 2)} | ${fmtUsd(whaleBuys?.currentUsd, 0)}`,
-      `Суммарно куплено — ${fmtNum(whaleBuys?.totalBoughtAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalBoughtPct, 2)} | ${fmtUsd(whaleBuys?.totalBoughtUsd, 0)}`,
+      `<b>🐋 Крупные покупки / whale buys</b>`,
+      `Whale-сигнал — ${escapeHtml(whaleBuys?.signal || "LOW")} | холдеры ${safeNum(whaleBuys?.holderWhaleCount ?? whaleBuys?.whaleCount, 0)} | покупатели ${safeNum(whaleBuys?.buyWhaleCount, 0)} | удерживают ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | сокращают ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`,
+      `Сейчас держат — ${fmtNum(whaleBuys?.totalCurrentAmount, 2)} токенов / ${fmtPct(whaleBuys?.totalCurrentPct, 2)} | ${fmtUsd(whaleBuys?.currentUsd, 0)}`,
+      `Суммарно куплено — ${fmtNum(whaleBuys?.totalBoughtAmount, 2)} токенов / ${fmtPct(whaleBuys?.totalBoughtPct, 2)} | ${fmtUsd(whaleBuys?.totalBoughtUsd, 0)}`,
       ...(Array.isArray(whaleBuys?.rows) && whaleBuys.rows.length
         ? whaleBuys.rows.slice(0, 5).map((row) => {
             const buyPart = row?.isBuyWhale
-              ? `latest buy ${fmtPct(row.latestBuyPct, 2)} | hold ${row.holdingPct === null ? "n/a" : fmtPct(row.holdingPct, 0)}`
-              : `holder/transfer | bought ${fmtPct(row.totalBoughtPct, 2)}`;
-            return `• ${shortWallet(row.owner)} — now ${fmtPct(row.supplyPct, 2)} | ${buyPart}`;
+              ? `последняя покупка ${fmtPct(row.latestBuyPct, 2)} | удержание ${row.holdingPct === null ? "n/a" : fmtPct(row.holdingPct, 0)}`
+              : `холдер/трансфер | куплено ${fmtPct(row.totalBoughtPct, 2)}`;
+            return `• ${shortWallet(row.owner)} — сейчас ${fmtPct(row.supplyPct, 2)} | ${buyPart}`;
           })
         : [`• крупных whale-buy признаков среди top holders пока нет`]),
       ``,
-      `<b>⏱ Changes by snapshots</b>`,
+      `<b>⏱ Изменения по snapshot</b>`,
       this.formatDeltaLine("1м", "1m", analysis?.deltas),
       this.formatDeltaLine("5м", "5m", analysis?.deltas),
       this.formatDeltaLine("15м", "15m", analysis?.deltas),
       this.formatDeltaLine("30м", "30m", analysis?.deltas),
       ``,
-      `<b>🔎 Top team wallets</b>`
+      `<b>🔎 Топ team wallets</b>`
     ];
 
     if (topTeamWallets.length) {
       for (const row of topTeamWallets) {
-        lines.push(`• ${shortWallet(row.owner)} — ${fmtPct(row.supplyPct, 2)} | age ${row.walletFirstActivityComplete ? fmtNum((Date.now() - safeNum(row.walletFirstActivityAt, 0)) / 86400000, 1) + "d" : "unknown"}`);
+        lines.push(`• ${shortWallet(row.owner)} — ${fmtPct(row.supplyPct, 2)} | возраст ${row.walletFirstActivityComplete ? fmtNum((Date.now() - safeNum(row.walletFirstActivityAt, 0)) / 86400000, 1) + "д" : "неизвестно"}`);
       }
     } else {
-      lines.push(`• пока нет выраженного team cluster в top holders`);
+      lines.push(`• пока нет выраженного team-кластера среди top holders`);
     }
 
     if (Array.isArray(risk?.reasons) && risk.reasons.length) {
       lines.push(``);
-      lines.push(`🧠 Signals — ${escapeHtml(risk.reasons.slice(0, 5).join(" | "))}`);
+      lines.push(`🧠 Сигналы — ${escapeHtml(risk.reasons.slice(0, 5).join(" | "))}`);
     }
 
     lines.push(``);
-    lines.push(`⚠️ Dev wallet/dev-history — эвристика. Cross-project overlap показывает текущие ненулевые SPL-балансы кошельков; USDC/USDT/wSOL/common assets отфильтрованы. Для полной истории прошлых участий нужен расширенный индексер.`);
+    lines.push(`⚠️ Dev wallet / dev-history — эвристика. Пересечение с другими проектами показывает текущие ненулевые SPL-балансы кошельков; USDC/USDT/wSOL/common assets отфильтрованы. Для полной истории прошлых участий нужен расширенный индексер.`);
 
     return lines.join("\n");
   }

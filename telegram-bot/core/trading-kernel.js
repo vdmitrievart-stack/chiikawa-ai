@@ -748,9 +748,12 @@ export default class TradingKernel {
 
   buildSignalUpdateText(candidate = {}, plans = [], reason = "update") {
     const token = candidate?.token || {};
-    const planLine = plans.map((plan) => plan.strategyKey).join(", ") || "none";
+    const lang = this.runtime?.activeConfig?.language || "ru";
+    const isRu = String(lang).toLowerCase().startsWith("ru");
+    const planLine = plans.map((plan) => plan.strategyKey).join(", ") || (isRu ? "нет" : "none");
 
-    return `🔁 <b>SIGNAL UPDATE</b>
+    if (!isRu) {
+      return `🔁 <b>SIGNAL UPDATE</b>
 
 <b>Token:</b> ${escapeHtml(token.name || token.symbol || "UNKNOWN")}
 <b>Contract:</b> <code>${escapeHtml(token.ca || "-")}</code>
@@ -769,6 +772,26 @@ Reversal: ${safeNum(candidate?.reversal?.score, 0)}
 Migration: ${safeNum(candidate?.migration?.survivorScore, 0)}
 Corpse: ${safeNum(candidate?.corpse?.score, 0)}
 Holder control: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFixed(2)}%`;
+    }
+
+    return `🔁 <b>ОБНОВЛЕНИЕ СИГНАЛА</b>
+
+<b>Токен:</b> ${escapeHtml(token.name || token.symbol || "UNKNOWN")}
+<b>CA:</b> <code>${escapeHtml(token.ca || "-")}</code>
+<b>Причина:</b> ${escapeHtml(reason)}
+
+Итоговая оценка: <b>${safeNum(candidate?.score, 0)}</b>
+Планы: ${escapeHtml(planLine)}
+
+Цена: ${safeNum(token.price, 0)}
+Ликвидность: <b>${safeNum(token.liquidity, 0)}</b>
+Объём 1ч / 24ч: ${safeNum(token.volumeH1, 0)} / ${safeNum(token.volumeH24, token.volume || 0)}
+
+Scalp: ${safeNum(candidate?.scalp?.score, 0)}
+Reversal: ${safeNum(candidate?.reversal?.score, 0)}
+Migration: ${safeNum(candidate?.migration?.survivorScore, 0)}
+Corpse: ${safeNum(candidate?.corpse?.score, 0)}
+Контроль холдеров: <b>${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFixed(2)}%</b>`;
   }
 
   async tick(sendBridge) {
@@ -777,7 +800,8 @@ Holder control: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFix
     this.pruneRecentlyTraded();
 
     const notificationService = new NotificationService({
-      send: sendBridge
+      send: sendBridge,
+      language: this.runtime?.activeConfig?.language || "ru"
     });
 
     await this.positionService.updateOpenPositions({
@@ -804,7 +828,7 @@ Holder control: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFix
       await this.applyPendingIfPossible();
       finishRuntime(this.runtime);
       await this.persistSnapshot();
-      await notificationService.sendText("✅ Stop completed. No open positions left.");
+      await notificationService.sendText(String(this.runtime?.activeConfig?.language || "ru").toLowerCase().startsWith("ru") ? "✅ Stop выполнен. Открытых позиций больше нет." : "✅ Stop completed. No open positions left.");
       return;
     }
 
@@ -865,11 +889,11 @@ Holder control: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFix
       if (signalDecision.mode === "full") {
         await notificationService.sendPhotoOrText(
           heroImage,
-          this.candidateService.buildHeroCaption(candidate)
+          this.candidateService.buildHeroCaption(candidate, { language: this.runtime?.activeConfig?.language || "ru" })
         );
 
         await notificationService.sendText(
-          this.candidateService.buildAnalysisText(candidate, plans)
+          this.candidateService.buildAnalysisText(candidate, plans, { language: this.runtime?.activeConfig?.language || "ru" })
         );
       } else {
         await notificationService.sendText(
@@ -962,12 +986,12 @@ Holder control: ${safeNum(candidate?.holderAccumulation?.netControlPct, 0).toFix
 
           if (shouldNotifyReject) {
             await notificationService.sendText(
-              `🚫 <b>COPYTRADE REJECTED</b>
+              `🚫 <b>COPYTRADE ОТКЛОНЁН</b>
 
-<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
-<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}
-<b>Details:</b>
-${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• rejected"}`
+<b>Лидер:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Причина:</b> ${escapeHtml(copyVerdict.reason || "COPY_REJECT")}
+<b>Детали:</b>
+${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• отклонено"}`
             );
           }
 
@@ -992,11 +1016,11 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
           )
         ) {
           await notificationService.sendText(
-            `⚠️ <b>COPYTRADE PROBE MODE</b>
+            `⚠️ <b>COPYTRADE PROBE-РЕЖИМ</b>
 
-<b>Leader:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
-<b>Reason:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
-<b>Details:</b>
+<b>Лидер:</b> ${escapeHtml(copyVerdict.leader?.address || "-")}
+<b>Причина:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
+<b>Детали:</b>
 ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
           );
         }
@@ -1052,8 +1076,17 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
 
   buildCopytradeStatusSummary() {
     const leaders = this.runtime.activeConfig?.copytrade?.leaders || [];
+    const isRu = String(this.runtime?.activeConfig?.language || "ru").toLowerCase().startsWith("ru");
     if (!leaders.length) {
-      return `📋 <b>Copytrade status</b>
+      return isRu
+        ? `📋 <b>Copytrade статус</b>
+лидер: -
+состояние: -
+score: 0
+отклонённых ловушек: 0
+принятых качественных входов: 0
+открытых GMGN ордеров: ${this.gmgnOrderStore.listOpenOrders().length}`
+        : `📋 <b>Copytrade status</b>
 leader: -
 state: -
 score: 0
@@ -1067,18 +1100,30 @@ open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
     );
     const leader = sorted[0] || {};
 
-    return `📋 <b>Copytrade status</b>
+    if (!isRu) {
+      return `📋 <b>Copytrade status</b>
 leader: ${escapeHtml(leader.address || "-")}
 state: ${escapeHtml(leader.state || "-")}
 score: ${safeNum(leader.score, 0)}
 rejected traps: ${safeNum(leader.rejectedTrapCount, 0)}
 accepted good: ${safeNum(leader.acceptedGoodCount, 0)}
 open gmgn orders: ${this.gmgnOrderStore.listOpenOrders().length}`;
+    }
+
+    return `📋 <b>Copytrade статус</b>
+лидер: ${escapeHtml(leader.address || "-")}
+состояние: ${escapeHtml(leader.state || "-")}
+score: <b>${safeNum(leader.score, 0)}</b>
+отклонённых ловушек: ${safeNum(leader.rejectedTrapCount, 0)}
+принятых качественных входов: ${safeNum(leader.acceptedGoodCount, 0)}
+открытых GMGN ордеров: ${this.gmgnOrderStore.listOpenOrders().length}`;
   }
 
   buildExecutionModelSummary() {
     const r = this.copytradeService?.rules || {};
-    return `🧠 <b>Execution model</b>
+    const isRu = String(this.runtime?.activeConfig?.language || "ru").toLowerCase().startsWith("ru");
+    if (!isRu) {
+      return `🧠 <b>Execution model</b>
 entry by leader: ${r.entryUsesLeader ? "yes" : "no"}
 exit by bot strategy: yes
 leader sell mode: ${escapeHtml(String(r.exitUsesLeaderMode || "soft_only"))}
@@ -1086,21 +1131,39 @@ leader sell tightens stop: ${r.leaderSellTightensStop ? "yes" : "no"}
 leader sell immediate exit: ${r.leaderSellImmediateExit ? "yes" : "no"}
 own TP priority: ${r.ownTpPriority ? "yes" : "no"}
 own trail priority: ${r.ownTrailPriority ? "yes" : "no"}`;
+    }
+
+    return `🧠 <b>Модель исполнения</b>
+Вход по лидеру: ${r.entryUsesLeader ? "да" : "нет"}
+Выход по стратегии бота: да
+Режим sell-сигнала лидера: ${escapeHtml(String(r.exitUsesLeaderMode || "soft_only"))}
+Sell лидера ужесточает SL: ${r.leaderSellTightensStop ? "да" : "нет"}
+Sell лидера закрывает сразу: ${r.leaderSellImmediateExit ? "да" : "нет"}
+Приоритет собственного TP: ${r.ownTpPriority ? "да" : "нет"}
+Приоритет собственного trail: ${r.ownTrailPriority ? "да" : "нет"}`;
   }
 
   buildRecentGMGNEventsSummary(limit = 3) {
     const rows = this.gmgnOrderStore.listRecentOrders(limit);
+    const isRu = String(this.runtime?.activeConfig?.language || "ru").toLowerCase().startsWith("ru");
 
     if (!rows.length) {
-      return `🕘 <b>Recent GMGN events</b>
+      return isRu ? `🕘 <b>Последние GMGN события</b>
+нет` : `🕘 <b>Recent GMGN events</b>
 none`;
     }
 
-    const lines = ["🕘 <b>Recent GMGN events</b>", ""];
+    const lines = [isRu ? "🕘 <b>Последние GMGN события</b>" : "🕘 <b>Recent GMGN events</b>", ""];
 
     for (const row of rows) {
       lines.push(
-        `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}
+        isRu
+          ? `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}
+стратегия: ${escapeHtml(row.strategy || "-")}
+токен: ${escapeHtml(row?.token?.symbol || row?.token?.name || row?.token?.ca || "-")}
+заметка: ${escapeHtml(row.note || "-")}
+обновлено: ${escapeHtml(row.updatedAt || "-")}`
+          : `• ${escapeHtml(String(row.operation || "-").toUpperCase())} | ${escapeHtml(String(row.status || "-").toUpperCase())}
 strategy: ${escapeHtml(row.strategy || "-")}
 token: ${escapeHtml(row?.token?.symbol || row?.token?.name || row?.token?.ca || "-")}
 note: ${escapeHtml(row.note || "-")}
@@ -1143,19 +1206,33 @@ updated: ${escapeHtml(row.updatedAt || "-")}`
         ? rows.reduce((sum, row) => sum + safeNum(row?.metrics?.pnlHintPct, 0), 0) / rows.length
         : 0;
 
-    return `💡 <b>Simulated GMGN close hints</b>
+    const isRu = String(this.runtime?.activeConfig?.language || "ru").toLowerCase().startsWith("ru");
+    if (!isRu) {
+      return `💡 <b>Simulated GMGN close hints</b>
 filled close/partial: ${rows.length}
 sum pnlHintSol: ${totalSol.toFixed(4)}
 positive pnlHintSol: ${positiveSol.toFixed(4)}
 negative pnlHintSol: ${negativeSol.toFixed(4)}
 avg pnlHintPct: ${avgPct.toFixed(2)}%`;
+    }
+
+    return `💡 <b>Симуляция GMGN закрытий</b>
+Закрытий/частичных выходов filled: ${rows.length}
+Суммарный pnlHintSol: <b>${totalSol.toFixed(4)}</b>
+Положительный pnlHintSol: ${positiveSol.toFixed(4)}
+Отрицательный pnlHintSol: ${negativeSol.toFixed(4)}
+Средний pnlHintPct: ${avgPct.toFixed(2)}%`;
   }
 
 
   buildRadarSummaryText() {
     const t = this.candidateService?.getRadarTelemetry?.() || {};
     const byBucket = t?.byBucket || {};
-    return `📡 <b>Radar</b>
+    const lang = this.runtime?.activeConfig?.language || "ru";
+    const isRu = String(lang).toLowerCase().startsWith("ru");
+
+    if (!isRu) {
+      return `📡 <b>Radar</b>
 scanned raw: ${safeNum(t?.scannedRaw, 0)}
 unique pairs: ${safeNum(t?.uniquePairs, 0)}
 after analysis: ${safeNum(t?.candidatesAfterAnalysis, 0)}
@@ -1169,16 +1246,45 @@ trap rejected: ${safeNum(t?.trapRejected, 0)} | trade-ready: ${safeNum(t?.tradeR
 smart-wallet raw/tokens/accepted: ${safeNum(t?.smartWalletFeedRaw, 0)} / ${safeNum(t?.smartWalletTokens, 0)} / ${safeNum(t?.smartWalletAccepted, 0)}
 smart-wallet publish-worthy: ${safeNum(t?.smartWalletPublishWorthy, 0)}
 buckets fresh/packaging/migration/momentum/forgotten/smart: ${safeNum(byBucket?.fresh, 0)} / ${safeNum(byBucket?.packaging, 0)} / ${safeNum(byBucket?.migration, 0)} / ${safeNum(byBucket?.momentum, 0)} / ${safeNum(byBucket?.forgotten, 0)} / ${safeNum(byBucket?.smart_wallets, 0)}`;
+    }
+
+    return `📡 <b>Радар рынка</b>
+🔎 Сырых пар просканировано: ${safeNum(t?.scannedRaw, 0)}
+🧹 Уникальных Solana-пар: ${safeNum(t?.uniquePairs, 0)}
+🧠 После анализа: ${safeNum(t?.candidatesAfterAnalysis, 0)}
+🚮 Отфильтровано шума: ${safeNum(t?.filteredNoise, 0)}
+🧬 Глубоко проанализировано: ${safeNum(t?.deepAnalyzed, 0)}
+👀 Watchlist / priority: ${safeNum(t?.watchlist, 0)} / ${safeNum(t?.priorityWatch, 0)}
+📦 Packaging / probe: ${safeNum(t?.packagingDetected, 0)} / ${safeNum(t?.packagingProbe, 0)}
+↩️ Reversal watch / runner-like: ${safeNum(t?.reversalWatch, 0)} / ${safeNum(t?.runnerLike, 0)}
+🌊 Migration structure: ${safeNum(t?.migrationStructure, 0)}
+🚫 Ловушек отклонено: ${safeNum(t?.trapRejected, 0)} | ✅ Готово к торговле: ${safeNum(t?.tradeReady, 0)}
+👛 Smart-wallet raw/tokens/accepted: ${safeNum(t?.smartWalletFeedRaw, 0)} / ${safeNum(t?.smartWalletTokens, 0)} / ${safeNum(t?.smartWalletAccepted, 0)}
+📣 Smart-wallet publish-worthy: ${safeNum(t?.smartWalletPublishWorthy, 0)}
+🧺 Бакеты fresh/packaging/migration/momentum/forgotten/smart: ${safeNum(byBucket?.fresh, 0)} / ${safeNum(byBucket?.packaging, 0)} / ${safeNum(byBucket?.migration, 0)} / ${safeNum(byBucket?.momentum, 0)} / ${safeNum(byBucket?.forgotten, 0)} / ${safeNum(byBucket?.smart_wallets, 0)}`;
   }
 
   buildNoCandidateNotice() {
     const scope = String(this.runtime?.strategyScope || "all").toUpperCase();
     const t = this.candidateService?.getRadarTelemetry?.() || {};
-    return `📡 <b>${escapeHtml(scope)}</b>
-Пока не вижу нормального кандидата. Продолжаю сканировать рынок.
+    const lang = this.runtime?.activeConfig?.language || "ru";
+    const isRu = String(lang).toLowerCase().startsWith("ru");
+
+    if (!isRu) {
+      return `📡 <b>${escapeHtml(scope)}</b>
+No clean candidate yet. Still scanning the market.
 
 scanned: ${safeNum(t?.uniquePairs, 0)} | watchlist: ${safeNum(t?.watchlist, 0)} | packaging: ${safeNum(t?.packagingDetected, 0)} | migration: ${safeNum(t?.migrationStructure, 0)} | trap rejected: ${safeNum(t?.trapRejected, 0)} | trade-ready: ${safeNum(t?.tradeReady, 0)}
 smart-wallet accepted/publish-worthy: ${safeNum(t?.smartWalletAccepted, 0)} / ${safeNum(t?.smartWalletPublishWorthy, 0)}`;
+    }
+
+    return `📡 <b>${escapeHtml(scope)}</b>
+Пока не вижу чистого кандидата. Продолжаю сканировать рынок.
+
+🔎 Просканировано пар: ${safeNum(t?.uniquePairs, 0)}
+👀 Watchlist: ${safeNum(t?.watchlist, 0)} | 📦 Packaging: ${safeNum(t?.packagingDetected, 0)} | 🌊 Migration: ${safeNum(t?.migrationStructure, 0)}
+🚫 Ловушек отклонено: ${safeNum(t?.trapRejected, 0)} | ✅ Готово к торговле: ${safeNum(t?.tradeReady, 0)}
+👛 Smart-wallet accepted / publish-worthy: ${safeNum(t?.smartWalletAccepted, 0)} / ${safeNum(t?.smartWalletPublishWorthy, 0)}`;
   }
 
   buildStatusText() {
@@ -1205,7 +1311,8 @@ ${this.buildRecentGMGNEventsSummary()}`;
   buildBalanceText() {
     return `${buildPortfolioBalanceText(
       getPortfolio(),
-      this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary()
+      this.lastHolderSummary || this.holderAccumulationEngine.getDashboardSummary(),
+      { language: this.runtime?.activeConfig?.language || "ru" }
     )}
 
 ${this.buildRadarSummaryText()}
@@ -1218,7 +1325,7 @@ ${this.buildGMGNPnlHintSummary()}`;
 
 ${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}
 
-🕵️ <b>Team / Insider / Sniper Intel — V2 ACTIVE</b>
+🕵️ <b>Команда / инсайдеры / снайперы — активный модуль</b>
 Отдельная проверка команды, инсайдеров, снайперов и dev history.
 
 Команды:
@@ -1238,8 +1345,10 @@ ${this.gmgnWalletService.buildStrategyMappingText(this.runtime.activeConfig)}
     const current =
       this.runtime.activeConfig.strategyBudget || DEFAULT_STRATEGY_BUDGET;
     const pending = this.runtime.pendingConfig?.strategyBudget || null;
+    const isRu = String(this.runtime?.activeConfig?.language || "ru").toLowerCase().startsWith("ru");
 
-    return `🧮 <b>Budget</b>
+    if (!isRu) {
+      return `🧮 <b>Budget</b>
 
 <b>Current</b>
 ${formatBudgetLines(current)}
@@ -1249,10 +1358,22 @@ ${pending ? formatBudgetLines(pending) : "none"}
 
 Send:
 <code>budget 20 20 20 20 20</code>`;
+    }
+
+    return `🧮 <b>Бюджет стратегий</b>
+
+<b>Текущий</b>
+${formatBudgetLines(current)}
+
+<b>Отложенный</b>
+${pending ? formatBudgetLines(pending) : "нет"}
+
+Чтобы изменить, отправь:
+<code>budget 20 20 20 20 20</code>`;
   }
 
   buildGmgnStatusText() {
-    return this.copytradeService.buildGmgnStatusText();
+    return this.copytradeService.buildGmgnStatusText(this.runtime.activeConfig);
   }
 
   buildGMGNExecutionText() {
@@ -1262,7 +1383,7 @@ Send:
   }
 
   buildGMGNOrdersText(limit = 15) {
-    return this.gmgnExecutionService.buildOrdersText(limit);
+    return this.gmgnExecutionService.buildOrdersText(limit, this.runtime.activeConfig);
   }
 
   async buildLeaderHealthText() {
@@ -1438,45 +1559,45 @@ Send:
     const fmtNum = (value, d = 2) => safeNum(value, 0).toFixed(d);
 
     const lines = [
-      `🕵️ <b>Team / Insider / Sniper Intel — V13</b>`,
-      `Risk — ${safeNum(risk?.score, 0) >= 70 ? "🚩" : safeNum(risk?.score, 0) >= 45 ? "🟡" : "✅"} ${escapeHtml(risk?.level || "LOW")} / ${safeNum(risk?.score, 0)}`,
+      `🕵️ <b>Команда / инсайдеры / снайперы — V15 RU</b>`,
+      `Риск — ${safeNum(risk?.score, 0) >= 70 ? "🚩" : safeNum(risk?.score, 0) >= 45 ? "🟡" : "✅"} ${escapeHtml(risk?.level || "LOW")} / ${safeNum(risk?.score, 0)}`,
       `Dev — ${dev?.devWallet ? `<code>${escapeHtml(dev.devWallet)}</code>` : "не определён"}`,
-      `Dev launches — ${safeNum(hist?.launchesTotal, 0)} | dead/rug-like ${safeNum(hist?.scamLikeCount, 0)} | live/success ${safeNum(hist?.successfulLikeCount, 0)} | source ${escapeHtml(hist?.source || "unavailable")}`,
-      `Snipers 1м / 5м / 15м — ${safeNum(groups?.snipers1m?.count, 0)} / ${safeNum(groups?.snipers5m?.count, 0)} / ${safeNum(groups?.snipers15m?.count, 0)} wallets`,
-      `Team/insider wallets — ${safeNum(groups?.team?.count, 0)} | держат ${fmtPct(groups?.team?.pct, 2)} | dev держит ${fmtPct(groups?.dev?.pct, 2)}`,
+      `Запуски dev — ${safeNum(hist?.launchesTotal, 0)} | мёртвые/rug-like ${safeNum(hist?.scamLikeCount, 0)} | живые/успешные ${safeNum(hist?.successfulLikeCount, 0)} | источник ${escapeHtml(hist?.source || "недоступен")}`,
+      `Снайперы 1м / 5м / 15м — ${safeNum(groups?.snipers1m?.count, 0)} / ${safeNum(groups?.snipers5m?.count, 0)} / ${safeNum(groups?.snipers15m?.count, 0)} кошельков`,
+      `Команда/инсайдеры — ${safeNum(groups?.team?.count, 0)} кошельков | держат ${fmtPct(groups?.team?.pct, 2)} | dev держит ${fmtPct(groups?.dev?.pct, 2)}`,
       ``,
-      `🧩 <b>Cross-project wallet overlap</b>`,
-      `Проверено — ${safeNum(crossProjects?.checkedWallets, 0)} wallets | с другими токенами — ${safeNum(crossProjects?.walletsWithOtherTokens, 0)} | clusters ${safeNum(crossProjects?.clusteredProjectCount, 0)} | filtered ${safeNum(crossProjects?.skippedCommonProjectCount, 0)} | risk ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`
+      `🧩 <b>Пересечение кошельков с другими проектами</b>`,
+      `Проверено — ${safeNum(crossProjects?.checkedWallets, 0)} кошельков | с другими токенами — ${safeNum(crossProjects?.walletsWithOtherTokens, 0)} | кластеры ${safeNum(crossProjects?.clusteredProjectCount, 0)} | отфильтровано ${safeNum(crossProjects?.skippedCommonProjectCount, 0)} | риск ${escapeHtml(crossProjects?.riskLevel || "LOW")}/${safeNum(crossProjects?.riskScore, 0)}`
     ];
 
     if (projects.length) {
       for (const project of projects) {
         lines.push(`• ${escapeHtml(project?.name || project?.symbol || "UNKNOWN")} ${project?.symbol ? `($${escapeHtml(project.symbol)})` : ""} — ${safeNum(project?.walletCount, 0)} wallets`);
-        lines.push(`  CA: <code>${escapeHtml(project?.ca || "")}</code> | liq ${fmtUsd(project?.liquidityUsd, 0)} | FDV ${fmtUsd(project?.fdv || project?.marketCap, 0)}`);
+        lines.push(`  CA: <code>${escapeHtml(project?.ca || "")}</code> | ликвидность ${fmtUsd(project?.liquidityUsd, 0)} | FDV ${fmtUsd(project?.fdv || project?.marketCap, 0)}`);
       }
     } else {
       lines.push(`• явного скопления одних и тех же кошельков в других проектах пока нет`);
     }
 
     lines.push(``);
-    lines.push(`🐋 <b>Whale buys</b>`);
-    lines.push(`Whale signal — ${escapeHtml(whaleBuys?.signal || "LOW")} | holders ${safeNum(whaleBuys?.holderWhaleCount ?? whaleBuys?.whaleCount, 0)} | buyers ${safeNum(whaleBuys?.buyWhaleCount, 0)} | holding ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | reducing ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`);
-    lines.push(`Сейчас держат — ${fmtNum(whaleBuys?.totalCurrentAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalCurrentPct, 2)} | ${fmtUsd(whaleBuys?.currentUsd, 0)}`);
-    lines.push(`Суммарно куплено — ${fmtNum(whaleBuys?.totalBoughtAmount, 2)} tokens / ${fmtPct(whaleBuys?.totalBoughtPct, 2)} | ${fmtUsd(whaleBuys?.totalBoughtUsd, 0)}`);
+    lines.push(`🐋 <b>Крупные покупки / whale buys</b>`);
+    lines.push(`Whale-сигнал — ${escapeHtml(whaleBuys?.signal || "LOW")} | холдеры ${safeNum(whaleBuys?.holderWhaleCount ?? whaleBuys?.whaleCount, 0)} | покупатели ${safeNum(whaleBuys?.buyWhaleCount, 0)} | удерживают ${safeNum(whaleBuys?.holdingWhaleCount, 0)} | сокращают ${safeNum(whaleBuys?.dumpingWhaleCount, 0)}`);
+    lines.push(`Сейчас держат — ${fmtNum(whaleBuys?.totalCurrentAmount, 2)} токенов / ${fmtPct(whaleBuys?.totalCurrentPct, 2)} | ${fmtUsd(whaleBuys?.currentUsd, 0)}`);
+    lines.push(`Суммарно куплено — ${fmtNum(whaleBuys?.totalBoughtAmount, 2)} токенов / ${fmtPct(whaleBuys?.totalBoughtPct, 2)} | ${fmtUsd(whaleBuys?.totalBoughtUsd, 0)}`);
 
     if (whales.length) {
       for (const row of whales) {
         const buyPart = row?.isBuyWhale
-          ? `latest buy ${fmtPct(row?.latestBuyPct, 2)} | hold ${row?.holdingPct === null ? "n/a" : fmtPct(row?.holdingPct, 0)}`
-          : `holder/transfer | bought ${fmtPct(row?.totalBoughtPct, 2)}`;
-        lines.push(`• ${shortWallet(row?.owner)} — now ${fmtPct(row?.supplyPct, 2)} | ${buyPart}`);
+          ? `последняя покупка ${fmtPct(row?.latestBuyPct, 2)} | удержание ${row?.holdingPct === null ? "n/a" : fmtPct(row?.holdingPct, 0)}`
+          : `холдер/трансфер | куплено ${fmtPct(row?.totalBoughtPct, 2)}`;
+        lines.push(`• ${shortWallet(row?.owner)} — сейчас ${fmtPct(row?.supplyPct, 2)} | ${buyPart}`);
       }
     } else {
       lines.push(`• крупных whale-buy признаков среди top holders пока нет`);
     }
 
     lines.push(``);
-    lines.push(`⚠️ Cross-project overlap показывает текущие ненулевые SPL-балансы кошельков; USDC/USDT/wSOL/common assets отфильтрованы. Для полной истории нужен расширенный индексер.`);
+    lines.push(`⚠️ Пересечение с другими проектами показывает текущие ненулевые SPL-балансы кошельков; USDC/USDT/wSOL/common assets отфильтрованы. Для полной истории нужен расширенный индексер.`);
     return lines.join("\n");
   }
 
@@ -1488,21 +1609,21 @@ Send:
         candidate: payload.analyzed || { token: payload.token }
       });
       if (typeof this.teamWalletIntelligence.buildCompactReport === "function") {
-        return this.teamWalletIntelligence.buildCompactReport(analysis);
+        return this.teamWalletIntelligence.buildCompactReport(analysis, { language: this.runtime?.activeConfig?.language || "ru" });
       }
       return this.buildScanCaTeamIntelBlock(analysis);
     } catch (error) {
       this.logger.log?.("scan ca team intel append failed:", error?.message || String(error));
-      return `🕵️ <b>Team / Insider / Sniper Intel — V13</b>\n⚠️ Team/whale intel unavailable: <code>${escapeHtml(String(error?.message || error).slice(0, 240))}</code>`;
+      return `🕵️ <b>Команда / инсайдеры / снайперы — V15 RU</b>\n⚠️ Блок team/whale intel временно недоступен: <code>${escapeHtml(String(error?.message || error).slice(0, 240))}</code>`;
     }
   }
 
   async buildTeamWalletIntelText(ca) {
     const payload = await this.buildScanCaPayload(ca);
     if (!payload?.token) {
-      return `❌ <b>Team wallet scan</b>
+      return `❌ <b>Скан команды</b>
 
-No Solana pair found for:
+Solana-пара не найдена для:
 <code>${escapeHtml(ca)}</code>`;
     }
 
@@ -1511,13 +1632,13 @@ No Solana pair found for:
       candidate: payload.analyzed || { token: payload.token }
     });
 
-    return this.teamWalletIntelligence.buildReport(analysis);
+    return this.teamWalletIntelligence.buildReport(analysis, { language: this.runtime?.activeConfig?.language || "ru" });
   }
 
   async scanCA(ca, send) {
     const hero = await this.buildScanCaHero(ca);
     if (!hero) {
-      await send.text(`❌ <b>CA scan</b>\n\nNo Solana pair found for:\n<code>${escapeHtml(ca)}</code>`);
+      await send.text(`❌ <b>CA scan</b>\n\nSolana-пара не найдена для:\n<code>${escapeHtml(ca)}</code>`);
       return null;
     }
 
@@ -1537,13 +1658,13 @@ No Solana pair found for:
   async buildScanCaText(ca) {
     const payload = await this.buildScanCaPayload(ca);
     if (!payload?.token) {
-      return `❌ <b>CA scan</b>
+      return `❌ <b>Скан CA</b>
 
-No Solana pair found for:
+Solana-пара не найдена для:
 <code>${escapeHtml(ca)}</code>`;
     }
 
-    const baseReport = this.candidateService.buildAnalysisText(payload.analyzed, payload.plans);
+    const baseReport = this.candidateService.buildAnalysisText(payload.analyzed, payload.plans, { language: this.runtime?.activeConfig?.language || "ru" });
     const teamIntel = await this.buildScanCaTeamIntelText(payload);
     return teamIntel ? `${baseReport}\n\n${teamIntel}` : baseReport;
   }
@@ -1552,12 +1673,12 @@ No Solana pair found for:
     const payload = await this.buildScanCaPayload(ca);
     if (!payload?.token) return null;
 
-    const baseAnalysis = this.candidateService.buildAnalysisText(payload.analyzed, payload.plans);
+    const baseAnalysis = this.candidateService.buildAnalysisText(payload.analyzed, payload.plans, { language: this.runtime?.activeConfig?.language || "ru" });
     const teamIntel = await this.buildScanCaTeamIntelText(payload);
 
     return {
       heroImage: payload.heroImage || this.candidateService.getHeroImage?.(payload.analyzed) || payload.token?.imageUrl || null,
-      caption: this.candidateService.buildHeroCaption(payload.analyzed),
+      caption: this.candidateService.buildHeroCaption(payload.analyzed, { language: this.runtime?.activeConfig?.language || "ru" }),
       analysis: teamIntel ? `${baseAnalysis}\n\n${teamIntel}` : baseAnalysis
     };
   }
@@ -1578,11 +1699,11 @@ No Solana pair found for:
 
     await send.photoOrText(
       result.heroImage,
-      this.candidateService.buildHeroCaption(enrichedCandidate)
+      this.candidateService.buildHeroCaption(enrichedCandidate, { language: this.runtime?.activeConfig?.language || "ru" })
     );
 
     await send.text(
-      this.candidateService.buildAnalysisText(enrichedCandidate, result.plans)
+      this.candidateService.buildAnalysisText(enrichedCandidate, result.plans, { language: this.runtime?.activeConfig?.language || "ru" })
     );
   }
 
