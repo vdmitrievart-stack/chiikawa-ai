@@ -47,6 +47,7 @@ import GMGNOrderStateStore from "../gmgn/gmgn-order-state-store.js";
 import GMGNExecutionService from "../gmgn/gmgn-execution-service.js";
 import GMGNSmartWalletFeed from "./gmgn-smart-wallet-feed.js";
 import DevsNightmareService from "./devsnightmare-service.js";
+import TradeLearningEngine from "./trade-learning-engine.js";
 
 function safeNum(v, fallback = 0) {
   const n = Number(v);
@@ -216,6 +217,10 @@ export default class TradingKernel {
       logger: this.logger
     });
 
+    this.tradeLearningEngine = new TradeLearningEngine({
+      logger: this.logger
+    });
+
     this.teamWalletIntelligence = new TeamWalletIntelligence({
       logger: this.logger,
       rpcUrl: process.env.SOLANA_RPC_URL,
@@ -263,6 +268,7 @@ export default class TradingKernel {
   async initialize() {
     await this.gmgnOrderStore.load();
     await this.devsNightmareService.initialize?.();
+    await this.tradeLearningEngine.initialize?.();
     await this.holderAccumulationEngine.initialize();
     await this.teamWalletIntelligence.initialize();
     await this.restoreIfAvailable();
@@ -382,6 +388,43 @@ export default class TradingKernel {
     return getClosedTrades();
   }
 
+  buildStrategyLearningText() {
+    return this.tradeLearningEngine.buildReport({
+      language: this.runtime?.activeConfig?.language || "ru",
+      verbose: true
+    });
+  }
+
+  getTradeLearningState() {
+    return this.tradeLearningEngine.getState();
+  }
+
+  async recordClosedTradesForLearning(closedRows = [], notificationService = null, meta = {}) {
+    if (!Array.isArray(closedRows) || !closedRows.length || !this.tradeLearningEngine) {
+      return null;
+    }
+
+    const result = await this.tradeLearningEngine.recordClosedTrades(closedRows, {
+      ...meta,
+      runtimeConfig: this.runtime?.activeConfig || {}
+    });
+
+    if (
+      result?.changed &&
+      notificationService &&
+      String(process.env.TRADE_LEARNING_NOTIFY || "true") !== "false" &&
+      this.canEmitNotice("trade-learning:update", 3 * 60 * 1000)
+    ) {
+      await notificationService.sendText(
+        this.tradeLearningEngine.buildUpdateReport(result, {
+          language: this.runtime?.activeConfig?.language || "ru"
+        })
+      );
+    }
+
+    return result;
+  }
+
   setLanguage(lang) {
     this.runtime.activeConfig.language = lang === "en" ? "en" : "ru";
     void this.persistSnapshot();
@@ -438,6 +481,8 @@ export default class TradingKernel {
       this.runtime.activeConfig,
       "KILL_SWITCH"
     );
+
+    await this.recordClosedTradesForLearning(closed, null, { forced: true });
 
     await this.applyPendingIfPossible();
     finishRuntime(this.runtime);
@@ -811,7 +856,7 @@ Corpse: ${safeNum(candidate?.corpse?.score, 0)}
       language: this.runtime?.activeConfig?.language || "ru"
     });
 
-    await this.positionService.updateOpenPositions({
+    const closedRows = await this.positionService.updateOpenPositions({
       runtimeConfig: this.runtime.activeConfig,
       notificationService,
       recentlyTraded: this.recentlyTraded,
@@ -830,6 +875,8 @@ Corpse: ${safeNum(candidate?.corpse?.score, 0)}
         return this.enrichCandidateForCopytrade(baseCandidate);
       }
     });
+
+    await this.recordClosedTradesForLearning(closedRows, notificationService);
 
     if (this.runtime.stopRequested && getPositions().length === 0) {
       await this.applyPendingIfPossible();
@@ -1029,6 +1076,47 @@ ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "
 <b>Причина:</b> ${escapeHtml(copyVerdict.reason || "COPY_BORDERLINE")}
 <b>Детали:</b>
 ${(copyVerdict.reasons || []).map((x) => `• ${escapeHtml(x)}`).join("\n") || "• probe"}`
+          );
+        }
+      }
+
+
+      const learningDecision = this.tradeLearningEngine?.evaluatePlan?.({
+        plan,
+        candidate,
+        runtimeConfig: this.runtime.activeConfig
+      });
+
+      if (learningDecision && learningDecision.allow === false) {
+        if (this.canEmitNotice(`learning:skip:${candidate?.token?.ca || "unknown"}:${plan.strategyKey}`, 20 * 60 * 1000)) {
+          await notificationService.sendText(
+            this.tradeLearningEngine.buildAdjustmentNotice(learningDecision, candidate, plan, {
+              language: this.runtime?.activeConfig?.language || "ru"
+            })
+          );
+        }
+        await this.persistSnapshot();
+        continue;
+      }
+
+      if (learningDecision && learningDecision.action && learningDecision.action !== "none") {
+        const originalMode = plan.entryMode || "SCALED";
+        plan = learningDecision.plan || plan;
+
+        if (this.canEmitNotice(`learning:adjust:${candidate?.token?.ca || "unknown"}:${plan.strategyKey}:${learningDecision.action}`, 20 * 60 * 1000)) {
+          await notificationService.sendText(
+            this.tradeLearningEngine.buildAdjustmentNotice(
+              {
+                ...learningDecision,
+                reasons: [
+                  ...(learningDecision.reasons || []),
+                  `entryMode ${originalMode} -> ${plan.entryMode || originalMode}`
+                ]
+              },
+              candidate,
+              plan,
+              { language: this.runtime?.activeConfig?.language || "ru" }
+            )
           );
         }
       }

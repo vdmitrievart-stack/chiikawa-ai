@@ -71,6 +71,7 @@ export function buildKeyboard(t) {
       [b('📋 Copytrade'), b('🧮 Budget')],
       [b('🛰️ GMGN Status'), b('⚙️ GMGN Execution')],
       [b('📦 GMGN Orders'), b('❤️ Leader Health')],
+      [b('🧠 Strategy Learning'), b('🧾 Strategy Report')],
       [b('🔄 Sync Leaders'), b('🌐 Language')],
       [b('📈 Export CSV'), b('📦 Export JSON')],
       [b('➕ Add Balance'), b('➖ Withdraw Balance')]

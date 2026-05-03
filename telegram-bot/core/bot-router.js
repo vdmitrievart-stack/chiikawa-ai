@@ -126,6 +126,30 @@ function normalizeAction(text) {
   }
 
   if (
+    compact === "/learning" ||
+    compact === "learning" ||
+    compact === "/strategylearning" ||
+    compact === "strategylearning" ||
+    hasAll("strategy", "learning") ||
+    hasAll("trade", "learning") ||
+    hasAll("обуч", "стратег") ||
+    hasAll("память", "сдел")
+  ) {
+    return "strategy_learning";
+  }
+
+  if (
+    compact === "/strategyreport" ||
+    compact === "strategyreport" ||
+    hasAll("strategy", "report") ||
+    hasAll("коррект", "стратег") ||
+    hasAll("отчет", "стратег") ||
+    hasAll("отчёт", "стратег")
+  ) {
+    return "strategy_report";
+  }
+
+  if (
     compact === "/gmgnorders" ||
     compact === "gmgnorders" ||
     hasAll("gmgn", "orders")
@@ -931,6 +955,13 @@ export default class BotRouter {
 
     if (action === "gmgn_orders") {
       await this.sendMessage(chatId, this.kernel.buildGMGNOrdersText(), {
+        reply_markup: this.keyboard()
+      });
+      return;
+    }
+
+    if (action === "strategy_learning" || action === "strategy_report") {
+      await this.sendLongMessage(chatId, this.kernel.buildStrategyLearningText(), {
         reply_markup: this.keyboard()
       });
       return;
